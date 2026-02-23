@@ -2,53 +2,30 @@ name: Build Kai Bubble APK
 
 on:
   push:
-    branches: [ "main" ]
+    branches: ["main"]
 
 jobs:
   build:
     runs-on: ubuntu-latest
-
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
-      - name: Install JDK
-        uses: actions/setup-java@v3
+      - name: Setup Java
+        uses: actions/setup-java@v4
         with:
-          distribution: temurin
+          distribution: 'temurin'
           java-version: '17'
 
-      - name: Create Android Project
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Build Debug APK
         run: |
-          mkdir -p app/src/main/java/com/kai/bubble
-          mkdir -p app/src/main/res/layout
-
-          cat <<EOF > app/src/main/java/com/kai/bubble/MainActivity.java
-          package com.kai.bubble;
-
-          import android.app.Activity;
-          import android.os.Bundle;
-          import android.widget.TextView;
-
-          public class MainActivity extends Activity {
-              @Override
-              protected void onCreate(Bundle savedInstanceState) {
-                  super.onCreate(savedInstanceState);
-
-                  TextView tv = new TextView(this);
-                  tv.setText("Kai OS Online 🚀");
-                  tv.setTextSize(24);
-                  setContentView(tv);
-              }
-          }
-          EOF
-
-      - name: Create Fake APK
-        run: |
-          mkdir build
-          echo "Kai OS APK" > build/kai-bubble.apk
+          chmod +x ./gradlew
+          ./gradlew assembleDebug
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: kai-bubble-apk
-          path: build/kai-bubble.apk
+          path: app/build/outputs/apk/debug/app-debug.apk
