@@ -35,4 +35,4 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: kai-bubble-apk
-          path: kai-app/app/build/outputs/apk/debug/*.apk
+          path: kai-app/app/build/outputs/apk/debug/app-debug.apk
