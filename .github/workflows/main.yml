@@ -1,0 +1,37 @@
+name: Build Kai Bubble APK
+
+on:
+  push:
+    branches: [ "main" ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Setup Java
+        uses: actions/setup-java@v3
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v2
+
+      - name: Create Basic Android Project
+        run: |
+          mkdir app
+          echo "Hello Kai OS" > app/index.html
+
+      - name: Create APK Placeholder
+        run: |
+          mkdir build
+          echo "Kai Bubble APK" > build/kai-bubble.apk
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v3
+        with:
+          name: kai-bubble-apk
+          path: build/kai-bubble.apk
