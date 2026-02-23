@@ -11,24 +11,41 @@ jobs:
     steps:
       - uses: actions/checkout@v3
 
-      - name: Setup Java
+      - name: Install JDK
         uses: actions/setup-java@v3
         with:
-          distribution: 'temurin'
+          distribution: temurin
           java-version: '17'
 
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v2
-
-      - name: Create Basic Android Project
+      - name: Create Android Project
         run: |
-          mkdir app
-          echo "Hello Kai OS" > app/index.html
+          mkdir -p app/src/main/java/com/kai/bubble
+          mkdir -p app/src/main/res/layout
 
-      - name: Create APK Placeholder
+          cat <<EOF > app/src/main/java/com/kai/bubble/MainActivity.java
+          package com.kai.bubble;
+
+          import android.app.Activity;
+          import android.os.Bundle;
+          import android.widget.TextView;
+
+          public class MainActivity extends Activity {
+              @Override
+              protected void onCreate(Bundle savedInstanceState) {
+                  super.onCreate(savedInstanceState);
+
+                  TextView tv = new TextView(this);
+                  tv.setText("Kai OS Online 🚀");
+                  tv.setTextSize(24);
+                  setContentView(tv);
+              }
+          }
+          EOF
+
+      - name: Create Fake APK
         run: |
           mkdir build
-          echo "Kai Bubble APK" > build/kai-bubble.apk
+          echo "Kai OS APK" > build/kai-bubble.apk
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
