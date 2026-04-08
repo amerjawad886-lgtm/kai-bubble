@@ -13,4 +13,7 @@ dependencyResolutionManagement {
   }
 }
 rootProject.name = "kai-bubble"
-include(":app")
+
+// Outer workspace root is intentionally a thin delegator.
+// The active Android project root is `kai-app`.
+includeBuild("kai-app")

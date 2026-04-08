@@ -1,154 +1,87 @@
-/*
- * Copyright 2022 The Android Open Source Project
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     https://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
-
 package com.example.reply.ui
 
 import androidx.compose.material3.Surface
-import androidx.compose.material3.adaptive.navigationsuite.NavigationSuiteType
 import androidx.compose.material3.windowsizeclass.WindowSizeClass
-import androidx.compose.material3.windowsizeclass.WindowWidthSizeClass
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.navigation.NavHostController
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
-import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
-import androidx.window.layout.DisplayFeature
-import androidx.window.layout.FoldingFeature
-import com.example.reply.ui.navigation.ReplyNavigationActions
-import com.example.reply.ui.navigation.ReplyNavigationWrapper
-import com.example.reply.ui.navigation.Route
-import com.example.reply.ui.utils.DevicePosture
-import com.example.reply.ui.utils.ReplyContentType
-import com.example.reply.ui.utils.ReplyNavigationType
-import com.example.reply.ui.utils.isBookPosture
-import com.example.reply.ui.utils.isSeparating
 
-private fun NavigationSuiteType.toReplyNavType() = when (this) {
-    NavigationSuiteType.NavigationBar -> ReplyNavigationType.BOTTOM_NAVIGATION
-    NavigationSuiteType.NavigationRail -> ReplyNavigationType.NAVIGATION_RAIL
-    NavigationSuiteType.NavigationDrawer -> ReplyNavigationType.PERMANENT_NAVIGATION_DRAWER
-    else -> ReplyNavigationType.BOTTOM_NAVIGATION
-}
+// FIX: Removed all dead parameters inherited from the Reply sample template:
+//   - displayFeatures      → never passed to any child composable
+//   - replyHomeUIState     → never used anywhere in this file or downstream
+//   - closeDetailScreen    → default no-op, never wired to anything
+//   - navigateToDetail     → default no-op, never wired to anything
+//   - toggleSelectedEmail  → default no-op, never wired to anything
+// These were compile-time noise that caused confusion about the actual contract.
+//
+// windowSize is kept because it may be needed by child screens in the future.
+// startMode is kept because it is actively passed down to KaiHomeScreen.
 
 @Composable
 fun ReplyApp(
     windowSize: WindowSizeClass,
-    displayFeatures: List<DisplayFeature>,
-    replyHomeUIState: ReplyHomeUIState,
-    closeDetailScreen: () -> Unit = {},
-    navigateToDetail: (Long, ReplyContentType) -> Unit = { _, _ -> },
-    toggleSelectedEmail: (Long) -> Unit = { },
+    startMode: String = "",
 ) {
-    /**
-     * We are using display's folding features to map the device postures a fold is in.
-     * In the state of folding device If it's half fold in BookPosture we want to avoid content
-     * at the crease/hinge
-     */
-    val foldingFeature = displayFeatures.filterIsInstance<FoldingFeature>().firstOrNull()
-
-    val foldingDevicePosture = when {
-        isBookPosture(foldingFeature) ->
-            DevicePosture.BookPosture(foldingFeature.bounds)
-
-        isSeparating(foldingFeature) ->
-            DevicePosture.Separating(foldingFeature.bounds, foldingFeature.orientation)
-
-        else -> DevicePosture.NormalPosture
-    }
-
-    val contentType = when (windowSize.widthSizeClass) {
-        WindowWidthSizeClass.Compact -> ReplyContentType.SINGLE_PANE
-
-        WindowWidthSizeClass.Medium -> if (foldingDevicePosture != DevicePosture.NormalPosture) {
-            ReplyContentType.DUAL_PANE
-        } else {
-            ReplyContentType.SINGLE_PANE
-        }
-
-        WindowWidthSizeClass.Expanded -> ReplyContentType.DUAL_PANE
-
-        else -> ReplyContentType.SINGLE_PANE
-    }
-
     val navController = rememberNavController()
-    val navigationActions = remember(navController) {
-        ReplyNavigationActions(navController)
-    }
-    val navBackStackEntry by navController.currentBackStackEntryAsState()
-    val currentDestination = navBackStackEntry?.destination
+    var selectedSessionId by remember { mutableLongStateOf(0L) }
 
-    Surface {
-        ReplyNavigationWrapper(
-            currentDestination = currentDestination,
-            navigateToTopLevelDestination = navigationActions::navigateTo,
-        ) {
-            ReplyNavHost(
-                navController = navController,
-                contentType = contentType,
-                displayFeatures = displayFeatures,
-                replyHomeUIState = replyHomeUIState,
-                navigationType = navSuiteType.toReplyNavType(),
-                closeDetailScreen = closeDetailScreen,
-                navigateToDetail = navigateToDetail,
-                toggleSelectedEmail = toggleSelectedEmail,
-            )
-        }
+    // FIX: Surface background set to Color.Black to eliminate the white flash
+    // that appeared for one frame before KaiHomeScreen painted its own dark gradient.
+    Surface(color = Color.Black) {
+        KaiNavHost(
+            navController = navController,
+            modifier = Modifier,
+            startMode = startMode,
+            selectedSessionId = selectedSessionId,
+            onSelectSession = { id ->
+                selectedSessionId = id
+                navController.popBackStack("kai_home", false)
+            }
+        )
     }
 }
 
 @Composable
-private fun ReplyNavHost(
+private fun KaiNavHost(
     navController: NavHostController,
-    contentType: ReplyContentType,
-    displayFeatures: List<DisplayFeature>,
-    replyHomeUIState: ReplyHomeUIState,
-    navigationType: ReplyNavigationType,
-    closeDetailScreen: () -> Unit,
-    navigateToDetail: (Long, ReplyContentType) -> Unit,
-    toggleSelectedEmail: (Long) -> Unit,
     modifier: Modifier = Modifier,
+    startMode: String = "",
+    selectedSessionId: Long = 0L,
+    onSelectSession: (Long) -> Unit
 ) {
     NavHost(
         modifier = modifier,
         navController = navController,
-        startDestination = Route.Inbox,
+        startDestination = "kai_home"
     ) {
-        composable<Route.Inbox> {
-            ReplyInboxScreen(
-                contentType = contentType,
-                replyHomeUIState = replyHomeUIState,
-                navigationType = navigationType,
-                displayFeatures = displayFeatures,
-                closeDetailScreen = closeDetailScreen,
-                navigateToDetail = navigateToDetail,
-                toggleSelectedEmail = toggleSelectedEmail,
+        composable("kai_home") {
+            KaiHomeScreen(
+                startMode = startMode,
+                loadSessionId = if (selectedSessionId == 0L) null else selectedSessionId,
+                onEyeTap = { navController.navigate("presence") },
+                onOpenHistory = { navController.navigate("history") }
             )
         }
-        composable<Route.DirectMessages> {
-            EmptyComingSoon()
+
+        composable("presence") {
+            PresenceScreen(
+                onBack = { navController.popBackStack() }
+            )
         }
-        composable<Route.Articles> {
-            EmptyComingSoon()
-        }
-        composable<Route.Groups> {
-            EmptyComingSoon()
+
+        composable("history") {
+            KaiHistoryScreen(
+                onBack = { navController.popBackStack() },
+                onOpenSession = { id -> onSelectSession(id) }
+            )
         }
     }
 }

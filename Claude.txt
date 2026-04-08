@@ -1,0 +1,187 @@
+MICRO ONE-SHOT HANDOFF PASS — no onResume workaround
+Date: 2026-04-07
+
+═══════════════════════════════════════════════════════════════════
+1. EXACT FILES CHANGED
+═══════════════════════════════════════════════════════════════════
+
+  KaiBubbleManager.kt  — one-shot slot + setter + fire-and-clear
+  MainActivity.kt      — register callback in onCreate
+
+
+═══════════════════════════════════════════════════════════════════
+2. EXACT ONE-SHOT CALLBACK WIRING
+═══════════════════════════════════════════════════════════════════
+
+── KaiBubbleManager.kt — new slot and setter (after suppressionCounters) ─
+
+    // One-shot callback registered by MainActivity;
+    // fired exactly once after the first addView succeeds.
+    private var onNextAttach: (() -> Unit)? = null
+
+    fun setOnNextAttach(cb: () -> Unit) {
+        onNextAttach = cb
+    }
+
+── KaiBubbleManager.kt — fire-and-clear in new-view branch of show() ────
+
+  BEFORE:
+                wm.addView(compose, params)
+                bubbleView = compose
+                applyActionUiState()
+                onReady?.invoke()
+            } catch (e: Exception) {
+
+  AFTER:
+                wm.addView(compose, params)
+                bubbleView = compose
+                applyActionUiState()
+                onReady?.invoke()
+                onNextAttach?.invoke()
+                onNextAttach = null
+            } catch (e: Exception) {
+
+  NOT added to the already-showing early-return branch. The
+  "next attach" event has not occurred if the view is already
+  attached; the callback must not fire there.
+
+── MainActivity.kt — register in onCreate, before setContent ────────────
+
+  BEFORE:
+        applyFullScreenBars()
+
+        setContent {
+
+  AFTER:
+        applyFullScreenBars()
+
+        KaiBubbleManager.setOnNextAttach { moveTaskToBack(true) }
+
+        setContent {
+
+
+═══════════════════════════════════════════════════════════════════
+3. WHERE moveTaskToBack(true) NOW RUNS
+═══════════════════════════════════════════════════════════════════
+
+Execution path:
+
+  1. MainActivity.onCreate()
+       KaiBubbleManager.setOnNextAttach { moveTaskToBack(true) }
+       → onNextAttach is stored (main thread, no race).
+
+  2. User taps "Dynamic Island ON" in KaiHomeScreen.
+       KaiBubbleManager.show(context, onReady = {})
+       → main.post { ... } is scheduled.
+
+  3. Inside main.post — new-view branch:
+       BubbleOwner created and brought to RESUMED.
+       ComposeView created with KaiBubbleUI content.
+       wm.addView(compose, params)         ← overlay is attached
+       bubbleView = compose                ← isShowing() = true
+       applyActionUiState()
+       onReady?.invoke()                   ← KaiHomeScreen's {} noop
+       onNextAttach?.invoke()              ← moveTaskToBack(true) fires
+       onNextAttach = null                 ← slot cleared, one-shot done
+
+  4. moveTaskToBack(true) runs:
+       MainActivity moves to background.
+       Home launcher (or previous app) becomes the foreground window.
+       KaiAccessibilityService now sees non-com.example.reply windows.
+       getTargetRoot() returns a real root (not null).
+       captureBestDump() returns a non-empty packageName.
+       Observation succeeds.
+
+
+═══════════════════════════════════════════════════════════════════
+4. WHY THIS IS SAFER THAN onResume + isShowing
+═══════════════════════════════════════════════════════════════════
+
+The reverted Pass 2 approach put moveTaskToBack(true) inside
+onResume() guarded by a didMoveTaskToBack flag. That approach had
+two problems:
+
+  Problem A — timing: onResume fires before setContent and before
+  the composable tree has run. KaiBubbleManager's main.post for
+  addView had not yet executed. isShowing() was false at the guard
+  check, so the guard was irrelevant to overlay readiness.
+
+  Problem B — lifecycle coupling: onResume fires on every resume
+  (rotation, Back press, returning from permission dialog, etc).
+  The didMoveTaskToBack flag partially mitigated this but it
+  persisted across these events, making it harder to reason about.
+
+The current approach:
+
+  - moveTaskToBack fires in exactly one place: the main.post block
+    inside show(), after wm.addView() has returned. This is the
+    first moment it is structurally correct to move to background —
+    the overlay is confirmed attached.
+
+  - The callback is cleared immediately after (onNextAttach = null).
+    No flag, no guard, no lifecycle coupling. Subsequent resumes
+    (rotation, Back, etc.) are completely unaffected.
+
+  - No code runs in onResume(). The existing onResume body is
+    unchanged (applyFullScreenBars only).
+
+  - If the user returns to MainActivity and toggles the bubble
+    again, onNextAttach is null (already cleared). moveTaskToBack
+    does NOT fire again. This is correct: the overlay is already
+    attached; no need to push to background again.
+
+  - The one-shot semantics are enforced by the null assignment, not
+    by a persistent boolean field.
+
+
+═══════════════════════════════════════════════════════════════════
+5. COMPILE RESULT
+═══════════════════════════════════════════════════════════════════
+
+BUILD SUCCESSFUL in 44s
+7 actionable tasks: 7 executed
+
+Only pre-existing deprecation warnings (WindowSizeClass,
+statusBarColor). No errors.
+
+
+═══════════════════════════════════════════════════════════════════
+6. REMAINING RISKS — HONEST ASSESSMENT
+═══════════════════════════════════════════════════════════════════
+
+RISK 1 — Activity recreation clears and re-registers the callback.
+  If MainActivity is recreated (rotation, process death), onCreate
+  fires again and re-registers the callback. At that point:
+  - If the bubble is already showing: the re-registered callback
+    will NOT fire (already-showing branch in show() does not invoke
+    onNextAttach). The slot sits at the registered callback until
+    the next new-view branch. If the user then hides and re-shows
+    the bubble, moveTaskToBack fires again. Acceptable but
+    observable: the activity goes to background a second time.
+  - Mitigation if needed: check isShowing() inside setOnNextAttach
+    and skip registration when already attached.
+
+RISK 2 — moveTaskToBack before Compose first frame.
+  onNextAttach fires synchronously inside main.post after addView.
+  Compose has not yet rendered its first frame at this point (the
+  frame is scheduled by the Choreographer on the next vsync).
+  moveTaskToBack is called before the bubble UI is visually
+  present. The window IS attached (addView returned), so the
+  overlay will render in the next frame even with the activity in
+  the background. In practice this should be invisible to the user.
+  On-device verification is needed to confirm no visual glitch.
+
+RISK 3 — moveTaskToBack behavior depends on task state.
+  moveTaskToBack(true) moves the task regardless of history.
+  If the user launched Kai from another app (startActivity from a
+  third-party), moveTaskToBack moves the Kai task to the back,
+  potentially revealing an unexpected app. This is the same risk
+  as the reverted Pass 2 approach. No mitigation added here.
+
+RISK 4 — Root cause fix is still unverified on device.
+  The full chain (overlay attach → moveTaskToBack → launcher
+  visible → getTargetRoot returns non-null → captureBestDump
+  returns valid packageName → observation succeeds) has been
+  confirmed structurally in code but not verified via on-device
+  logcat. The AccessibilityService window enumeration behavior
+  may differ from the structural analysis.

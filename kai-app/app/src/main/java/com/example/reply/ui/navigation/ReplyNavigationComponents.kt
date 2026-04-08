@@ -286,7 +286,7 @@ fun PermanentNavigationDrawerContent(
                         color = MaterialTheme.colorScheme.primary,
                     )
                     ExtendedFloatingActionButton(
-                        onClick = { /*TODO*/ },
+                        onClick = { },
                         modifier = Modifier
                             .fillMaxWidth()
                             .padding(top = 8.dp, bottom = 40.dp),
@@ -382,7 +382,7 @@ fun ModalNavigationDrawerContent(
                     }
 
                     ExtendedFloatingActionButton(
-                        onClick = { /*TODO*/ },
+                        onClick = { },
                         modifier = Modifier
                             .fillMaxWidth()
                             .padding(top = 8.dp, bottom = 40.dp),

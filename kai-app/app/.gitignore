@@ -1,1 +1,23 @@
-/build
+# ========================
+# Android Secrets
+# ========================
+local.properties
+**/local.properties
+
+# ========================
+# Gradle
+# ========================
+.gradle/
+build/
+
+# ========================
+# Android Studio / VSCode
+# ========================
+.idea/
+*.iml
+
+# ========================
+# Keystores
+# ========================
+*.jks
+*.keystore

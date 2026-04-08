@@ -113,7 +113,7 @@ fun ReplyEmailListItem(
                     )
                 }
                 IconButton(
-                    onClick = { /*TODO*/ },
+                    onClick = { },
                     modifier = Modifier
                         .clip(CircleShape)
                         .background(MaterialTheme.colorScheme.surfaceContainerHigh),

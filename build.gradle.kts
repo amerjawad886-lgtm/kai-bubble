@@ -1,4 +1,2 @@
-plugins {
-  id("com.android.application") version "8.5.2" apply false
-  id("org.jetbrains.kotlin.android") version "1.9.24" apply false
-}
+// Outer workspace root intentionally has no Android build logic.
+// Use `kai-app` as the active Gradle/Android project root.

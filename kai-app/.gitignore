@@ -14,3 +14,17 @@
 .cxx
 local.properties
 .kotlin/
+
+# Local generated diagnostics / artifacts
+*.apk
+*.ap_
+*.aab
+build.txt
+build_fix.txt
+build_log.txt
+build_semantic.txt
+buildlog.txt
+clean_build.txt
+deps.txt
+errors.txt
+merge_dex.txt

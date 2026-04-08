@@ -1,21 +1,5 @@
-/*
- * Copyright 2022 The Android Open Source Project
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     https://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
-
-
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+import java.io.File
 
 plugins {
     alias(libs.plugins.android.application)
@@ -35,15 +19,41 @@ android {
         versionName = "1.0"
         vectorDrawables.useSupportLibrary = true
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
+        ndk {
+            abiFilters += listOf("arm64-v8a")
+        }
+
+        val openAiKey =
+            (project.findProperty("OPENAI_API_KEY") as String?)
+                ?.trim()
+                .orEmpty()
+                .ifBlank { System.getenv("OPENAI_API_KEY")?.trim().orEmpty() }
+
+        buildConfigField("String", "OPENAI_API_KEY", "\"$openAiKey\"")
+
+        val supabaseUrl =
+            (project.findProperty("SUPABASE_URL") as String?)
+                ?.trim()
+                .orEmpty()
+                .ifBlank { System.getenv("SUPABASE_URL")?.trim().orEmpty() }
+
+        val supabaseAnonKey =
+            (project.findProperty("SUPABASE_ANON_KEY") as String?)
+                ?.trim()
+                .orEmpty()
+                .ifBlank { System.getenv("SUPABASE_ANON_KEY")?.trim().orEmpty() }
+
+        buildConfigField("String", "SUPABASE_URL", "\"$supabaseUrl\"")
+        buildConfigField("String", "SUPABASE_ANON_KEY", "\"$supabaseAnonKey\"")
     }
 
     signingConfigs {
-        // Important: change the keystore for a production deployment
         val userKeystore = File(System.getProperty("user.home"), ".android/debug.keystore")
         val localKeystore = rootProject.file("debug_2.keystore")
         val hasKeyInfo = userKeystore.exists()
+
         create("release") {
-            // get from env variables
             storeFile = if (hasKeyInfo) userKeystore else localKeystore
             storePassword = if (hasKeyInfo) "android" else System.getenv("compose_store_password")
             keyAlias = if (hasKeyInfo) "androiddebugkey" else System.getenv("compose_key_alias")
@@ -52,9 +62,7 @@ android {
     }
 
     buildTypes {
-        getByName("debug") {
-        }
-
+        getByName("debug") {}
         getByName("release") {
             isMinifyEnabled = true
             signingConfig = signingConfigs.getByName("release")
@@ -72,30 +80,38 @@ android {
         }
     }
 
-    // Tests can be Robolectric or instrumented tests
     sourceSets {
         val sharedTestDir = "src/sharedTest/java"
-        getByName("test") {
-            java.srcDir(sharedTestDir)
-        }
-        getByName("androidTest") {
-            java.srcDir(sharedTestDir)
-        }
+        getByName("test") { java.directories.add(sharedTestDir) }
+        getByName("androidTest") { java.directories.add(sharedTestDir) }
     }
 
     compileOptions {
-        sourceCompatibility = JavaVersion.VERSION_17
-        targetCompatibility = JavaVersion.VERSION_17
+        sourceCompatibility = JavaVersion.VERSION_21
+        targetCompatibility = JavaVersion.VERSION_21
     }
 
     kotlin {
         compilerOptions {
-            jvmTarget = JvmTarget.fromTarget("17")
+            jvmTarget = JvmTarget.fromTarget("21")
         }
     }
 
     buildFeatures {
         compose = true
+        buildConfig = true
+    }
+
+    packaging {
+        jniLibs {
+            useLegacyPackaging = true
+        }
+        resources {
+            excludes += setOf(
+                "META-INF/AL2.0",
+                "META-INF/LGPL2.1",
+            )
+        }
     }
 }
 
@@ -109,14 +125,18 @@ dependencies {
     implementation(libs.kotlinx.coroutines.android)
     implementation(libs.kotlinx.serialization.json)
 
+    implementation(libs.android.material3)
+    implementation(libs.androidx.appcompat)
+    implementation(libs.androidx.core.splashscreen)
+
     implementation(libs.androidx.compose.ui.tooling.preview)
     debugImplementation(libs.androidx.compose.ui.tooling)
 
     implementation(libs.androidx.compose.material3)
     implementation(libs.androidx.compose.material3.adaptive.navigationSuite)
-    implementation("com.google.accompanist:accompanist-adaptive:0.26.2-beta")
-
+    implementation(libs.accompanist.adaptive)
     implementation(libs.androidx.compose.materialWindow)
+    implementation(libs.androidx.compose.material.iconsExtended)
 
     implementation(libs.androidx.lifecycle.runtime)
     implementation(libs.androidx.lifecycle.viewModelCompose)
@@ -125,6 +145,16 @@ dependencies {
 
     implementation(libs.androidx.activity.compose)
     implementation(libs.androidx.window)
+
+    implementation(libs.androidx.camera.core)
+    implementation(libs.androidx.camera.camera2)
+    implementation(libs.androidx.camera.lifecycle)
+    implementation(libs.androidx.camera.view)
+
+    implementation("androidx.compose.material:material-icons-core")
+
+    implementation(libs.okhttp3)
+    implementation("org.json:json:20240303")
 
     androidTestImplementation(libs.junit)
     androidTestImplementation(libs.androidx.test.core)

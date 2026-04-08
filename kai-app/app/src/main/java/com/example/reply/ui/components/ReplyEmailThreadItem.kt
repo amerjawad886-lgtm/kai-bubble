@@ -75,7 +75,7 @@ fun ReplyEmailThreadItem(email: Email, modifier: Modifier = Modifier) {
                     )
                 }
                 IconButton(
-                    onClick = { /*TODO*/ },
+                    onClick = { },
                     modifier = Modifier
                         .clip(CircleShape)
                         .background(MaterialTheme.colorScheme.surfaceContainer),
@@ -107,7 +107,7 @@ fun ReplyEmailThreadItem(email: Email, modifier: Modifier = Modifier) {
                 horizontalArrangement = Arrangement.spacedBy(12.dp),
             ) {
                 Button(
-                    onClick = { /*TODO*/ },
+                    onClick = { },
                     modifier = Modifier.weight(1f),
                     colors = ButtonDefaults.buttonColors(
                         containerColor = MaterialTheme.colorScheme.surfaceBright,
@@ -119,7 +119,7 @@ fun ReplyEmailThreadItem(email: Email, modifier: Modifier = Modifier) {
                     )
                 }
                 Button(
-                    onClick = { /*TODO*/ },
+                    onClick = { },
                     modifier = Modifier.weight(1f),
                     colors = ButtonDefaults.buttonColors(
                         containerColor = MaterialTheme.colorScheme.surfaceBright,

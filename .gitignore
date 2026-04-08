@@ -1,0 +1,36 @@
+# =========================
+# Secrets (VERY IMPORTANT)
+# =========================
+local.properties
+**/local.properties
+
+# =========================
+# Gradle
+# =========================
+.gradle/
+build/
+
+# =========================
+# IDE files
+# =========================
+.idea/
+*.iml
+
+# =========================
+# OS files
+# =========================
+.DS_Store
+
+# Local generated diagnostics
+buildlog.txt
+*.apk
+*.ap_
+*.aab
+build.txt
+build_fix.txt
+build_log.txt
+build_semantic.txt
+clean_build.txt
+deps.txt
+errors.txt
+merge_dex.txt

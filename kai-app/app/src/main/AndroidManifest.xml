@@ -1,38 +1,73 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!--
-  Copyright 2022 The Android Open Source Project
-  Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except
-  in compliance with the License. You may obtain a copy of the License at
-  http://www.apache.org/licenses/LICENSE-2.0
-  Unless required by applicable law or agreed to in writing, software distributed under the License
-  is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express
-  or implied. See the License for the specific language governing permissions and limitations under
-  the License.
-  -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
+
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+
+    <uses-permission
+        android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE"
+        tools:targetApi="34" />
+
+    <uses-permission
+        android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE"
+        tools:targetApi="34" />
+
+    <uses-permission
+        android:name="android.permission.POST_NOTIFICATIONS"
+        tools:targetApi="33" />
+
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
 
     <application
         android:allowBackup="true"
         android:icon="@mipmap/ic_launcher"
-        android:label="@string/app_name"
         android:roundIcon="@mipmap/ic_launcher_round"
+        android:label="@string/app_name"
         android:supportsRtl="true"
         android:theme="@style/Theme.Reply"
         android:enableOnBackInvokedCallback="true"
         tools:targetApi="31">
+
         <activity
             android:name=".ui.MainActivity"
             android:exported="true"
             android:label="@string/app_name"
-            android:theme="@style/Theme.Reply"
+            android:theme="@style/Theme.Reply.Splash"
             android:windowSoftInputMode="adjustResize">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
-
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
-    </application>
 
+        <activity
+            android:name=".ui.AssistActivity"
+            android:exported="false"
+            android:theme="@style/Theme.Reply.Splash"
+            android:excludeFromRecents="true"
+            android:finishOnTaskLaunch="true" />
+
+        <service
+            android:name=".ui.KaiService"
+            android:exported="false"
+            android:foregroundServiceType="microphone"
+            tools:targetApi="34" />
+
+        <service
+            android:name=".ui.KaiAccessibilityService"
+            android:exported="false"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/kai_accessibility_service" />
+        </service>
+    </application>
 </manifest>

@@ -115,7 +115,7 @@ fun ReplyInboxScreen(
                     icon = {
                         Icon(painter = painterResource(id = R.drawable.ic_edit), contentDescription = stringResource(id = R.string.compose))
                     },
-                    onClick = { /*TODO*/ },
+                    onClick = { },
                     modifier = Modifier
                         .align(Alignment.BottomEnd)
                         .padding(16.dp),

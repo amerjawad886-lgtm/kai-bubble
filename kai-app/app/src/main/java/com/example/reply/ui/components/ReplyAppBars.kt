@@ -215,7 +215,7 @@ fun EmailDetailAppBar(email: Email, isFullScreen: Boolean, modifier: Modifier = 
         },
         actions = {
             IconButton(
-                onClick = { /*TODO*/ },
+                onClick = { },
             ) {
                 Icon(
                     painter = painterResource(id = R.drawable.ic_more_vert),

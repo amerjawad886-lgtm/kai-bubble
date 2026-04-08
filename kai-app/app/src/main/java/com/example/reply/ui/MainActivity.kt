@@ -1,134 +1,132 @@
-/*
- * Copyright 2022 The Android Open Source Project
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     https://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
-
 package com.example.reply.ui
 
+import android.Manifest
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.graphics.Color
 import android.os.Bundle
+import android.view.View
+import android.view.ViewGroup
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
-import androidx.activity.enableEdgeToEdge
-import androidx.activity.viewModels
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.material3.windowsizeclass.ExperimentalMaterial3WindowSizeClassApi
-import androidx.compose.material3.windowsizeclass.WindowSizeClass
 import androidx.compose.material3.windowsizeclass.calculateWindowSizeClass
-import androidx.compose.runtime.Composable
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.ui.tooling.preview.Preview
-import androidx.compose.ui.unit.DpSize
-import androidx.compose.ui.unit.dp
-import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import com.example.reply.data.local.LocalEmailsDataProvider
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.platform.LocalView
+import androidx.core.content.ContextCompat
+import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import com.example.reply.ui.theme.ContrastAwareReplyTheme
-import com.google.accompanist.adaptive.calculateDisplayFeatures
 
 class MainActivity : ComponentActivity() {
 
-    private val viewModel: ReplyHomeViewModel by viewModels()
+    private val micPermission = registerForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { }
+
+    private var modeState by mutableStateOf("")
 
     @OptIn(ExperimentalMaterial3WindowSizeClassApi::class)
     override fun onCreate(savedInstanceState: Bundle?) {
-        enableEdgeToEdge()
+        installSplashScreen()
         super.onCreate(savedInstanceState)
 
-        setContent {
-            ContrastAwareReplyTheme {
-                val windowSize = calculateWindowSizeClass(this)
-                val displayFeatures = calculateDisplayFeatures(this)
-                val uiState by viewModel.uiState.collectAsStateWithLifecycle()
+        val granted =
+            ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) ==
+                PackageManager.PERMISSION_GRANTED
 
+        if (!granted) {
+            micPermission.launch(Manifest.permission.RECORD_AUDIO)
+        }
+
+        modeState = extractMode(intent)
+
+        applyFullScreenBars()
+
+        setContent {
+            val view = LocalView.current
+            val windowSize = calculateWindowSizeClass(this)
+
+            SideEffect {
+                applyFullScreenBars(view)
+                disableViewClickSounds(view)
+            }
+
+            ContrastAwareReplyTheme {
                 ReplyApp(
                     windowSize = windowSize,
-                    displayFeatures = displayFeatures,
-                    replyHomeUIState = uiState,
-                    closeDetailScreen = {
-                        viewModel.closeDetailScreen()
-                    },
-                    navigateToDetail = { emailId, pane ->
-                        viewModel.setOpenedEmail(emailId, pane)
-                    },
-                    toggleSelectedEmail = { emailId ->
-                        viewModel.toggleSelectedEmail(emailId)
-                    },
+                    startMode = modeState
                 )
             }
         }
     }
-}
 
-@OptIn(ExperimentalMaterial3WindowSizeClassApi::class)
-@Preview(showBackground = true)
-@Composable
-fun ReplyAppPreview() {
-    ContrastAwareReplyTheme {
-        ReplyApp(
-            replyHomeUIState = ReplyHomeUIState(emails = LocalEmailsDataProvider.allEmails),
-            windowSize = WindowSizeClass.calculateFromSize(DpSize(400.dp, 900.dp)),
-            displayFeatures = emptyList(),
-        )
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        modeState = extractMode(intent)
+        applyFullScreenBars()
     }
-}
 
-@OptIn(ExperimentalMaterial3WindowSizeClassApi::class)
-@Preview(showBackground = true, widthDp = 700, heightDp = 500)
-@Composable
-fun ReplyAppPreviewTablet() {
-    ContrastAwareReplyTheme {
-        ReplyApp(
-            replyHomeUIState = ReplyHomeUIState(emails = LocalEmailsDataProvider.allEmails),
-            windowSize = WindowSizeClass.calculateFromSize(DpSize(700.dp, 500.dp)),
-            displayFeatures = emptyList(),
-        )
+    override fun onResume() {
+        super.onResume()
+        applyFullScreenBars()
     }
-}
 
-@OptIn(ExperimentalMaterial3WindowSizeClassApi::class)
-@Preview(showBackground = true, widthDp = 500, heightDp = 700)
-@Composable
-fun ReplyAppPreviewTabletPortrait() {
-    ContrastAwareReplyTheme {
-        ReplyApp(
-            replyHomeUIState = ReplyHomeUIState(emails = LocalEmailsDataProvider.allEmails),
-            windowSize = WindowSizeClass.calculateFromSize(DpSize(500.dp, 700.dp)),
-            displayFeatures = emptyList(),
-        )
+    private fun extractMode(intent: Intent?): String {
+        return intent?.getStringExtra("kai_mode")?.trim().orEmpty()
     }
-}
 
-@OptIn(ExperimentalMaterial3WindowSizeClassApi::class)
-@Preview(showBackground = true, widthDp = 1100, heightDp = 600)
-@Composable
-fun ReplyAppPreviewDesktop() {
-    ContrastAwareReplyTheme {
-        ReplyApp(
-            replyHomeUIState = ReplyHomeUIState(emails = LocalEmailsDataProvider.allEmails),
-            windowSize = WindowSizeClass.calculateFromSize(DpSize(1100.dp, 600.dp)),
-            displayFeatures = emptyList(),
-        )
+    private fun applyFullScreenBars(viewOverride: View? = null) {
+        WindowCompat.setDecorFitsSystemWindows(window, false)
+
+        window.statusBarColor = Color.TRANSPARENT
+        window.navigationBarColor = Color.TRANSPARENT
+        window.isStatusBarContrastEnforced = false
+        window.isNavigationBarContrastEnforced = false
+
+        val v = viewOverride ?: window.decorView
+
+        WindowInsetsControllerCompat(window, v).apply {
+            hide(WindowInsetsCompat.Type.statusBars())
+            hide(WindowInsetsCompat.Type.navigationBars())
+            systemBarsBehavior =
+                WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            isAppearanceLightStatusBars = false
+            isAppearanceLightNavigationBars = false
+        }
+
+        disableViewClickSounds(v)
     }
-}
 
-@OptIn(ExperimentalMaterial3WindowSizeClassApi::class)
-@Preview(showBackground = true, widthDp = 600, heightDp = 1100)
-@Composable
-fun ReplyAppPreviewDesktopPortrait() {
-    ContrastAwareReplyTheme {
-        ReplyApp(
-            replyHomeUIState = ReplyHomeUIState(emails = LocalEmailsDataProvider.allEmails),
-            windowSize = WindowSizeClass.calculateFromSize(DpSize(600.dp, 1100.dp)),
-            displayFeatures = emptyList(),
-        )
+    private fun disableViewClickSounds(view: View?) {
+        try {
+            if (view == null) return
+            view.isSoundEffectsEnabled = false
+            view.rootView?.isSoundEffectsEnabled = false
+            window.decorView.isSoundEffectsEnabled = false
+            window.decorView.rootView?.isSoundEffectsEnabled = false
+            disableRecursively(window.decorView)
+        } catch (_: Exception) {
+        }
+    }
+
+    private fun disableRecursively(view: View?) {
+        if (view == null) return
+        try {
+            view.isSoundEffectsEnabled = false
+        } catch (_: Exception) {
+        }
+        if (view is ViewGroup) {
+            for (i in 0 until view.childCount) {
+                disableRecursively(view.getChildAt(i))
+            }
+        }
     }
 }
