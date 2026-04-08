@@ -94,6 +94,13 @@ object KaiAgentController {
 
     fun getLatestObservation(): KaiObservation = latestObservation
 
+    /**
+     * Returns the last observation that carried a non-blank package name and a non-empty dump.
+     * This survives [resetTransientStateForNewRun] and is used by [KaiActionExecutor] as a
+     * recovery source when [latestObservation] is transiently blank at the start of a new run.
+     */
+    fun getLatestAuthoritativeObservation(): KaiObservation = latestAuthoritativeObservation
+
     fun getLatestScreenState(): KaiScreenState {
         val obs = getLatestObservation()
         return KaiScreenStateParser.fromDump(obs.packageName, obs.screenPreview)

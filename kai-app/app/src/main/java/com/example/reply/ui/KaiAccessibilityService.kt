@@ -320,6 +320,9 @@ class KaiAccessibilityService : AccessibilityService() {
         lastDeliveredFingerprint = ""
         dumpGeneration++
         dumpInProgress = false
+        // Reset the dump debounce timestamp so the first CMD_DUMP of a new run is never
+        // silently dropped by the 180 ms guard that was left over from the previous run.
+        lastDumpAt = 0L
     }
 
     private fun norm(text: String): String =

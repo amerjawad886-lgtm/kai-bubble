@@ -27,11 +27,19 @@ class KaiAgentLoopEngine(
     fun isRunning(): Boolean = runJob?.isActive == true
 
     fun cancel() {
+        // Capture active state before cancelling so that finishActionLoopSession is only called
+        // when there is a real in-flight run to tear down.  When start() calls cancel() as a
+        // pre-start eviction on a freshly created engine (runJob == null), we must not fire
+        // finishActionLoopSession — that would clear the actionLoopActive flag that
+        // KaiAgentController.startUnifiedActionLoop() just set to true.
+        val wasActive = runJob?.isActive == true
         runJob?.cancel()
         runJob = null
         KaiBubbleManager.releaseAllSuppression()
         KaiBubbleManager.softResetUiState()
-        KaiAgentController.finishActionLoopSession()
+        if (wasActive) {
+            KaiAgentController.finishActionLoopSession()
+        }
     }
 
     fun destroy() {

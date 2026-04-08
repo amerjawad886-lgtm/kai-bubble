@@ -1044,7 +1044,38 @@ class KaiActionExecutor(
     }
 
     suspend fun requestFreshScreen(timeoutMs: Long = 2500L, expectedPackage: String = ""): KaiScreenState {
-        return requestFreshScreenImpl(timeoutMs, expectedPackage)
+        val result = requestFreshScreenImpl(timeoutMs, expectedPackage)
+
+        // Recovery: requestFreshScreenImpl may return a blank-package state when the accessibility
+        // service temporarily reports no package (transient blank during app transitions, or when
+        // the first dump of a new run races with the service's own reset).  Before propagating
+        // that blank upstream — which causes observation gates to fail with "missing_package" and
+        // the authoritative-readiness handshake to abort the entire run — attempt to recover
+        // from the last authoritative observation that survived the run-boundary reset.
+        if (result.packageName.isBlank()) {
+            val authoritative = KaiAgentController.getLatestAuthoritativeObservation()
+            if (authoritative.packageName.isNotBlank()) {
+                onLog("requestFreshScreen: blank-package result recovered via authoritative observation (${authoritative.packageName})")
+                val recovered = KaiScreenStateParser.fromDump(
+                    authoritative.packageName,
+                    authoritative.screenPreview
+                )
+                updateRefreshMeta(
+                    state = recovered,
+                    usable = false,
+                    fallback = true,
+                    weak = true,
+                    previousFingerprint = lastAcceptedFingerprint.ifBlank {
+                        fingerprintFor(recovered.packageName, recovered.rawDump)
+                    },
+                    observationUpdatedAt = authoritative.updatedAt,
+                    reusedLastGood = true
+                )
+                return recovered
+            }
+        }
+
+        return result
     }
 
     internal fun markActionProgress(
