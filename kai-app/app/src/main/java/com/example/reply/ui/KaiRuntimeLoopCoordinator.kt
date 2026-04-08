@@ -70,12 +70,14 @@ object KaiRuntimeLoopCoordinator {
     }
 
     fun cancelLoop(engine: KaiAgentLoopEngine?) {
+        // KaiAgentLoopEngine is the single owner of action-loop lifecycle cleanup.
+        // engine.cancel() handles BubbleManager suppression release, UI state reset, and
+        // finishActionLoopSession.  Do not duplicate those calls here — doing so causes
+        // finishActionLoopSession to fire twice, which races with voice/talk callbacks that
+        // read snapshot.actionLoopActive between the two calls.
         try {
             engine?.cancel()
         } catch (_: Exception) {
         }
-        KaiBubbleManager.releaseAllSuppression()
-        KaiBubbleManager.softResetUiState()
-        KaiAgentController.finishActionLoopSession("Agent loop cancelled")
     }
 }

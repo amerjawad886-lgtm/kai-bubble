@@ -1044,7 +1044,46 @@ class KaiActionExecutor(
     }
 
     suspend fun requestFreshScreen(timeoutMs: Long = 2500L, expectedPackage: String = ""): KaiScreenState {
-        return requestFreshScreenImpl(timeoutMs, expectedPackage)
+        val result = requestFreshScreenImpl(timeoutMs, expectedPackage)
+
+        // Safety net: requestFreshScreenImpl may still return a blank-package state in
+        // genuinely blank cases (true no-active-window from the accessibility service).
+        // When that happens, attempt to recover from the last authoritative observation
+        // so that observation gates fail with "fallback_observation" / "reused_last_good"
+        // (retryable) rather than the hard "missing_package" that aborts the entire run.
+        //
+        // The core fix (KaiAgentController.updateObservation now stores effectivePackage in
+        // latestObservation) eliminates the common transient-blank trigger for this path.
+        // This guard handles the residual genuinely-blank edge case.
+        //
+        // Staleness bound: do not use authoritative data older than 30 s — this prevents
+        // reusing a prior run's screen context when the user starts run 2 well after run 1.
+        if (result.packageName.isBlank()) {
+            val authoritative = KaiAgentController.getLatestAuthoritativeObservation()
+            val authAgeMs = System.currentTimeMillis() - authoritative.updatedAt
+            if (authoritative.packageName.isNotBlank() && authAgeMs <= 30_000L) {
+                onLog("requestFreshScreen: blank-package result recovered via authoritative observation " +
+                    "(${authoritative.packageName}, age=${authAgeMs}ms)")
+                val recovered = KaiScreenStateParser.fromDump(
+                    authoritative.packageName,
+                    authoritative.screenPreview
+                )
+                updateRefreshMeta(
+                    state = recovered,
+                    usable = false,
+                    fallback = true,
+                    weak = true,
+                    previousFingerprint = lastAcceptedFingerprint.ifBlank {
+                        fingerprintFor(recovered.packageName, recovered.rawDump)
+                    },
+                    observationUpdatedAt = authoritative.updatedAt,
+                    reusedLastGood = true
+                )
+                return recovered
+            }
+        }
+
+        return result
     }
 
     internal fun markActionProgress(
