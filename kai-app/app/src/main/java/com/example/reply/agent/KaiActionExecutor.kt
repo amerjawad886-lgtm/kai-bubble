@@ -1046,16 +1046,24 @@ class KaiActionExecutor(
     suspend fun requestFreshScreen(timeoutMs: Long = 2500L, expectedPackage: String = ""): KaiScreenState {
         val result = requestFreshScreenImpl(timeoutMs, expectedPackage)
 
-        // Recovery: requestFreshScreenImpl may return a blank-package state when the accessibility
-        // service temporarily reports no package (transient blank during app transitions, or when
-        // the first dump of a new run races with the service's own reset).  Before propagating
-        // that blank upstream — which causes observation gates to fail with "missing_package" and
-        // the authoritative-readiness handshake to abort the entire run — attempt to recover
-        // from the last authoritative observation that survived the run-boundary reset.
+        // Safety net: requestFreshScreenImpl may still return a blank-package state in
+        // genuinely blank cases (true no-active-window from the accessibility service).
+        // When that happens, attempt to recover from the last authoritative observation
+        // so that observation gates fail with "fallback_observation" / "reused_last_good"
+        // (retryable) rather than the hard "missing_package" that aborts the entire run.
+        //
+        // The core fix (KaiAgentController.updateObservation now stores effectivePackage in
+        // latestObservation) eliminates the common transient-blank trigger for this path.
+        // This guard handles the residual genuinely-blank edge case.
+        //
+        // Staleness bound: do not use authoritative data older than 30 s — this prevents
+        // reusing a prior run's screen context when the user starts run 2 well after run 1.
         if (result.packageName.isBlank()) {
             val authoritative = KaiAgentController.getLatestAuthoritativeObservation()
-            if (authoritative.packageName.isNotBlank()) {
-                onLog("requestFreshScreen: blank-package result recovered via authoritative observation (${authoritative.packageName})")
+            val authAgeMs = System.currentTimeMillis() - authoritative.updatedAt
+            if (authoritative.packageName.isNotBlank() && authAgeMs <= 30_000L) {
+                onLog("requestFreshScreen: blank-package result recovered via authoritative observation " +
+                    "(${authoritative.packageName}, age=${authAgeMs}ms)")
                 val recovered = KaiScreenStateParser.fromDump(
                     authoritative.packageName,
                     authoritative.screenPreview

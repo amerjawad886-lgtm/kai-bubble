@@ -213,8 +213,15 @@ object KaiAgentController {
             packageName
         }
 
+        // Store effectivePackage (never spuriously blank during transient blanks) so that
+        // latestObservation.packageName is a reliable signal for the requestFreshScreenImpl
+        // polling loop and for the final blank-package fallback path.  Previously this stored
+        // the raw packageName (possibly blank), which caused the polling loop to return a
+        // blank-package KaiScreenState even when the accessibility service was merely in a
+        // transient-blank phase between app transitions — leading to the second-run
+        // "refresh_failed_no_observation_arrived: packageName is blank in final fallback" failure.
         val rawObservation = KaiObservation(
-            packageName = packageName,
+            packageName = effectivePackage,
             screenPreview = screenPreview,
             elements = elements,
             screenKind = screenKind,
@@ -224,8 +231,12 @@ object KaiAgentController {
 
         latestObservation = rawObservation
 
+        // An observation is authoritative when its effective package is non-blank and the
+        // dump is not a sentinel value.  Using effectivePackage (not the raw packageName)
+        // means transient-blank observations with valid content now correctly refresh the
+        // authoritative observation rather than being silently discarded.
         val isAuthoritative =
-            packageName.isNotBlank() &&
+            effectivePackage.isNotBlank() &&
                 normalizedDump.isNotBlank() &&
                 normalizedDump != KaiScreenStateParser.normalize("(no active window)") &&
                 normalizedDump != KaiScreenStateParser.normalize("(empty dump)")
@@ -233,14 +244,9 @@ object KaiAgentController {
             latestAuthoritativeObservation = rawObservation
         }
 
-        val obsForMemory = if (effectivePackage == packageName) {
-            rawObservation
-        } else {
-            rawObservation.copy(packageName = effectivePackage)
-        }
-
+        // rawObservation.packageName is already effectivePackage, so no copy is needed.
         synchronized(memory) {
-            memory.addLast(obsForMemory)
+            memory.addLast(rawObservation)
             while (memory.size > MAX_MEMORY) {
                 memory.removeFirst()
             }
