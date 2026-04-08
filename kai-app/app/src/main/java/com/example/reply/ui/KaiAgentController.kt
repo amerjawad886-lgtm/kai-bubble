@@ -295,10 +295,15 @@ object KaiAgentController {
 
     fun resetTransientStateForNewRun() {
         // Idempotent runtime reset: clears transient loop/observation residue only.
+        // Both observations are reset with updatedAt=0L so any fresh dump from the
+        // accessibility service (which always has updatedAt > 0) is guaranteed to be
+        // recognised as newer by the requestFreshScreen polling loop on run 2.
         synchronized(memory) {
             memory.clear()
         }
-        latestObservation = KaiObservation("", "")
+        val blankObs = KaiObservation("", "", updatedAt = 0L)
+        latestObservation = blankObs
+        latestAuthoritativeObservation = blankObs
         insightBusy = false
         lastInsightAt = 0L
 
@@ -429,8 +434,7 @@ object KaiAgentController {
         }
 
         val appHint = inferPrimaryAppHint(effectivePrompt)
-        val goalStages = KaiGoalInterpreter.inferStages(effectivePrompt, appHint)
-        val isMultiStepGoal = goalStages.size > 3
+        val isMultiStepGoal = KaiTaskStageEngine.classifyGoalMode(effectivePrompt) == KaiTaskStageEngine.GoalMode.MULTI_STAGE
         val stageSnapshot = KaiTaskStageEngine.evaluate(
             userPrompt = effectivePrompt,
             currentState = currentScreenState
@@ -471,9 +475,6 @@ object KaiAgentController {
 
             Progress so far:
             ${priorProgress.ifBlank { "No prior execution yet." }}
-
-            Goal stages:
-            ${goalStages.joinToString(" -> ")}
 
             Allowed commands:
             open_app, click_text, long_press_text, input_text, click_best_match,
