@@ -237,7 +237,7 @@ class KaiAgentLoopEngine(
                 var wrongSurfaceFamilyThisChunk = ""
                 var lastWrongSurfaceFamilyAcrossChunks = ""
                 var consecutiveWrongSurfaceChunks = 0
-                var currentGoalStage = KaiGoalStage.OPEN_TARGET_APP
+                var currentGoalStage = "OPEN_TARGET_APP"
                 var postArrivalContinuationGraceSteps = 0
                 val repeatedWrongFamilyByStage = mutableMapOf<String, Int>()
                 var lastRequiredStepFailed = false
@@ -603,7 +603,15 @@ class KaiAgentLoopEngine(
                         ensureActiveOrThrow()
 
                         totalSteps += 1
-                        currentGoalStage = KaiGoalInterpreter.inferStageForStep(step)
+                        currentGoalStage = when (step.cmd.trim().lowercase()) {
+                            "open_app" -> "OPEN_TARGET_APP"
+                            "click_best_match", "verify_state" -> "REACH_TARGET_SURFACE"
+                            "open_best_list_item" -> "OPEN_TARGET_ENTITY"
+                            "focus_best_input" -> "FOCUS_TARGET_INPUT"
+                            "input_into_best_field", "input_text" -> "WRITE_PAYLOAD"
+                            "press_primary_action" -> "SUBMIT_OR_SEND"
+                            else -> "VERIFY_COMPLETION"
+                        }
 
                         val remainingInChunk = executionQueue.size - stepCursor - 1
                         val stepText = buildString {

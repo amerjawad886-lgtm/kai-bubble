@@ -17,8 +17,16 @@ object KaiRecoveryPolicy {
 
     fun recoveryContextSemanticKey(step: KaiActionStep, state: KaiScreenState): String {
         val cmd = step.cmd.trim().lowercase()
-        val stage = KaiGoalInterpreter.inferStageForStep(step)
-        return "$cmd|stage=$stage|${state.recoverySemanticKey()}"
+        val stageKey = when (cmd) {
+            "open_app" -> "OPEN_TARGET_APP"
+            "click_best_match", "verify_state" -> "REACH_TARGET_SURFACE"
+            "open_best_list_item" -> "OPEN_TARGET_ENTITY"
+            "focus_best_input" -> "FOCUS_TARGET_INPUT"
+            "input_into_best_field", "input_text" -> "WRITE_PAYLOAD"
+            "press_primary_action" -> "SUBMIT_OR_SEND"
+            else -> "VERIFY_COMPLETION"
+        }
+        return "$cmd|stage=$stageKey|${state.recoverySemanticKey()}"
     }
 
     fun shouldRecoverForStep(state: KaiScreenState, step: KaiActionStep): RecoveryDecision {
