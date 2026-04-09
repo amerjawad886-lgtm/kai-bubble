@@ -2856,310 +2856,115 @@ private fun KaiActionExecutor.isContinuationEligibleObservation(state: KaiScreen
 }
 
 internal suspend fun KaiActionExecutor.requestFreshScreenImpl(timeoutMs: Long = 2500L, expectedPackage: String = ""): KaiScreenState {
-    if (consecutiveWeakReads >= 5 || consecutiveStaleReads >= 5) {
-        onLog("Observation is weak/stale; keeping state intact and requesting a fresh dump")
-    }
-
-    var bestFallback: Pair<KaiScreenState, Long>? = null
-    var weakUpdatedCandidate: Pair<KaiScreenState, Long>? = null
-    var staleWeakCandidate: Pair<KaiScreenState, Long>? = null
-    var weakExternalPackageHint: Pair<KaiScreenState, Long>? = null
-
-    val previousFingerprint = if (lastAcceptedFingerprint.isNotBlank()) {
-        lastAcceptedFingerprint
-    } else {
+    // ── Snapshot pre-request state ────────────────────────────────────────────
+    val beforeUpdatedAt = KaiObservationRuntime.live.updatedAt
+    val previousFingerprint = lastAcceptedFingerprint.ifBlank {
         canonicalRuntimeState?.let { fingerprintFor(it.packageName, it.rawDump) }.orEmpty()
     }
-
-    val previousPackage = canonicalRuntimeState?.packageName ?: lastGoodScreenState?.packageName.orEmpty()
+    val previousPackage    = canonicalRuntimeState?.packageName ?: lastGoodScreenState?.packageName.orEmpty()
     val fallbackSuppressed = consecutiveWeakReads >= 3 || consecutiveStaleReads >= 3
-    val expectedIsNotesFamily = expectedPackage.contains("notes", true) || expectedPackage.contains("keep", true)
-    val semanticContinuationContext = isSemanticContinuationContext(expectedPackage)
 
-    repeat(3) { attempt ->
-        val beforeObservation = KaiAgentController.getLatestObservation()
-        val beforeUpdatedAt = beforeObservation.updatedAt
-
-        sendKaiCmdSuppressed(
-            cmd = KaiAccessibilityService.CMD_DUMP,
-            expectedPackage = expectedPackage,
-            timeoutMs = timeoutMs,
-            preDelayMs = if (attempt == 0) 90L else 140L,
-            strongObservationMode = true
-        )
-
-        val start = System.currentTimeMillis()
-        while (System.currentTimeMillis() - start < timeoutMs) {
-            delay(130)
-
-            val latest = KaiAgentController.getLatestObservation()
-            if (latest.updatedAt <= beforeUpdatedAt) continue
-
-            val parsed = KaiScreenStateParser.fromDump(
-                latest.packageName,
-                latest.screenPreview
-            )
-
-            val notesAmbiguousWeak =
-                expectedIsNotesFamily &&
-                    parsed.isWeakObservation() &&
-                    (parsed.isNotesListSurface() || parsed.isNotesEditorSurface() || parsed.isSearchLikeSurface())
-
-            if (notesAmbiguousWeak) {
-                continue
-            }
-
-            val parsedFingerprint = fingerprintFor(parsed.packageName, parsed.rawDump)
-            val changed = !sameFingerprint(previousFingerprint, parsedFingerprint)
-            val packageChanged = isExternalPackageChange(previousPackage, parsed.packageName)
-            val matchesExpected = packageMatchesExpected(parsed.packageName, expectedPackage)
-
-            if (expectedPackage.isNotBlank() && !matchesExpected) {
-                continue
-            }
-
-            val continuationEligible = if (semanticContinuationContext) {
-                isContinuationEligibleObservation(parsed, expectedPackage)
-            } else {
-                true
-            }
-
-            if (isUsableDumpImpl(parsed.rawDump, parsed.packageName)) {
-                if (semanticContinuationContext && !continuationEligible) {
-                    onLog("usable_dump_rejected_not_continuation_eligible: ${parsed.screenKind}")
-                    continue
-                }
-                updateRefreshMetaImpl(
-                    state = parsed,
-                    usable = true,
-                    fallback = false,
-                    weak = false,
-                    previousFingerprint = previousFingerprint,
-                    observationUpdatedAt = latest.updatedAt,
-                    reusedLastGood = false
-                )
-                return parsed
-            }
-
-            if (!fallbackSuppressed && bestFallback == null && isFallbackAcceptableImpl(parsed.rawDump, parsed.packageName)) {
-                if (!semanticContinuationContext || continuationEligible) {
-                    bestFallback = parsed to latest.updatedAt
-                }
-            }
-
-            if (isWeakButMeaningfulDumpImpl(parsed.rawDump, parsed.packageName)) {
-                if (semanticContinuationContext && !continuationEligible) {
-                    continue
-                }
-                if (packageChanged && weakExternalPackageHint == null) {
-                    weakExternalPackageHint = parsed to latest.updatedAt
-                } else if (changed && weakUpdatedCandidate == null) {
-                    weakUpdatedCandidate = parsed to latest.updatedAt
-                } else if (!changed && staleWeakCandidate == null) {
-                    staleWeakCandidate = parsed to latest.updatedAt
-                }
-            }
-        }
-
-        delay(180L)
+    if (consecutiveWeakReads >= 5 || consecutiveStaleReads >= 5) {
+        onLog("Observation is weak/stale; requesting fresh dump")
     }
 
+    // ── Request a fresh dump ──────────────────────────────────────────────────
+    sendKaiCmdSuppressed(
+        cmd                 = KaiAccessibilityService.CMD_DUMP,
+        expectedPackage     = expectedPackage,
+        timeoutMs           = timeoutMs,
+        preDelayMs          = 90L,
+        strongObservationMode = true
+    )
+
+    // ── Poll for arrival ──────────────────────────────────────────────────────
+    // KaiObservationRuntime.live.updatedAt is advanced by the broadcast receiver
+    // each time a new dump arrives.  We wait until a dump arrives that is
+    // newer than the snapshot we took before sending CMD_DUMP.
+    var bestFallback: Pair<KaiScreenState, Long>? = null
+    var bestWeak:     Pair<KaiScreenState, Long>? = null
+
+    val deadline = System.currentTimeMillis() + timeoutMs
+    while (System.currentTimeMillis() < deadline) {
+        delay(80L)
+
+        val obs = KaiObservationRuntime.live
+        if (obs.updatedAt <= beforeUpdatedAt) continue
+
+        val parsed = KaiScreenStateParser.fromDump(obs.packageName, obs.screenPreview)
+
+        // Package filter
+        if (expectedPackage.isNotBlank() && !packageMatchesExpected(parsed.packageName, expectedPackage)) continue
+
+        if (isUsableDumpImpl(parsed.rawDump, parsed.packageName)) {
+            updateRefreshMetaImpl(parsed, true, false, false, previousFingerprint, obs.updatedAt)
+            return parsed
+        }
+        if (!fallbackSuppressed && bestFallback == null && isFallbackAcceptableImpl(parsed.rawDump, parsed.packageName)) {
+            bestFallback = parsed to obs.updatedAt
+        }
+        if (bestWeak == null && isWeakButMeaningfulDumpImpl(parsed.rawDump, parsed.packageName)) {
+            bestWeak = parsed to obs.updatedAt
+        }
+    }
+
+    // ── Deadline passed — use best available ──────────────────────────────────
     bestFallback?.let { (state, updatedAt) ->
-        if (semanticContinuationContext && !isContinuationEligibleObservation(state, expectedPackage)) {
-            onLog("fallback_dump_rejected_not_continuation_eligible")
-            return@let
-        }
-        updateRefreshMetaImpl(
-            state = state,
-            usable = false,
-            fallback = true,
-            weak = false,
-            previousFingerprint = previousFingerprint,
-            observationUpdatedAt = updatedAt,
-            reusedLastGood = false
-        )
         onLog("Using fallback screen dump")
+        updateRefreshMetaImpl(state, false, true, false, previousFingerprint, updatedAt)
         return state
     }
 
-    weakExternalPackageHint?.let { (state, _) ->
-        onLog("weak_external_package_change_seen_hint_only: ${state.packageName}")
+    if (!fallbackSuppressed) {
+        bestWeak?.let { (state, updatedAt) ->
+            onLog("Using weak screen dump")
+            updateRefreshMetaImpl(state, false, false, true, previousFingerprint, updatedAt)
+            return state
+        }
     }
 
-    weakUpdatedCandidate?.let { (state, updatedAt) ->
-        if (fallbackSuppressed && !isLauncherRecoveryObservation(expectedPackage, state) &&
-            !(semanticContinuationContext && isContinuationEligibleObservation(state, expectedPackage))
-        ) {
-            onLog("Skipping weak updated dump due to repeated weak/stale streak")
-            return@let
-        } else if (fallbackSuppressed) {
-            onLog("Allowing weak updated dump despite weak/stale streak for coherent continuation")
-        }
-        if (semanticContinuationContext && !isContinuationEligibleObservation(state, expectedPackage)) {
-            onLog("weak_updated_dump_rejected_not_continuation_eligible")
-            return@let
-        }
-        updateRefreshMetaImpl(
-            state = state,
-            usable = false,
-            fallback = false,
-            weak = true,
-            previousFingerprint = previousFingerprint,
-            observationUpdatedAt = updatedAt,
-            reusedLastGood = false
-        )
-        onLog("Using weak updated screen dump")
-        return state
-    }
-
-    staleWeakCandidate?.let { (state, updatedAt) ->
-        if (fallbackSuppressed && !isLauncherRecoveryObservation(expectedPackage, state) &&
-            !(semanticContinuationContext && isContinuationEligibleObservation(state, expectedPackage))
-        ) {
-            onLog("Skipping weak stale dump due to repeated weak/stale streak")
-            return@let
-        } else if (fallbackSuppressed) {
-            onLog("Allowing weak stale dump despite weak/stale streak for coherent continuation")
-        }
-        if (semanticContinuationContext && !isContinuationEligibleObservation(state, expectedPackage)) {
-            onLog("weak_stale_dump_rejected_not_continuation_eligible")
-            return@let
-        }
-        updateRefreshMetaImpl(
-            state = state,
-            usable = false,
-            fallback = false,
-            weak = true,
-            previousFingerprint = previousFingerprint,
-            observationUpdatedAt = updatedAt,
-            reusedLastGood = false
-        )
-        onLog("Using weak stale screen dump")
-        return state
-    }
-
+    // ── Last-good reuse ───────────────────────────────────────────────────────
     lastGoodScreenState?.let { state ->
-        val latestObservation = KaiAgentController.getLatestObservation()
-        val ageMs = if (lastAcceptedObservationAt > 0L) {
-            (System.currentTimeMillis() - lastAcceptedObservationAt).coerceAtLeast(0L)
-        } else {
-            Long.MAX_VALUE
-        }
-        val latestPackage = latestObservation.packageName
-        val packageContradiction =
-            latestPackage.isNotBlank() &&
-                state.packageName.isNotBlank() &&
-                !latestPackage.equals(state.packageName, ignoreCase = true)
+        val ageMs          = if (lastAcceptedObservationAt > 0L) System.currentTimeMillis() - lastAcceptedObservationAt else Long.MAX_VALUE
+        val latestPackage  = KaiObservationRuntime.live.packageName
+        val pkgContradiction = latestPackage.isNotBlank() && state.packageName.isNotBlank() &&
+            !latestPackage.equals(state.packageName, ignoreCase = true)
         val expectedMismatch = expectedPackage.isNotBlank() && !packageMatchesExpected(state.packageName, expectedPackage)
 
         if (state.isWrongSurfaceFamilyForSemanticProgress()) {
-            onLog("Skipping last known good dump because it is a wrong-surface family: ${state.screenKind}")
+            onLog("Skipping last known good dump: wrong-surface family ${state.screenKind}")
             return@let
         }
-        if (packageContradiction) {
-            onLog("Skipping last known good dump because package changed from ${state.packageName} to $latestPackage")
+        if (pkgContradiction) {
+            onLog("Skipping last known good dump: package changed to $latestPackage")
             return@let
         }
         if (expectedMismatch) {
-            onLog("Skipping last known good dump because expected package is $expectedPackage but state package is ${state.packageName}")
-            return@let
-        }
-        if (expectedIsNotesFamily && state.isWeakObservation()) {
-            onLog("Skipping last known good dump because notes context is still weak/ambiguous")
+            onLog("Skipping last known good dump: expected=$expectedPackage actual=${state.packageName}")
             return@let
         }
         if (fallbackSuppressed) {
             onLog("Skipping last known good dump due to repeated weak/stale streak")
             return@let
         }
-        if (semanticContinuationContext) {
-            val continuationReuseAllowed =
-                isContinuationEligibleObservation(state, expectedPackage) &&
-                    ageMs <= 1400L
-            if (!continuationReuseAllowed) {
-                onLog("Skipping last known good dump in semantic continuation context")
-                return@let
-            }
-        }
-        if (ageMs <= if (semanticContinuationContext) 1200L else 1800L) {
-            updateRefreshMetaImpl(
-                state = state,
-                usable = false,
-                fallback = false,
-                weak = true,
-                previousFingerprint = previousFingerprint,
-                observationUpdatedAt = lastAcceptedObservationAt,
-                reusedLastGood = true
-            )
+        if (ageMs <= 1800L) {
+            updateRefreshMetaImpl(state, false, false, true, previousFingerprint, lastAcceptedObservationAt, reusedLastGood = true)
             onLog("Reusing recent last known good screen dump")
             return state
         }
         onLog("Skipping stale last known good screen dump (age=${ageMs}ms)")
     }
 
-    val latest = KaiAgentController.getLatestObservation()
+    // ── Absolute final fallback ───────────────────────────────────────────────
+    val latest = KaiObservationRuntime.live
     if (latest.packageName.isBlank()) {
-        onLog("refresh_failed_no_observation_arrived: packageName is blank in final fallback")
-        val rejected = KaiScreenStateParser.fromDump(packageName = "", dump = "(no_observation_arrived)")
-        updateRefreshMetaImpl(
-            state = rejected,
-            usable = false,
-            fallback = false,
-            weak = true,
-            previousFingerprint = previousFingerprint,
-            observationUpdatedAt = latest.updatedAt,
-            reusedLastGood = false
-        )
+        onLog("refresh_failed_no_usable_observation_arrived")
+        val rejected = KaiScreenStateParser.fromDump("", "(no_observation_arrived)")
+        updateRefreshMetaImpl(rejected, false, false, true, previousFingerprint, latest.updatedAt)
         return rejected
     }
     val parsed = KaiScreenStateParser.fromDump(latest.packageName, latest.screenPreview)
-    if (
-        semanticContinuationContext &&
-        (parsed.isWeakObservation() && !isContinuationEligibleObservation(parsed, expectedPackage))
-    ) {
-        onLog("refresh_failed_weak_semantic_observation")
-        val rejected = KaiScreenStateParser.fromDump(
-            packageName = parsed.packageName,
-            dump = "(semantic_observation_requires_retry)"
-        )
-        updateRefreshMetaImpl(
-            state = rejected,
-            usable = false,
-            fallback = false,
-            weak = true,
-            previousFingerprint = previousFingerprint,
-            observationUpdatedAt = latest.updatedAt,
-            reusedLastGood = false
-        )
-        return rejected
-    }
-    if (expectedPackage.isNotBlank() && !packageMatchesExpected(parsed.packageName, expectedPackage)) {
-        onLog("expected_package_rejected_final_fallback: expected=$expectedPackage observed=${parsed.packageName}")
-        onLog("refresh_failed_wrong_package")
-        val rejected = KaiScreenStateParser.fromDump(
-            packageName = parsed.packageName.ifBlank { previousPackage },
-            dump = "(expected package rejected final fallback)"
-        )
-        updateRefreshMetaImpl(
-            state = rejected,
-            usable = false,
-            fallback = false,
-            weak = true,
-            previousFingerprint = previousFingerprint,
-            observationUpdatedAt = latest.updatedAt,
-            reusedLastGood = false
-        )
-        return rejected
-    }
-    updateRefreshMetaImpl(
-        state = parsed,
-        usable = false,
-        fallback = false,
-        weak = true,
-        previousFingerprint = previousFingerprint,
-        observationUpdatedAt = latest.updatedAt,
-        reusedLastGood = false
-    )
+    updateRefreshMetaImpl(parsed, false, false, true, previousFingerprint, latest.updatedAt)
     return parsed
 }
 
