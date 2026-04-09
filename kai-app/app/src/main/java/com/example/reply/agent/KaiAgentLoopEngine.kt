@@ -140,6 +140,11 @@ class KaiAgentLoopEngine(
 
                 executor.resetRuntimeState(clearLastGoodScreen = true)
                 executor.resetObservationTransitionStateForRun()
+                // Give the accessibility service's main-thread handler time to process the
+                // CMD_RESET_TRANSITION_STATE broadcast before the first CMD_DUMP fires.
+                // Without this, CMD_DUMP can race the reset and its generation counter
+                // invalidation causes the startup observation handshake to receive no result.
+                kotlinx.coroutines.delay(250L)
                 KaiBubbleManager.releaseAllSuppression()
                 KaiBubbleManager.softResetUiState()
                 KaiAgentController.startActionLoopSession(userPrompt)
