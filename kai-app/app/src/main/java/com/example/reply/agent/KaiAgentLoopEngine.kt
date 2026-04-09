@@ -197,7 +197,7 @@ class KaiAgentLoopEngine(
                 // live between runs.  If we already have a fresh authoritative observation
                 // (arrived within the last 1 500 ms) skip the CMD_DUMP handshake entirely —
                 // the agent starts with immediate, non-blind awareness of the current screen.
-                val currentState: KaiScreenState
+                var currentState: KaiScreenState
                 if (KaiObservationRuntime.isWatching &&
                     KaiObservationRuntime.hasRecentAuthoritative(1500L)
                 ) {
