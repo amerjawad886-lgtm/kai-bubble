@@ -241,6 +241,15 @@ class KaiAgentLoopEngine(
                     currentState = readiness.state
                 }
 
+                // Both the fast-path (adoptCanonicalRuntimeState) and the slow-path
+                // (ensureAuthoritativeObservationReady → requestFreshScreen) leave a fingerprint
+                // baseline that represents the startup screen.  Cycle 0's observation gate would
+                // immediately compare the next fresh dump against that baseline, see the same
+                // screen (no action taken yet), and mark the observation as stale — aborting
+                // before any semantic planning can occur.  Clear the baseline here so cycle 0
+                // always treats its first dump as a genuinely fresh, non-stale observation.
+                executor.clearStartupFingerprintBaseline()
+
                 val progressLog = StringBuilder()
                 var totalSteps = 0
                 var lastFingerprint = fingerprintOf(currentState)
