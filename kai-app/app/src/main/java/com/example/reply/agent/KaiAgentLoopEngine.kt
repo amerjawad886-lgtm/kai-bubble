@@ -144,7 +144,8 @@ class KaiAgentLoopEngine(
                 // CMD_RESET_TRANSITION_STATE broadcast before the first CMD_DUMP fires.
                 // Without this, CMD_DUMP can race the reset and its generation counter
                 // invalidation causes the startup observation handshake to receive no result.
-                kotlinx.coroutines.delay(250L)
+                // 300 ms (was 250) gives a slightly wider safety margin for slower devices.
+                kotlinx.coroutines.delay(300L)
                 KaiBubbleManager.releaseAllSuppression()
                 KaiBubbleManager.softResetUiState()
                 KaiAgentController.startActionLoopSession(userPrompt)
@@ -199,34 +200,46 @@ class KaiAgentLoopEngine(
                 }
 
                 KaiAgentController.pruneObservationMemory(12)
-                val startupBaselineState = KaiAgentController.getLatestScreenState()
 
-                var currentState = startupBaselineState
-                val readiness = executor.ensureAuthoritativeObservationReady(
-                    timeoutMs = 2600L,
-                    allowLauncherSurface = true,
-                    tier = startupGateTier,
-                    maxAttempts = 3
-                )
-                if (!readiness.passed) {
-                    val finalMessage =
-                        "Authoritative observation handshake failed: ${readiness.reason}."
-                    pushAgentState(
-                        state = "warning",
-                        observation = readiness.state.rawDump,
-                        decision = finalMessage,
-                        action = "observation_handshake",
-                        notes = "startup_authoritative_observation_not_ready"
+                // Fast-path: continuous watching keeps KaiObservationRuntime.authoritative
+                // live between runs.  If we already have a fresh authoritative observation
+                // (arrived within the last 1 500 ms) skip the CMD_DUMP handshake entirely —
+                // the agent starts with immediate, non-blind awareness of the current screen.
+                var currentState: KaiScreenState
+                if (KaiObservationRuntime.isWatching &&
+                    KaiObservationRuntime.hasRecentAuthoritative(1500L)
+                ) {
+                    val obs = KaiObservationRuntime.authoritative
+                    currentState = KaiScreenStateParser.fromDump(obs.packageName, obs.screenPreview)
+                    executor.adoptCanonicalRuntimeState(currentState)
+                    onLog("system", "startup_from_live_observation: pkg=${currentState.packageName}")
+                } else {
+                    val readiness = executor.ensureAuthoritativeObservationReady(
+                        timeoutMs = 2600L,
+                        allowLauncherSurface = true,
+                        tier = startupGateTier,
+                        maxAttempts = 3
                     )
-                    KaiAgentController.finishActionLoopSession(finalMessage)
-                    executor.resetRuntimeState(clearLastGoodScreen = false)
-                    return@withContext KaiLoopResult(
-                        success = false,
-                        finalMessage = finalMessage,
-                        executedSteps = 0
-                    )
+                    if (!readiness.passed) {
+                        val finalMessage =
+                            "Authoritative observation handshake failed: ${readiness.reason}."
+                        pushAgentState(
+                            state = "warning",
+                            observation = readiness.state.rawDump,
+                            decision = finalMessage,
+                            action = "observation_handshake",
+                            notes = "startup_authoritative_observation_not_ready"
+                        )
+                        KaiAgentController.finishActionLoopSession(finalMessage)
+                        executor.resetRuntimeState(clearLastGoodScreen = false)
+                        return@withContext KaiLoopResult(
+                            success = false,
+                            finalMessage = finalMessage,
+                            executedSteps = 0
+                        )
+                    }
+                    currentState = readiness.state
                 }
-                currentState = readiness.state
 
                 val progressLog = StringBuilder()
                 var totalSteps = 0
