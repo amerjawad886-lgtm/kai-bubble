@@ -612,7 +612,7 @@ fun KaiHomeScreen(
         stopAgentLoop()
 
         if (KaiAgentController.isRunning()) {
-            push(MsgRole.SYSTEM, "Monitoring paused before action loop")
+            push(MsgRole.SYSTEM, "Monitoring carried into action loop")
         }
 
         val myRunToken = agentRunToken + 1
@@ -726,7 +726,7 @@ fun KaiHomeScreen(
                 val running = KaiAgentController.toggleContinuousAnalysis(
                     userGoal = "Observe the current screen quietly and build written context.",
                     customPrompt = customPromptText,
-                    onRequestDump = { sendKaiCmd(KaiAccessibilityService.CMD_DUMP) },
+                    onRequestDump = { },
                     onInsight = { insight -> push(MsgRole.KAI, insight) }
                 )
                 push(MsgRole.SYSTEM, if (running) "Agent active" else "Agent off")

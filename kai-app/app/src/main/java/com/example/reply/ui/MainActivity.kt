@@ -22,6 +22,7 @@ import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import com.example.reply.agent.KaiAgentController
 import com.example.reply.ui.theme.ContrastAwareReplyTheme
 
 class MainActivity : ComponentActivity() {
@@ -47,6 +48,9 @@ class MainActivity : ComponentActivity() {
 
         modeState = extractMode(intent)
 
+        // Ensure observation bridge is alive as early as possible in app lifecycle.
+        KaiAgentController.ensureRuntimeObservationBridge(applicationContext)
+
         applyFullScreenBars()
 
         setContent {
@@ -71,11 +75,14 @@ class MainActivity : ComponentActivity() {
         super.onNewIntent(intent)
         setIntent(intent)
         modeState = extractMode(intent)
+
+        KaiAgentController.ensureRuntimeObservationBridge(applicationContext)
         applyFullScreenBars()
     }
 
     override fun onResume() {
         super.onResume()
+        KaiAgentController.ensureRuntimeObservationBridge(applicationContext)
         applyFullScreenBars()
     }
 

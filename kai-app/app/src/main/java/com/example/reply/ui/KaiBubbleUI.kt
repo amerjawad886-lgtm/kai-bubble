@@ -389,7 +389,6 @@ fun KaiBubbleUI(
             customPrompt = customPromptText,
             onRequestDump = {
                 pendingAgentSilentDump = true
-                sendKaiCmd(KaiAccessibilityService.CMD_DUMP)
             },
             onInsight = { insight ->
                 statusText = "Monitoring"
@@ -398,7 +397,10 @@ fun KaiBubbleUI(
         )
         agentRunning = running
         statusText = if (running) "Monitoring" else "Ready"
-        appendToMainChat(if (running) "Agent active" else "Agent off", "system")
+        appendToMainChat(
+            if (running) "Agent active — continuous watching started" else "Agent off",
+            "system"
+        )
     }
 
     fun triggerBubbleAction(prompt: String) {
@@ -413,8 +415,8 @@ fun KaiBubbleUI(
         val myRunToken = actionRunToken
 
         if (KaiAgentController.isRunning()) {
-            agentRunning = false
-            appendToMainChat("Monitoring paused before action loop", "system")
+            agentRunning = true
+            appendToMainChat("Monitoring carried into action loop", "system")
         }
 
         agentLoopEngine?.cancel()

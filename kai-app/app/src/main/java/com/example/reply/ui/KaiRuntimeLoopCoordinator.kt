@@ -4,6 +4,7 @@ import android.content.Context
 import com.example.reply.agent.KaiAgentController
 import com.example.reply.agent.KaiAgentLoopEngine
 import com.example.reply.agent.KaiLoopResult
+import com.example.reply.agent.KaiObservationRuntime
 
 enum class KaiRuntimePhase {
     PLANNING,
@@ -17,11 +18,15 @@ object KaiRuntimeLoopCoordinator {
     private const val EXECUTION_ACK = "Make Action accepted as full execution permission on your responsibility."
     private const val LOOP_START = "Agent loop starting…"
 
-    private fun resetTransientStateForNewRun() {
+    private fun resetTransientStateForNewRun(context: Context) {
         // Primary global preflight reset path before launching a new action loop.
+        val appContext = context.applicationContext
         KaiVoice.resetTransientStateForNewRun()
         OpenAIClient.resetTransientStateForNewRun()
         KaiAgentController.resetTransientStateForNewRun()
+        KaiObservationRuntime.ensureBridge(appContext)
+        KaiObservationRuntime.reset()
+        KaiObservationRuntime.startWatching(immediateDump = true)
         KaiBubbleManager.releaseAllSuppression()
         KaiBubbleManager.softResetUiState()
     }
@@ -36,13 +41,17 @@ object KaiRuntimeLoopCoordinator {
         val clean = prompt.trim()
         if (clean.isBlank()) return null
 
-        resetTransientStateForNewRun()
+        val appContext = context.applicationContext
+        resetTransientStateForNewRun(appContext)
 
-        // Activate runtime-owned observation intake before loop flow and logs.
-        KaiAgentController.ensureRuntimeObservationBridge(context.applicationContext)
+        // Activate runtime-owned observation intake and keep watching alive
+        // through the handoff into action execution.
+        KaiAgentController.ensureRuntimeObservationBridge(appContext)
+        KaiObservationRuntime.ensureBridge(appContext)
+        KaiObservationRuntime.startWatching(immediateDump = true)
 
         if (KaiAgentController.isRunning()) {
-            appendLog("system", "Monitoring paused before action loop")
+            appendLog("system", "Monitoring carried into action loop")
         }
 
         KaiAgentController.setCustomPrompt(clean)
@@ -51,7 +60,7 @@ object KaiRuntimeLoopCoordinator {
         appendLog("system", LOOP_START)
 
         return KaiAgentController.startUnifiedActionLoop(
-            context = context.applicationContext,
+            context = appContext,
             prompt = clean,
             onLog = appendLog,
             onStatus = { status ->

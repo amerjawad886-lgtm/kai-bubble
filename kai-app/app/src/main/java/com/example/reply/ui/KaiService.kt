@@ -9,12 +9,22 @@ import android.os.Build
 import android.os.IBinder
 import android.provider.Settings
 import androidx.core.app.NotificationCompat
+import com.example.reply.agent.KaiAgentController
+import com.example.reply.agent.KaiObservationRuntime
 
 class KaiService : Service() {
 
     override fun onCreate() {
         super.onCreate()
         startKaiForeground()
+
+        // Keep the observation bridge ready at service startup.
+        KaiAgentController.ensureRuntimeObservationBridge(applicationContext)
+
+        // If monitoring was already intended to be active, keep observation runtime alive.
+        if (KaiAgentController.getSnapshot().isRunning) {
+            KaiObservationRuntime.startWatching(immediateDump = true)
+        }
 
         if (Settings.canDrawOverlays(this)) {
             KaiBubbleManager.show(this)

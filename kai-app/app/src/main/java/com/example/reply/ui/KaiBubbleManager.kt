@@ -303,15 +303,26 @@ object KaiBubbleManager {
         }
     }
 
+    fun prepareForObservationPulse() {
+        main.post {
+            strongSuppressionCounter = 1
+            applyActionUiState()
+            main.postDelayed({
+                strongSuppressionCounter = 0
+                applyActionUiState()
+            }, 220L)
+        }
+    }
+
     private fun applyActionUiState() {
         val view = bubbleView ?: return
         try {
             val alpha = when {
-                strongSuppressionCounter > 0 -> 0.28f
-                suppressionCounter > 0 -> 0.45f
+                strongSuppressionCounter > 0 -> 0f
+                suppressionCounter > 0 -> 0.38f
                 else -> 1f
             }
-            view.visibility = View.VISIBLE
+            view.visibility = if (strongSuppressionCounter > 0) View.INVISIBLE else View.VISIBLE
             view.alpha = alpha
         } catch (e: Exception) {
             Log.e(TAG, "applyActionUiState failed: ${e.message}", e)

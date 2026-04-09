@@ -96,21 +96,6 @@ class KaiActionExecutor(
         }
     }
 
-    /**
-     * Clears the fingerprint baseline established by the startup observation so that
-     * the first planning-cycle gate does not compare against the startup dump.
-     *
-     * Without this, cycle 0's requestFreshScreen sees the same screen that was just
-     * observed at startup, computes an identical fingerprint, and marks the observation
-     * as stale — even though no action has been taken and the stale flag is a false positive.
-     *
-     * This must be called after startup (both fast-path and slow-path) and before the
-     * first cycle's ensureStrongObservationGate fires.
-     */
-    internal fun clearStartupFingerprintBaseline() {
-        lastAcceptedFingerprint = ""
-    }
-
     internal fun softResetObservationState() {
         softResetObservationStateImpl()
     }
@@ -752,6 +737,10 @@ class KaiActionExecutor(
     fun getConsecutiveWeakReads(): Int = getConsecutiveWeakReadsImpl()
     fun getConsecutiveStaleReads(): Int = getConsecutiveStaleReadsImpl()
 
+    private fun getLatestAuthoritativeObservation(): KaiObservation {
+        return KaiObservationRuntime.authoritative
+    }
+
     private fun isExpectedPackageMatch(observedPackage: String, expectedPackage: String): Boolean {
         val observed = KaiScreenStateParser.normalize(observedPackage)
         val expected = KaiScreenStateParser.normalize(expectedPackage)
@@ -759,6 +748,15 @@ class KaiActionExecutor(
         if (observed.isBlank()) return false
         return observed == expected || observed.startsWith("$expected.")
     }
+
+    fun bestRuntimeObservation(): KaiObservation {
+        return if (KaiObservationRuntime.authoritative.updatedAt > 0L) {
+            KaiObservationRuntime.authoritative
+        } else {
+            KaiObservationRuntime.live
+        }
+    }
+
 
     private fun evaluateObservationStrengthForSemantic(
         state: KaiScreenState,
@@ -898,18 +896,28 @@ class KaiActionExecutor(
         repeat(maxAttempts.coerceAtLeast(1)) { attempt ->
             val state = requestFreshScreen(timeoutMs = timeoutMs, expectedPackage = expectedPackage)
             val meta = getLastRefreshMeta()
-            val (ok, reason) = evaluateObservationStrengthByTier(
-                state = state,
-                meta = meta,
-                expectedPackage = expectedPackage,
-                allowLauncherSurface = allowLauncherSurface,
-                tier = tier
-            )
-
             lastState = state
-            lastReason = reason
 
-            if (ok) {
+            val launcherAllowed = allowLauncherSurface && tier == ObservationGateTier.APP_LAUNCH_SAFE
+            val packageMissing = state.packageName.isBlank()
+            val packageMismatch =
+                expectedPackage.isNotBlank() &&
+                    state.packageName.isNotBlank() &&
+                    !isExpectedPackageMatch(state.packageName, expectedPackage)
+            val weak = meta.weak || state.isWeakObservation() || state.isOverlayPolluted()
+            val stale = meta.stale
+            val launcherRejected = state.isLauncher() && !launcherAllowed
+
+            lastReason = when {
+                packageMissing -> "missing_package"
+                packageMismatch -> "expected_package_mismatch"
+                stale -> "stale_observation"
+                weak -> "weak_refresh_meta"
+                launcherRejected -> "launcher_surface_not_semantic_ready"
+                else -> ""
+            }
+
+            if (lastReason.isBlank()) {
                 return ObservationGateResult(
                     passed = true,
                     state = state,
@@ -917,73 +925,14 @@ class KaiActionExecutor(
                 )
             }
 
-            if (reason == "stale_observation" && attempt == maxAttempts.coerceAtLeast(1) - 1) {
-                repeat(staleRetryAttempts.coerceIn(1, 2)) {
-                    delay(150L)
-                    val retried = requestFreshScreen(
-                        timeoutMs = (timeoutMs / 2).coerceIn(900L, 1800L),
-                        expectedPackage = expectedPackage
-                    )
-                    val retryMeta = getLastRefreshMeta()
-                    val (retryOk, retryReason) = evaluateObservationStrengthByTier(
-                        state = retried,
-                        meta = retryMeta,
-                        expectedPackage = expectedPackage,
-                        allowLauncherSurface = allowLauncherSurface,
-                        tier = tier
-                    )
-                    lastState = retried
-                    lastReason = retryReason
-                    if (retryOk) {
-                        return ObservationGateResult(
-                            passed = true,
-                            state = retried,
-                            reason = "strong_observation_gate_passed_after_stale_retry"
-                        )
-                    }
-                }
+            if (lastReason == "stale_observation" && attempt < staleRetryAttempts.coerceAtLeast(1)) {
+                delay(150L)
+                return@repeat
             }
 
-            if (reason == "missing_package" && attempt == maxAttempts.coerceAtLeast(1) - 1) {
-                repeat(missingPackageRetryAttempts.coerceIn(1, 2)) {
-                    delay(150L)
-                    val retried = requestFreshScreen(
-                        timeoutMs = (timeoutMs / 2).coerceIn(900L, 1800L),
-                        expectedPackage = expectedPackage
-                    )
-                    val retryMeta = getLastRefreshMeta()
-                    val (retryOk, retryReason) = evaluateObservationStrengthByTier(
-                        state = retried,
-                        meta = retryMeta,
-                        expectedPackage = expectedPackage,
-                        allowLauncherSurface = allowLauncherSurface,
-                        tier = tier
-                    )
-                    lastState = retried
-                    lastReason = retryReason
-                    if (retryOk) {
-                        return ObservationGateResult(
-                            passed = true,
-                            state = retried,
-                            reason = "strong_observation_gate_passed_after_missing_package_retry"
-                        )
-                    }
-                }
-
-                // Practical stabilization: if package was transiently blank but we recovered a coherent
-                // non-launcher/non-overlay state, allow continuation and keep safety on destructive steps.
-                val pragmaticPackageRecovery =
-                    lastState.packageName.isNotBlank() &&
-                        !lastState.isLauncher() &&
-                        !lastState.isOverlayPolluted() &&
-                        (expectedPackage.isBlank() || isExpectedPackageMatch(lastState.packageName, expectedPackage))
-                if (pragmaticPackageRecovery) {
-                    return ObservationGateResult(
-                        passed = true,
-                        state = lastState,
-                        reason = "strong_observation_gate_passed_after_transient_missing_package"
-                    )
-                }
+            if (lastReason == "missing_package" && attempt < missingPackageRetryAttempts.coerceAtLeast(1)) {
+                delay(150L)
+                return@repeat
             }
 
             if (attempt < maxAttempts - 1) {
@@ -1008,6 +957,38 @@ class KaiActionExecutor(
         var lastReason = "not_observed"
 
         repeat(maxAttempts.coerceAtLeast(1)) { attempt ->
+            val auth = getLatestAuthoritativeObservation()
+            if (auth.updatedAt > 0L) {
+                val authState = KaiScreenStateParser.fromDump(auth.packageName, auth.screenPreview)
+                val authWeak =
+                    authState.packageName.isBlank() ||
+                        authState.rawDump.isBlank() ||
+                        authState.isWeakObservation() ||
+                        authState.isOverlayPolluted()
+
+                if (!authWeak) {
+                    adoptCanonicalRuntimeState(authState)
+                    lastGoodScreenState = authState
+                    lastAcceptedFingerprint = fingerprintFor(authState.packageName, authState.rawDump)
+                    lastAcceptedObservationAt = auth.updatedAt
+                    lastRefreshMeta = ScreenRefreshMeta(
+                        fingerprint = lastAcceptedFingerprint,
+                        changedFromPrevious = true,
+                        usable = true,
+                        fallback = false,
+                        weak = false,
+                        stale = false,
+                        reusedLastGood = false
+                    )
+                    return ObservationReadinessResult(
+                        passed = true,
+                        state = authState,
+                        reason = "authoritative_observation_ready",
+                        attempts = attempt + 1
+                    )
+                }
+            }
+
             val gate = ensureStrongObservationGate(
                 expectedPackage = "",
                 timeoutMs = timeoutMs,
@@ -1017,32 +998,16 @@ class KaiActionExecutor(
                 staleRetryAttempts = 1,
                 missingPackageRetryAttempts = 1
             )
+            lastState = gate.state
+            lastReason = gate.reason
 
-            val state = gate.state
-            val packageReady = state.packageName.isNotBlank()
-            val notOverlayPolluted = !state.isOverlayPolluted()
-            val meaningful = state.isMeaningful() &&
-                !state.rawDump.equals("(semantic_observation_requires_retry)", ignoreCase = true)
-            val strongEnough = !state.isWeakObservation()
-
-            lastState = state
-
-            if (gate.passed && packageReady && notOverlayPolluted && meaningful && strongEnough) {
-                adoptCanonicalRuntimeState(state)
+            if (gate.passed) {
                 return ObservationReadinessResult(
                     passed = true,
-                    state = state,
-                    reason = "authoritative_observation_ready",
+                    state = gate.state,
+                    reason = "authoritative_observation_ready_via_strong_gate",
                     attempts = attempt + 1
                 )
-            }
-
-            lastReason = when {
-                !packageReady -> "missing_package"
-                !notOverlayPolluted -> "overlay_polluted"
-                !meaningful -> "not_meaningful"
-                !strongEnough -> "weak_observation"
-                else -> gate.reason
             }
 
             if (attempt < maxAttempts - 1) {
@@ -1059,46 +1024,7 @@ class KaiActionExecutor(
     }
 
     suspend fun requestFreshScreen(timeoutMs: Long = 2500L, expectedPackage: String = ""): KaiScreenState {
-        val result = requestFreshScreenImpl(timeoutMs, expectedPackage)
-
-        // Safety net: requestFreshScreenImpl may still return a blank-package state in
-        // genuinely blank cases (true no-active-window from the accessibility service).
-        // When that happens, attempt to recover from the last authoritative observation
-        // so that observation gates fail with "fallback_observation" / "reused_last_good"
-        // (retryable) rather than the hard "missing_package" that aborts the entire run.
-        //
-        // The core fix (KaiAgentController.updateObservation now stores effectivePackage in
-        // latestObservation) eliminates the common transient-blank trigger for this path.
-        // This guard handles the residual genuinely-blank edge case.
-        //
-        // Staleness bound: do not use authoritative data older than 30 s — this prevents
-        // reusing a prior run's screen context when the user starts run 2 well after run 1.
-        if (result.packageName.isBlank()) {
-            val authoritative = KaiAgentController.getLatestAuthoritativeObservation()
-            val authAgeMs = System.currentTimeMillis() - authoritative.updatedAt
-            if (authoritative.packageName.isNotBlank() && authAgeMs <= 30_000L) {
-                onLog("requestFreshScreen: blank-package result recovered via authoritative observation " +
-                    "(${authoritative.packageName}, age=${authAgeMs}ms)")
-                val recovered = KaiScreenStateParser.fromDump(
-                    authoritative.packageName,
-                    authoritative.screenPreview
-                )
-                updateRefreshMeta(
-                    state = recovered,
-                    usable = false,
-                    fallback = true,
-                    weak = true,
-                    previousFingerprint = lastAcceptedFingerprint.ifBlank {
-                        fingerprintFor(recovered.packageName, recovered.rawDump)
-                    },
-                    observationUpdatedAt = authoritative.updatedAt,
-                    reusedLastGood = true
-                )
-                return recovered
-            }
-        }
-
-        return result
+        return requestFreshScreenImpl(timeoutMs, expectedPackage)
     }
 
     internal fun markActionProgress(
@@ -2910,120 +2836,82 @@ private fun KaiActionExecutor.isContinuationEligibleObservation(state: KaiScreen
 }
 
 internal suspend fun KaiActionExecutor.requestFreshScreenImpl(timeoutMs: Long = 2500L, expectedPackage: String = ""): KaiScreenState {
-    // ── Snapshot pre-request state ────────────────────────────────────────────
-    val beforeUpdatedAt = KaiObservationRuntime.live.updatedAt
-    // Use lastAcceptedFingerprint directly as the comparison baseline.
-    // Do NOT fall back to canonicalRuntimeState: canonicalRuntimeState is set by
-    // adoptCanonicalRuntimeState (including the startup fast-path) without going through
-    // updateRefreshMetaImpl, so it can hold the startup observation's fingerprint.
-    // If cycle 0 used that fingerprint as a baseline, it would mark the very first
-    // post-startup dump as stale (same screen, no action taken yet) — a false positive.
-    val previousFingerprint = lastAcceptedFingerprint
-    val previousPackage    = canonicalRuntimeState?.packageName ?: lastGoodScreenState?.packageName.orEmpty()
-    val fallbackSuppressed = consecutiveWeakReads >= 3 || consecutiveStaleReads >= 3
-
-    if (consecutiveWeakReads >= 5 || consecutiveStaleReads >= 5) {
-        onLog("Observation is weak/stale; requesting fresh dump")
+    val beforeUpdatedAt = maxOf(
+        KaiObservationRuntime.live.updatedAt,
+        KaiObservationRuntime.authoritative.updatedAt,
+        lastAcceptedObservationAt
+    )
+    val previousFingerprint = lastAcceptedFingerprint.ifBlank {
+        canonicalRuntimeState?.let { fingerprintFor(it.packageName, it.rawDump) }.orEmpty()
     }
 
-    // ── Request a fresh dump ──────────────────────────────────────────────────
     sendKaiCmdSuppressed(
-        cmd                 = KaiAccessibilityService.CMD_DUMP,
-        expectedPackage     = expectedPackage,
-        timeoutMs           = timeoutMs,
-        preDelayMs          = 90L,
+        cmd = KaiAccessibilityService.CMD_DUMP,
+        expectedPackage = expectedPackage,
+        timeoutMs = timeoutMs,
+        preDelayMs = 30L,
+        postDelayMs = 0L,
         strongObservationMode = true
     )
 
-    // ── Poll for arrival ──────────────────────────────────────────────────────
-    // KaiObservationRuntime.live.updatedAt is advanced by the broadcast receiver
-    // each time a new dump arrives.  We wait until a dump arrives that is
-    // newer than the snapshot we took before sending CMD_DUMP.
-    var bestFallback: Pair<KaiScreenState, Long>? = null
-    var bestWeak:     Pair<KaiScreenState, Long>? = null
+    val fresh = KaiObservationRuntime.awaitFresh(
+        afterTime = beforeUpdatedAt,
+        timeoutMs = timeoutMs
+    )
 
-    val deadline = System.currentTimeMillis() + timeoutMs
-    while (System.currentTimeMillis() < deadline) {
-        delay(80L)
+    val obs = fresh ?: bestRuntimeObservation()
+    val state = KaiScreenStateParser.fromDump(
+        packageName = obs.packageName,
+        dump = obs.screenPreview
+    )
 
-        val obs = KaiObservationRuntime.live
-        if (obs.updatedAt <= beforeUpdatedAt) continue
+    val fp = fingerprintFor(state.packageName, state.rawDump)
+    val changed = fp.isNotBlank() && !sameFingerprint(fp, previousFingerprint)
+    val weak =
+        state.packageName.isBlank() ||
+            state.rawDump.isBlank() ||
+            state.isOverlayPolluted() ||
+            state.isWeakObservation()
+    val stale = !changed && obs.updatedAt <= lastAcceptedObservationAt
 
-        val parsed = KaiScreenStateParser.fromDump(obs.packageName, obs.screenPreview)
-
-        // Package filter
-        if (expectedPackage.isNotBlank() && !packageMatchesExpected(parsed.packageName, expectedPackage)) continue
-
-        if (isUsableDumpImpl(parsed.rawDump, parsed.packageName)) {
-            updateRefreshMetaImpl(parsed, true, false, false, previousFingerprint, obs.updatedAt)
-            return parsed
-        }
-        if (!fallbackSuppressed && bestFallback == null && isFallbackAcceptableImpl(parsed.rawDump, parsed.packageName)) {
-            bestFallback = parsed to obs.updatedAt
-        }
-        if (bestWeak == null && isWeakButMeaningfulDumpImpl(parsed.rawDump, parsed.packageName)) {
-            bestWeak = parsed to obs.updatedAt
-        }
+    if (!weak && !stale) {
+        adoptCanonicalRuntimeState(state)
+        lastGoodScreenState = state
+        lastAcceptedFingerprint = fp
+        lastAcceptedObservationAt = obs.updatedAt
     }
 
-    // ── Deadline passed — use best available ──────────────────────────────────
-    bestFallback?.let { (state, updatedAt) ->
-        onLog("Using fallback screen dump")
-        updateRefreshMetaImpl(state, false, true, false, previousFingerprint, updatedAt)
-        return state
-    }
+    updateRefreshMetaImpl(
+        state = state,
+        usable = !weak && !stale,
+        fallback = fresh == null,
+        weak = weak,
+        previousFingerprint = previousFingerprint,
+        observationUpdatedAt = obs.updatedAt,
+        reusedLastGood = fresh == null && lastGoodScreenState != null && weak
+    )
 
-    if (!fallbackSuppressed) {
-        bestWeak?.let { (state, updatedAt) ->
-            onLog("Using weak screen dump")
-            updateRefreshMetaImpl(state, false, false, true, previousFingerprint, updatedAt)
-            return state
-        }
-    }
-
-    // ── Last-good reuse ───────────────────────────────────────────────────────
-    lastGoodScreenState?.let { state ->
-        val ageMs          = if (lastAcceptedObservationAt > 0L) System.currentTimeMillis() - lastAcceptedObservationAt else Long.MAX_VALUE
-        val latestPackage  = KaiObservationRuntime.live.packageName
-        val pkgContradiction = latestPackage.isNotBlank() && state.packageName.isNotBlank() &&
-            !latestPackage.equals(state.packageName, ignoreCase = true)
-        val expectedMismatch = expectedPackage.isNotBlank() && !packageMatchesExpected(state.packageName, expectedPackage)
-
-        if (state.isWrongSurfaceFamilyForSemanticProgress()) {
-            onLog("Skipping last known good dump: wrong-surface family ${state.screenKind}")
-            return@let
-        }
-        if (pkgContradiction) {
-            onLog("Skipping last known good dump: package changed to $latestPackage")
-            return@let
-        }
-        if (expectedMismatch) {
-            onLog("Skipping last known good dump: expected=$expectedPackage actual=${state.packageName}")
-            return@let
-        }
-        if (fallbackSuppressed) {
-            onLog("Skipping last known good dump due to repeated weak/stale streak")
-            return@let
-        }
-        if (ageMs <= 1800L) {
-            updateRefreshMetaImpl(state, false, false, true, previousFingerprint, lastAcceptedObservationAt, reusedLastGood = true)
-            onLog("Reusing recent last known good screen dump")
-            return state
-        }
-        onLog("Skipping stale last known good screen dump (age=${ageMs}ms)")
-    }
-
-    // ── Absolute final fallback ───────────────────────────────────────────────
-    val latest = KaiObservationRuntime.live
-    if (latest.packageName.isBlank()) {
+    if (weak) {
+        consecutiveWeakReads += 1
         onLog("refresh_failed_no_usable_observation_arrived")
-        val rejected = KaiScreenStateParser.fromDump("", "(no_observation_arrived)")
-        updateRefreshMetaImpl(rejected, false, false, true, previousFingerprint, latest.updatedAt)
-        return rejected
+    } else {
+        consecutiveWeakReads = 0
     }
-    val parsed = KaiScreenStateParser.fromDump(latest.packageName, latest.screenPreview)
-    updateRefreshMetaImpl(parsed, false, false, true, previousFingerprint, latest.updatedAt)
-    return parsed
+
+    if (stale) {
+        consecutiveStaleReads += 1
+    } else {
+        consecutiveStaleReads = 0
+    }
+
+    return when {
+        !weak -> state
+        lastGoodScreenState != null -> {
+            onLog("Observation is weak/stale; requesting fresh dump")
+            lastGoodScreenState!!
+        }
+        else -> state
+    }
 }
 
 internal fun KaiActionExecutor.markActionProgressImpl(

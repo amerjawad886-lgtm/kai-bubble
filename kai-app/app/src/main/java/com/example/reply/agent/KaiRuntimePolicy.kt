@@ -166,20 +166,21 @@ object KaiSurfaceModel {
 
     fun isRecoverableFamily(family: KaiSurfaceFamily): Boolean {
         return normalizeLegacyFamily(family) in setOf(
+            KaiSurfaceFamily.LAUNCHER_SURFACE,
             KaiSurfaceFamily.SEARCH_SURFACE,
             KaiSurfaceFamily.RESULT_LIST_SURFACE,
             KaiSurfaceFamily.MEDIA_CAPTURE_SURFACE,
             KaiSurfaceFamily.SHEET_OR_DIALOG_SURFACE,
             KaiSurfaceFamily.MODAL_SURFACE,
             KaiSurfaceFamily.CONTENT_FEED_SURFACE,
-            KaiSurfaceFamily.TABBED_HOME_SURFACE
+            KaiSurfaceFamily.TABBED_HOME_SURFACE,
+            KaiSurfaceFamily.BROWSER_LIKE_SURFACE
         )
     }
 
     fun isDeadEndFamily(family: KaiSurfaceFamily): Boolean {
         return normalizeLegacyFamily(family) in setOf(
             KaiSurfaceFamily.UNKNOWN_SURFACE,
-            KaiSurfaceFamily.LAUNCHER_SURFACE,
             KaiSurfaceFamily.SETTINGS_SURFACE
         )
     }
@@ -195,7 +196,8 @@ object KaiSurfaceModel {
             KaiSurfaceFamily.THREAD_SURFACE,
             KaiSurfaceFamily.COMPOSER_SURFACE,
             KaiSurfaceFamily.EDITOR_SURFACE,
-            KaiSurfaceFamily.PLAYER_SURFACE
+            KaiSurfaceFamily.PLAYER_SURFACE,
+            KaiSurfaceFamily.BROWSER_LIKE_SURFACE
         )
     }
 }

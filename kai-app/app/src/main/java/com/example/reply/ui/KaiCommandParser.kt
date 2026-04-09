@@ -65,6 +65,13 @@ object KaiCommandParser {
         "ماذا", "ليش", "لماذا", "كيف", "من", "اشرح", "قل لي"
     )
 
+    private val monitoringAliases = listOf(
+        "toggle agent", "agent mode", "agent", "monitor", "monitoring", "watch screen", "watch the screen",
+        "start monitoring", "stop monitoring", "eye mode", "kai eye", "eye",
+        "ابدأ الوكيل", "شغل الوكيل", "وقف الوكيل", "الوضع الوكيل",
+        "المراقبه", "المراقبة", "راقب", "راقب الشاشه", "راقب الشاشة", "العين", "عين كاي"
+    )
+
     fun norm(text: String): String =
         text
             .lowercase(Locale.ROOT)
@@ -126,7 +133,7 @@ object KaiCommandParser {
                 "اقرا الشاشه", "read screen", "analyze screen", "حلل الشاشه",
                 "open", "launch", "click", "press", "tap", "type", "write",
                 "back", "home", "recents", "scroll", "stop",
-                "agent", "report", "prompt", "custom prompt",
+                "agent", "report", "prompt", "custom prompt", "monitor", "watch screen", "eye",
                 "remember", "save memory", "store this", "note this", "تذكر", "احفظ", "خزن", "دوّن",
                 "يمين", "يسار", "فوق", "تحت", "right", "left", "up", "down"
             )
@@ -314,21 +321,15 @@ object KaiCommandParser {
             return KaiParsedCommand.Report
         }
 
-        if (
-            containsAny(
-                lower,
-                "toggle agent", "agent mode", "agent",
-                "ابدأ الوكيل", "شغل الوكيل", "وقف الوكيل", "الوضع الوكيل", "المراقبه", "المراقبة"
-            )
-        ) {
+        if (monitoringAliases.any { lower.contains(norm(it)) }) {
             return KaiParsedCommand.ToggleAgent
         }
 
-        if (containsAny(lower, "حلل الشاشه", "ماذا على الشاشه", "شو على الشاشه", "analyze screen", "inspect screen")) {
+        if (containsAny(lower, "حلل الشاشه", "ماذا على الشاشه", "شو على الشاشه", "analyze screen", "inspect screen", "see screen", "what is on screen")) {
             return KaiParsedCommand.AnalyzeScreen
         }
 
-        if (containsAny(lower, "اقرا الشاشه", "read screen")) {
+        if (containsAny(lower, "اقرا الشاشه", "read screen", "watch screen now", "اقرا اللي على الشاشه", "إقرأ اللي على الشاشة")) {
             return KaiParsedCommand.ReadScreen
         }
 

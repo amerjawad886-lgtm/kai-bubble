@@ -166,10 +166,18 @@ data class KaiScreenState(
         if (rawDump.isBlank()) return false
         if (rawDump.equals("(no active window)", ignoreCase = true)) return false
         if (rawDump.equals("(empty dump)", ignoreCase = true)) return false
-        if (lines.isEmpty()) return false
-        if (rawDump.trim().length < 12) return false
         if (isOverlayPolluted()) return false
-        return true
+
+        val meaningfulLines = lines.count {
+            KaiScreenStateParser.normalize(it).length >= 2
+        }
+        val hasStructuredUi = elements.size >= 2 || likelyInputFields.isNotEmpty() || likelyPrimaryActions.isNotEmpty()
+        val semanticallyUsable = semanticConfidence >= 0.28f && (elements.isNotEmpty() || meaningfulLines >= 1)
+
+        if (meaningfulLines >= 1 && rawDump.trim().length >= 12) return true
+        if (hasStructuredUi && rawDump.trim().length >= 8) return true
+        if (semanticallyUsable && rawDump.trim().length >= 8) return true
+        return false
     }
 
     fun isWeakObservation(): Boolean {
@@ -185,9 +193,11 @@ data class KaiScreenState(
         val meaningfulLines = lines.count {
             KaiScreenStateParser.normalize(it).length >= 2
         }
+        val hasStructuredUi = elements.size >= 2 || likelyInputFields.isNotEmpty() || likelyPrimaryActions.isNotEmpty()
+        val semanticallyUsable = semanticConfidence >= 0.32f && (elements.isNotEmpty() || meaningfulLines >= 1)
 
-        if (meaningfulLines < 1) return true
-        if (rawDump.length < 10) return true
+        if (meaningfulLines < 1 && !hasStructuredUi && !semanticallyUsable) return true
+        if (rawDump.length < 8 && !hasStructuredUi) return true
 
         return false
     }
@@ -799,6 +809,7 @@ object KaiScreenStateParser {
         "agent executing",
         "agent observing",
         "monitoring paused before action loop",
+        "monitoring carried into action loop",
         "kai os",
         "open app",
         "working",

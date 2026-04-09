@@ -155,7 +155,7 @@ class KaiAccessibilityService : AccessibilityService() {
             when (cmd) {
                 CMD_DUMP -> {
                     val now = System.currentTimeMillis()
-                    if (now - lastDumpAt < 180L) return
+                    if (now - lastDumpAt < 60L) return
                     if (dumpInProgress) return
                     lastDumpAt = now
 
@@ -286,18 +286,16 @@ class KaiAccessibilityService : AccessibilityService() {
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         val pkg = event?.packageName?.toString().orEmpty()
         if (pkg.isBlank()) return
-        
+
         val now = System.currentTimeMillis()
         lastWindowEventAt = now
-        
+
         if (isIgnorablePackage(pkg)) return
-        
+
         if (pkg != lastKnownExternalPackage) {
             previousExternalPackage = lastKnownExternalPackage
             lastKnownExternalPackage = pkg
             lastPackageChangeAt = now
-        } else {
-            lastWindowEventAt = now
         }
     }
 
@@ -406,6 +404,22 @@ class KaiAccessibilityService : AccessibilityService() {
         return p == e || p.startsWith("$e.")
     }
 
+    private fun isWeakDumpCandidate(candidate: DumpCandidate): Boolean {
+        val normalizedDump = norm(candidate.dump)
+        if (candidate.packageName.isBlank()) return true
+        if (normalizedDump.isBlank()) return true
+        if (normalizedDump == norm("(no active window)")) return true
+        if (normalizedDump == norm("(empty dump)")) return true
+        if (ignoredDumpTextHints.count { hint -> normalizedDump.contains(norm(hint)) } >= 3) return true
+
+        val lineCount = candidate.dump.lines().count { it.trim().isNotBlank() }
+        val elementCount = candidate.elements.size
+        if (isLauncherPackage(candidate.packageName) && lineCount < 4 && elementCount < 3) {
+            return true
+        }
+        return false
+    }
+
     private fun captureBestDump(timeoutMs: Long, expectedPackage: String = ""): DumpCandidate {
         val budget = timeoutMs.coerceIn(900L, 4200L)
         val startedAt = System.currentTimeMillis()
@@ -509,7 +523,7 @@ class KaiAccessibilityService : AccessibilityService() {
         }
 
         val prioritized = bestTransitionCandidate ?: bestPackageBearing ?: bestChanged ?: best
-        if (prioritized != null && prioritized.packageName.isNotBlank()) {
+        if (prioritized != null && prioritized.packageName.isNotBlank() && !isWeakDumpCandidate(prioritized)) {
             return prioritized
         }
 
@@ -517,7 +531,7 @@ class KaiAccessibilityService : AccessibilityService() {
             timeoutMs = (budget / 3L).coerceIn(260L, 900L),
             expectedPackage = expectedPackage
         )
-        if (recovered != null) {
+        if (recovered != null && !isWeakDumpCandidate(recovered)) {
             return recovered
         }
 

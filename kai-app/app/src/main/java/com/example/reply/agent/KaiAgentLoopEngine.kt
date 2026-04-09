@@ -27,11 +27,9 @@ class KaiAgentLoopEngine(
     fun isRunning(): Boolean = runJob?.isActive == true
 
     fun cancel() {
-        // Capture active state before cancelling so that finishActionLoopSession is only called
-        // when there is a real in-flight run to tear down.  When start() calls cancel() as a
-        // pre-start eviction on a freshly created engine (runJob == null), we must not fire
-        // finishActionLoopSession — that would clear the actionLoopActive flag that
-        // KaiAgentController.startUnifiedActionLoop() just set to true.
+        // Only finish the action-loop session when a real in-flight run existed.
+        // start() calls cancel() as a pre-start eviction; firing finishActionLoopSession()
+        // in that case clears actionLoopActive too early and races the next run startup.
         val wasActive = runJob?.isActive == true
         runJob?.cancel()
         runJob = null
@@ -141,11 +139,17 @@ class KaiAgentLoopEngine(
                 executor.resetRuntimeState(clearLastGoodScreen = true)
                 executor.resetObservationTransitionStateForRun()
                 // Give the accessibility service's main-thread handler time to process the
-                // CMD_RESET_TRANSITION_STATE broadcast before the first CMD_DUMP fires.
-                // Without this, CMD_DUMP can race the reset and its generation counter
-                // invalidation causes the startup observation handshake to receive no result.
-                // 300 ms (was 250) gives a slightly wider safety margin for slower devices.
+                // transition reset before the first startup observation pulse.
                 kotlinx.coroutines.delay(300L)
+                val startupObservationBaseline = maxOf(
+                    KaiObservationRuntime.live.updatedAt,
+                    KaiObservationRuntime.authoritative.updatedAt
+                )
+                KaiObservationRuntime.requestImmediateDump()
+                KaiObservationRuntime.awaitFresh(
+                    afterTime = startupObservationBaseline,
+                    timeoutMs = 900L
+                )
                 KaiBubbleManager.releaseAllSuppression()
                 KaiBubbleManager.softResetUiState()
                 KaiAgentController.startActionLoopSession(userPrompt)
@@ -272,8 +276,6 @@ class KaiAgentLoopEngine(
                 var lastStageLogged = lastStageSnapshot.stage
 
                 fun hasStrictCycleEvidence(prompt: String, state: KaiScreenState): Boolean {
-                    // Restore practical behavior: strict-cycle success must stay prompt-aware
-                    // (especially for write/send goals) instead of surface-arrival-only.
                     return KaiExecutionDecisionAuthority.likelyGoalSatisfied(prompt, state)
                 }
 
@@ -923,7 +925,6 @@ class KaiAgentLoopEngine(
                             }
 
                             if (repeatedWeakReadFailures >= 8) {
-                                // Do not abort immediately; keep agent alive in degraded mode.
                                 repeatedWeakReadFailures = 0
                                 pushAgentState(
                                     state = "warning",
@@ -945,9 +946,6 @@ class KaiAgentLoopEngine(
 
                             if (repeatedOpenAppUnconfirmed >= 8) {
                                 repeatedOpenAppUnconfirmed = 0
-                                val finalMessage =
-                                    "The target app could not be confirmed after repeated open attempts. Pausing action loop and waiting for clearer state."
-
                                 pushAgentState(
                                     state = "warning",
                                     observation = currentState.rawDump,
