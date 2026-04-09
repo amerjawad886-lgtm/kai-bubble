@@ -96,6 +96,21 @@ class KaiActionExecutor(
         }
     }
 
+    /**
+     * Clears the fingerprint baseline established by the startup observation so that
+     * the first planning-cycle gate does not compare against the startup dump.
+     *
+     * Without this, cycle 0's requestFreshScreen sees the same screen that was just
+     * observed at startup, computes an identical fingerprint, and marks the observation
+     * as stale — even though no action has been taken and the stale flag is a false positive.
+     *
+     * This must be called after startup (both fast-path and slow-path) and before the
+     * first cycle's ensureStrongObservationGate fires.
+     */
+    internal fun clearStartupFingerprintBaseline() {
+        lastAcceptedFingerprint = ""
+    }
+
     internal fun softResetObservationState() {
         softResetObservationStateImpl()
     }
@@ -2897,9 +2912,13 @@ private fun KaiActionExecutor.isContinuationEligibleObservation(state: KaiScreen
 internal suspend fun KaiActionExecutor.requestFreshScreenImpl(timeoutMs: Long = 2500L, expectedPackage: String = ""): KaiScreenState {
     // ── Snapshot pre-request state ────────────────────────────────────────────
     val beforeUpdatedAt = KaiObservationRuntime.live.updatedAt
-    val previousFingerprint = lastAcceptedFingerprint.ifBlank {
-        canonicalRuntimeState?.let { fingerprintFor(it.packageName, it.rawDump) }.orEmpty()
-    }
+    // Use lastAcceptedFingerprint directly as the comparison baseline.
+    // Do NOT fall back to canonicalRuntimeState: canonicalRuntimeState is set by
+    // adoptCanonicalRuntimeState (including the startup fast-path) without going through
+    // updateRefreshMetaImpl, so it can hold the startup observation's fingerprint.
+    // If cycle 0 used that fingerprint as a baseline, it would mark the very first
+    // post-startup dump as stale (same screen, no action taken yet) — a false positive.
+    val previousFingerprint = lastAcceptedFingerprint
     val previousPackage    = canonicalRuntimeState?.packageName ?: lastGoodScreenState?.packageName.orEmpty()
     val fallbackSuppressed = consecutiveWeakReads >= 3 || consecutiveStaleReads >= 3
 
