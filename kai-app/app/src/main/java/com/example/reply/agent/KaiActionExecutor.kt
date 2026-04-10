@@ -910,7 +910,9 @@ class KaiActionExecutor(
             val hintMatchesTarget = targetHint.isBlank() || state.likelyMatchesAppHint(targetHint)
             val packageMatchesTarget =
                 normalizedTarget.isNotBlank() &&
-                    (normalizedObserved == normalizedTarget || normalizedObserved.startsWith("$normalizedTarget."))
+                    (normalizedObserved == normalizedTarget ||
+                        normalizedObserved.startsWith("$normalizedTarget.") ||
+                        KaiAppIdentityRegistry.packageMatchesFamily(targetPackage, state.packageName))
 
             val inTargetApp =
                 if (normalizedTarget.isNotBlank()) {
@@ -963,7 +965,8 @@ class KaiActionExecutor(
                     observedKnown &&
                     !isLauncherPackage(state.packageName) &&
                     normalizedObserved != normalizedTarget &&
-                    !normalizedObserved.startsWith("$normalizedTarget.")
+                    !normalizedObserved.startsWith("$normalizedTarget.") &&
+                    !KaiAppIdentityRegistry.packageMatchesFamily(targetPackage, state.packageName)
 
             if (credibleWrongPackage) {
                 if (normalizedObserved == lastCredibleWrongPackage) {

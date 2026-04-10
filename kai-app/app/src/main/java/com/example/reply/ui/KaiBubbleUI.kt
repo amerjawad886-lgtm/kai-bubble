@@ -475,9 +475,6 @@ fun KaiBubbleUI(
             onPhase = { phase ->
                 if (myRunToken != actionRunToken) return@startLoop
                 statusText = when (phase) {
-                    KaiRuntimePhase.PLANNING -> "Agent planning"
-                    KaiRuntimePhase.EXECUTING -> "Agent executing"
-                    KaiRuntimePhase.OBSERVING -> "Agent observing"
                     KaiRuntimePhase.CANCELLED -> "Agent cancelled"
                     else -> "Agent working"
                 }
@@ -549,6 +546,12 @@ fun KaiBubbleUI(
                             appendToMainChat("Open Custom Prompt and write the goal first.", "system")
                             statusText = "Prompt ready"
                         }
+                    }
+
+                    KaiParsedCommand.SoftReset -> {
+                        softResetBubbleRuntime()
+                        appendToMainChat("Soft reset completed", "system")
+                        restartBubbleListening(700L)
                     }
 
                     KaiParsedCommand.Back -> {

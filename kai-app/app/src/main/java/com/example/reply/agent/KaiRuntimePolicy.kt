@@ -37,7 +37,8 @@ object KaiSurfaceModel {
         val pkg = KaiScreenStateParser.normalize(state.packageName)
         val e = KaiScreenStateParser.normalize(expected)
         if (pkg.isBlank() || e.isBlank()) return false
-        return pkg == e || pkg.startsWith("$e.")
+        return pkg == e || pkg.startsWith("$e.") ||
+            KaiAppIdentityRegistry.packageMatchesFamily(expected, state.packageName)
     }
 
     fun isVerifiedInstagramDmListSurface(state: KaiScreenState): Boolean {
@@ -115,11 +116,6 @@ object KaiSurfaceModel {
     }
 
     fun familyOf(state: KaiScreenState): KaiSurfaceFamily {
-        if (state.packageName.isBlank()) return KaiSurfaceFamily.UNKNOWN_SURFACE
-        if (state.isOverlayPolluted() && !state.isLauncher()) return KaiSurfaceFamily.UNKNOWN_SURFACE
-        if (state.isWeakObservation() && !state.isLauncher() && state.elements.size < 2) {
-            return KaiSurfaceFamily.UNKNOWN_SURFACE
-        }
         if (state.isLauncher()) return KaiSurfaceFamily.LAUNCHER_SURFACE
         if (state.isSettingsSurface()) return KaiSurfaceFamily.SETTINGS_SURFACE
         if (state.isSheetOrDialogSurface()) return KaiSurfaceFamily.SHEET_OR_DIALOG_SURFACE
@@ -1015,12 +1011,23 @@ object KaiExecutionDecisionAuthority {
                     reason = "open_app_transition_in_progress"
                 )
 
-                KaiOpenAppOutcome.WRONG_PACKAGE_CONFIRMED -> RuntimeDecision(
-                    directive = RuntimeDirective.STOP_FAILURE,
-                    progressLevel = ProgressLevel.NONE,
-                    goalCommitted = false,
-                    reason = "open_app_wrong_package_confirmed"
-                )
+                KaiOpenAppOutcome.WRONG_PACKAGE_CONFIRMED -> {
+                    val sameFamily = requestedStep.expectedPackage.isNotBlank() &&
+                        KaiAppIdentityRegistry.packageMatchesFamily(requestedStep.expectedPackage, after.packageName)
+                    if (sameFamily) {
+                        RuntimeDecision(
+                            directive = RuntimeDirective.CONTINUE,
+                            progressLevel = ProgressLevel.TARGET_READY,
+                            goalCommitted = false,
+                            reason = "open_app_family_match_continue"
+                        )
+                    } else RuntimeDecision(
+                        directive = RuntimeDirective.STOP_FAILURE,
+                        progressLevel = ProgressLevel.NONE,
+                        goalCommitted = false,
+                        reason = "open_app_wrong_package_confirmed"
+                    )
+                }
 
                 KaiOpenAppOutcome.OPEN_FAILED,
                 null -> RuntimeDecision(

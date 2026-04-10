@@ -160,7 +160,8 @@ class KaiObservationGate(
         val e = KaiScreenStateParser.normalize(expected)
         if (e.isBlank()) return true
         if (o.isBlank()) return false
-        return o == e || o.startsWith("$e.")
+        return o == e || o.startsWith("$e.") ||
+            KaiAppIdentityRegistry.packageMatchesFamily(expected, observed)
     }
 
     // ── Screen Refresh ──────────────────────────────────────────────────
@@ -184,15 +185,15 @@ class KaiObservationGate(
             canonical?.let { fingerprintFor(it.packageName, it.rawDump) }.orEmpty()
         }
 
-        val recentRuntimeObs = KaiObservationRuntime.getBestAvailable()
-        val canReuseRecentRuntimeObs =
-            recentRuntimeObs.updatedAt > beforeUpdatedAt &&
-                recentRuntimeObs.packageName.isNotBlank() &&
-                isUsableDump(recentRuntimeObs.screenPreview, recentRuntimeObs.packageName) &&
-                isExpectedPackageMatch(recentRuntimeObs.packageName, expectedPackage)
+        val bestRecent = if (KaiObservationRuntime.hasRecentUsefulObservation(900L)) {
+            KaiObservationRuntime.getBestAvailable()
+        } else null
+
+        val canReuseRecentRuntimeObs = bestRecent != null &&
+            (expectedPackage.isBlank() || isExpectedPackageMatch(bestRecent.packageName, expectedPackage))
 
         val obs = if (canReuseRecentRuntimeObs) {
-            recentRuntimeObs
+            bestRecent
         } else {
             KaiBubbleManager.beginActionUiSuppression(true)
             try {
@@ -209,12 +210,12 @@ class KaiObservationGate(
             } finally {
                 KaiBubbleManager.endActionUiSuppression(true)
             }
+
             KaiObservationRuntime.awaitFresh(beforeUpdatedAt, timeoutMs)
                 ?: KaiObservationRuntime.getBestAvailable()
         }
 
         val state = KaiScreenStateParser.fromDump(obs.packageName, obs.screenPreview)
-
         val fp = fingerprintFor(state.packageName, state.rawDump)
         val changed = fp.isNotBlank() && !sameFingerprint(fp, previousFingerprint)
         val weak = state.packageName.isBlank() ||
@@ -420,50 +421,35 @@ class KaiObservationGate(
         var lastState = resolve()
         var lastReason = "not_observed"
 
-        KaiObservationRuntime.ensureBridge(context)
-        if (!KaiObservationRuntime.isWatching) {
-            KaiObservationRuntime.startWatching(immediateDump = true)
-        } else {
-            KaiObservationRuntime.requestImmediateDump()
-        }
-
         repeat(maxAttempts.coerceAtLeast(1)) { attempt ->
-            val auth = if (KaiObservationRuntime.hasRecentUsefulObservation(timeoutMs.coerceAtMost(1800L))) {
-                KaiObservationRuntime.getBestAvailable()
-            } else {
-                KaiObservationRuntime.awaitFresh(
-                    afterTime = lastAcceptedObservationAt,
-                    timeoutMs = timeoutMs
-                ) ?: KaiObservationRuntime.getBestAvailable()
+            // Try authoritative observation first
+            val auth = KaiObservationRuntime.authoritative
+            if (auth.updatedAt > 0L) {
+                val authState = KaiScreenStateParser.fromDump(auth.packageName, auth.screenPreview)
+                val authWeak = authState.packageName.isBlank() ||
+                    authState.rawDump.isBlank() ||
+                    authState.isWeakObservation() ||
+                    authState.isOverlayPolluted()
+
+                if (!authWeak) {
+                    adopt(authState)
+                    lastAcceptedFingerprint = fingerprintFor(authState.packageName, authState.rawDump)
+                    lastAcceptedObservationAt = auth.updatedAt
+                    lastMeta = RefreshMeta(
+                        fingerprint = lastAcceptedFingerprint,
+                        changedFromPrevious = true,
+                        usable = true
+                    )
+                    return ReadinessResult(
+                        passed = true,
+                        state = authState,
+                        reason = "authoritative_observation_ready",
+                        attempts = attempt + 1
+                    )
+                }
             }
 
-            val authState = KaiScreenStateParser.fromDump(auth.packageName, auth.screenPreview)
-            val authWeak = authState.packageName.isBlank() ||
-                authState.rawDump.isBlank() ||
-                authState.isWeakObservation() ||
-                authState.isOverlayPolluted()
-
-            if (!authWeak) {
-                adopt(authState)
-                lastAcceptedFingerprint = fingerprintFor(authState.packageName, authState.rawDump)
-                lastAcceptedObservationAt = auth.updatedAt
-                lastMeta = RefreshMeta(
-                    fingerprint = lastAcceptedFingerprint,
-                    changedFromPrevious = true,
-                    usable = true,
-                    fallback = false,
-                    weak = false,
-                    stale = false,
-                    reusedLastGood = false
-                )
-                return ReadinessResult(
-                    passed = true,
-                    state = authState,
-                    reason = "authoritative_observation_ready",
-                    attempts = attempt + 1
-                )
-            }
-
+            // Fall back to strong gate
             val gate = ensureStrongGate(
                 expectedPackage = "",
                 timeoutMs = timeoutMs,

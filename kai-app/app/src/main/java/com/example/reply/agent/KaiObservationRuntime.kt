@@ -73,6 +73,22 @@ object KaiObservationRuntime {
         requestTransitionReset()
     }
 
+    fun softCleanupAfterRun() {
+        lastWatchExpectedPackage = ""
+        requestTransitionReset()
+    }
+
+    fun requestWarmupObservation(expectedPackage: String = "", burstCount: Int = 4, gapMs: Long = 140L) {
+        val safeBursts = burstCount.coerceIn(1, 8)
+        lastWatchExpectedPackage = expectedPackage
+        repeat(safeBursts) { index ->
+            watchScope.launch {
+                if (index > 0) delay(index * gapMs)
+                requestImmediateDump(lastWatchExpectedPackage)
+            }
+        }
+    }
+
     fun ensureBridge(context: Context) {
         val appCtx = context.applicationContext
         storedContext = appCtx

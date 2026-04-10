@@ -198,4 +198,20 @@ object KaiAppIdentityRegistry {
         val key = resolveAppKey(textOrKey).ifBlank { normalize(textOrKey) }
         return primaryPackageForKey(key)
     }
+
+    fun sameAppFamily(expectedPackage: String, observedPackage: String): Boolean {
+        val expectedKey = resolveAppKeyFromPackage(expectedPackage)
+        val observedKey = resolveAppKeyFromPackage(observedPackage)
+        if (expectedKey.isBlank() || observedKey.isBlank()) return false
+        return expectedKey == observedKey
+    }
+
+    fun packageMatchesFamily(expectedPackage: String, observedPackage: String): Boolean {
+        val expected = normalize(expectedPackage)
+        val observed = normalize(observedPackage)
+        if (expected.isBlank() || observed.isBlank()) return false
+        if (observed == expected || observed.startsWith("$expected.")) return true
+        return sameAppFamily(expectedPackage, observedPackage)
+    }
+
 }

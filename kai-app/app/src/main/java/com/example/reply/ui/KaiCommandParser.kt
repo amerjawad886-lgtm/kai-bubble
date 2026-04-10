@@ -9,6 +9,7 @@ sealed class KaiParsedCommand {
     data object AnalyzeScreen : KaiParsedCommand()
     data object Report : KaiParsedCommand()
     data object ToggleAgent : KaiParsedCommand()
+    data object SoftReset : KaiParsedCommand()
     data object Back : KaiParsedCommand()
     data object Home : KaiParsedCommand()
     data object Recents : KaiParsedCommand()
@@ -41,11 +42,30 @@ object KaiCommandParser {
         "share" to listOf("share", "مشاركة", "مشاركه")
     )
 
-    private val openVerbs = listOf("open", "launch", "start", "run", "go to", "افتح", "شغل", "ابدأ", "روح", "انتقل")
-    private val clickVerbs = listOf("click", "press", "tap", "select", "choose", "اضغط", "اكبس", "اختر", "حدد")
-    private val typeVerbs = listOf("type", "write", "enter", "input", "اكتب", "ادخل", "أدخل")
-    private val scrollVerbs = listOf("scroll", "move", "swipe", "لف", "اسكرول", "مرر", "حرك")
-    private val askPrefixes = listOf("what", "why", "how", "who", "tell me", "explain", "ماذا", "ليش", "لماذا", "كيف", "من", "اشرح", "قل لي")
+    private val openVerbs = listOf(
+        "open", "launch", "start", "run", "go to",
+        "افتح", "شغل", "ابدأ", "روح", "انتقل"
+    )
+
+    private val clickVerbs = listOf(
+        "click", "press", "tap", "select", "choose",
+        "اضغط", "اكبس", "اختر", "حدد"
+    )
+
+    private val typeVerbs = listOf(
+        "type", "write", "enter", "input",
+        "اكتب", "ادخل", "أدخل"
+    )
+
+    private val scrollVerbs = listOf(
+        "scroll", "move", "swipe", "لف", "اسكرول", "مرر", "حرك"
+    )
+
+    private val askPrefixes = listOf(
+        "what", "why", "how", "who", "tell me", "explain",
+        "ماذا", "ليش", "لماذا", "كيف", "من", "اشرح", "قل لي"
+    )
+
     private val monitoringAliases = listOf(
         "toggle agent", "agent mode", "agent", "monitor", "monitoring", "watch screen", "watch the screen",
         "start monitoring", "stop monitoring", "eye mode", "kai eye", "eye",
@@ -54,7 +74,8 @@ object KaiCommandParser {
     )
 
     fun norm(text: String): String =
-        text.lowercase(Locale.ROOT)
+        text
+            .lowercase(Locale.ROOT)
             .replace("أ", "ا")
             .replace("إ", "ا")
             .replace("آ", "ا")
@@ -72,11 +93,13 @@ object KaiCommandParser {
         return tokens.any { normalizedBase.contains(norm(it)) }
     }
 
-    fun resolveAppAlias(raw: String): String =
-        KaiAppIdentityRegistry.resolveAppKey(raw).ifBlank { raw.trim() }
+    fun resolveAppAlias(raw: String): String {
+        return KaiAppIdentityRegistry.resolveAppKey(raw).ifBlank { raw.trim() }
+    }
 
-    private fun findAppAliasIn(raw: String): String? =
-        KaiAppIdentityRegistry.resolveAppKey(raw).ifBlank { null }
+    private fun findAppAliasIn(raw: String): String? {
+        return KaiAppIdentityRegistry.resolveAppKey(raw).ifBlank { null }
+    }
 
     private fun findUiElementAliasIn(raw: String): String? {
         val value = norm(raw)
@@ -84,21 +107,6 @@ object KaiCommandParser {
             aliases.firstOrNull { value.contains(norm(it)) }?.let { return it }
         }
         return null
-    }
-
-    private fun extractQuotedText(text: String): String {
-        val patterns = listOf(
-            Regex(""""([^"]+)"""),
-            Regex("""'([^']+)'"""),
-            Regex("""“([^”]+)”"""),
-            Regex("""‘([^’]+)’""")
-        )
-        for (pattern in patterns) {
-            val match = pattern.find(text)
-            val value = match?.groupValues?.getOrNull(1)?.trim().orEmpty()
-            if (value.isNotBlank()) return value
-        }
-        return ""
     }
 
     fun extractTimes(text: String): Int {
@@ -120,37 +128,64 @@ object KaiCommandParser {
         val lower = norm(text)
         if (lower.isBlank()) return false
 
-        if (containsAny(lower,
+        if (
+            containsAny(
+                lower,
                 "اقرا الشاشه", "read screen", "analyze screen", "حلل الشاشه",
                 "open", "launch", "click", "press", "tap", "type", "write",
                 "back", "home", "recents", "scroll", "stop",
                 "agent", "report", "prompt", "custom prompt", "monitor", "watch screen", "eye",
                 "remember", "save memory", "store this", "note this", "تذكر", "احفظ", "خزن", "دوّن",
                 "يمين", "يسار", "فوق", "تحت", "right", "left", "up", "down"
-            )) return true
+            )
+        ) return true
 
         return appAliases.values.flatten().any { lower.contains(norm(it)) }
     }
 
     fun pickBestRecognitionCandidate(candidates: List<String>): String {
-        val cleaned = candidates.map { it.trim() }.filter { it.isNotBlank() }.distinct()
+        val cleaned = candidates.map { it.trim() }.filter { it.isNotBlank() }
         if (cleaned.isEmpty()) return ""
-        if (cleaned.size == 1) return cleaned.first()
 
         return cleaned.maxByOrNull { candidate ->
             val normalized = norm(candidate)
-            var score = candidate.length.coerceAtMost(80)
+            var score = candidate.length
 
-            if (looksLikeCommand(candidate)) score += 140
-            if (appAliases.values.flatten().any { normalized.contains(norm(it)) }) score += 100
-            if (containsAny(normalized, "افتح", "شغل", "launch", "open")) score += 70
-            if (containsAny(normalized, "اضغط", "اكبس", "click", "tap", "press")) score += 60
-            if (containsAny(normalized, "remember", "save", "احفظ", "تذكر", "خزن", "دوّن")) score += 90
-            if (containsAny(normalized, "يمين", "يسار", "لفوق", "لتحت", "فوق", "تحت", "up", "down", "left", "right")) score += 60
-            if (extractQuotedText(candidate).isNotBlank()) score += 25
+            if (looksLikeCommand(candidate)) score += 120
 
-            if (candidate.length > 90 && !looksLikeCommand(candidate)) score -= 40
-            if (isQuestionLike(candidate) && !containsAny(normalized, "read screen", "analyze screen", "حلل الشاشه", "اقرا الشاشه")) score -= 20
+            if (Regex("""[A-Za-z]{3,}""").containsMatchIn(candidate)) {
+                score += 40
+            }
+
+            if (
+                Regex(
+                    """\b(open|launch|click|tap|press|type|write|agent|report|prompt|instagram|whatsapp|chrome|notes|weather|remember|save|scroll|left|right|down|up|messages|comments|send)\b""",
+                    RegexOption.IGNORE_CASE
+                ).containsMatchIn(candidate)
+            ) {
+                score += 60
+            }
+
+            if (appAliases.values.flatten().any { normalized.contains(norm(it)) }) {
+                score += 80
+            }
+
+            if (containsAny(normalized, "افتح", "شغل", "launch", "open")) {
+                score += 50
+            }
+
+            if (containsAny(normalized, "اضغط", "اكبس", "click", "tap", "press")) {
+                score += 50
+            }
+
+            if (containsAny(normalized, "remember", "save", "احفظ", "تذكر", "خزن", "دوّن")) {
+                score += 80
+            }
+
+            if (containsAny(normalized, "يمين", "يسار", "لفوق", "لتحت", "فوق", "تحت", "up", "down", "left", "right")) {
+                score += 55
+            }
+
             score
         }.orEmpty()
     }
@@ -158,7 +193,9 @@ object KaiCommandParser {
     private fun extractAfter(text: String, vararg keys: String): String {
         keys.forEach { key ->
             val index = text.indexOf(key, ignoreCase = true)
-            if (index >= 0) return text.substring(index + key.length).trim()
+            if (index >= 0) {
+                return text.substring(index + key.length).trim()
+            }
         }
         return ""
     }
@@ -167,7 +204,9 @@ object KaiCommandParser {
         val lowerOriginal = originalText.lowercase(Locale.ROOT)
         for (phrase in phrases) {
             val idx = lowerOriginal.indexOf(phrase.lowercase(Locale.ROOT))
-            if (idx >= 0) return originalText.substring(idx + phrase.length).trim()
+            if (idx >= 0) {
+                return originalText.substring(idx + phrase.length).trim()
+            }
         }
         return ""
     }
@@ -175,22 +214,27 @@ object KaiCommandParser {
     private fun looksLikeAppName(target: String): Boolean {
         val value = norm(target)
         if (value.isBlank()) return false
+
         return appAliases.values.flatten().any { alias ->
             val candidate = norm(alias)
             value == candidate || value.contains(candidate) || candidate.contains(value)
         }
     }
 
-    private fun cleanupTargetText(raw: String): String =
-        raw.replace(Regex("""^(the|a|an)\s+""", RegexOption.IGNORE_CASE), "")
+    private fun cleanupTargetText(raw: String): String {
+        return raw
+            .replace(Regex("""^(the|a|an)\s+""", RegexOption.IGNORE_CASE), "")
             .replace(Regex("""^(على|الى|إلى)\s+"""), "")
             .replace(Regex("""^(app|application|برنامج|تطبيق)\s+""", RegexOption.IGNORE_CASE), "")
             .trim()
+    }
 
-    private fun maybeStripOpenPrepositions(raw: String): String =
-        raw.replace(Regex("""^(the\s+)?app\s+""", RegexOption.IGNORE_CASE), "")
+    private fun maybeStripOpenPrepositions(raw: String): String {
+        return raw
+            .replace(Regex("""^(the\s+)?app\s+""", RegexOption.IGNORE_CASE), "")
             .replace(Regex("""^(تطبيق|برنامج)\s+"""), "")
             .trim()
+    }
 
     private fun isQuestionLike(text: String): Boolean {
         val n = norm(text)
@@ -202,10 +246,9 @@ object KaiCommandParser {
     private fun isLikelyFreeTextTyping(text: String): Boolean {
         val n = norm(text)
         if (n.isBlank()) return false
-        if (extractQuotedText(text).isNotBlank()) return true
         if (n.length >= 18) return true
         if (text.contains("@") || text.contains(".com")) return true
-        if (text.count { it == ' ' } >= 1) return true
+        if (text.contains(" ")) return true
         return false
     }
 
@@ -217,19 +260,23 @@ object KaiCommandParser {
             "remember", "save memory", "save this", "store this", "note this",
             "تذكر", "احفظ", "خزن", "دوّن", "احفظ هذا", "تذكر هذا"
         )
-        if (rememberKeys.none { lower.contains(norm(it)) }) return null
 
-        val value = extractQuotedText(text)
-            .ifBlank { extractAfterNormalizedPhrase(text, rememberKeys) }
+        val matched = rememberKeys.firstOrNull { lower.contains(norm(it)) } ?: return null
+
+        val value = extractAfterNormalizedPhrase(text, rememberKeys)
             .trim()
             .ifBlank { text.trim() }
 
-        return KaiParsedCommand.SaveMemory(rawText = text.trim(), value = value)
+        return KaiParsedCommand.SaveMemory(
+            rawText = text.trim(),
+            value = value
+        )
     }
 
     private fun parseScrollCommand(lower: String, text: String): KaiParsedCommand.Scroll? {
         val hasScrollVerb = scrollVerbs.any { lower.contains(norm(it)) } ||
             containsAny(lower, "يمين", "يسار", "فوق", "تحت", "لليمين", "لليسار", "لفوق", "لتحت")
+
         if (!hasScrollVerb) return null
 
         val dir = when {
@@ -239,6 +286,7 @@ object KaiCommandParser {
             containsAny(lower, "right", "scroll right", "go right", "يمين", "لليمين", "الى اليمين", "إلى اليمين") -> "right"
             else -> null
         }
+
         return if (dir != null) KaiParsedCommand.Scroll(dir, extractTimes(text)) else null
     }
 
@@ -246,6 +294,7 @@ object KaiCommandParser {
         val full = norm(rawText)
         val t = norm(target)
         if (t.isBlank()) return false
+
         if (findUiElementAliasIn(t) != null) return true
 
         return containsAny(
@@ -257,33 +306,60 @@ object KaiCommandParser {
         )
     }
 
-    private fun parseTypeCommand(text: String, lower: String): KaiParsedCommand? {
-        if (typeVerbs.none { lower.contains(norm(it)) }) return null
-        val quoted = extractQuotedText(text)
-        if (quoted.isNotBlank()) return KaiParsedCommand.TypeText(quoted)
-
-        val typed = extractAfter(text, *typeVerbs.toTypedArray()).trim()
-        return if (typed.isNotBlank()) KaiParsedCommand.TypeText(typed) else KaiParsedCommand.Ask(text)
-    }
-
     fun parse(raw: String): KaiParsedCommand {
         val text = raw.trim()
         val lower = norm(text)
+
         if (text.isBlank()) return KaiParsedCommand.Ask("")
 
         parseMemoryIntent(text)?.let { return it }
 
-        if (containsAny(lower, "stop", "وقف", "اوقف", "توقف", "cancel", "الغ", "إلغاء")) return KaiParsedCommand.Stop
-        if (containsAny(lower, "report", "تقرير", "اعطني تقرير", "give me a report", "custom prompt", "prompt")) return KaiParsedCommand.Report
-        if (monitoringAliases.any { lower.contains(norm(it)) }) return KaiParsedCommand.ToggleAgent
-        if (containsAny(lower, "حلل الشاشه", "ماذا على الشاشه", "شو على الشاشه", "analyze screen", "inspect screen", "see screen", "what is on screen")) return KaiParsedCommand.AnalyzeScreen
-        if (containsAny(lower, "اقرا الشاشه", "read screen", "watch screen now", "اقرا اللي على الشاشه", "إقرأ اللي على الشاشة")) return KaiParsedCommand.ReadScreen
-        if (containsAny(lower, "back", "go back", "ارجع", "رجع", "عودة")) return KaiParsedCommand.Back
-        if (containsAny(lower, "home", "الرئيسيه", "الرئيسية", "هوم")) return KaiParsedCommand.Home
-        if (containsAny(lower, "recent", "recents", "التطبيقات", "المهام")) return KaiParsedCommand.Recents
+        if (containsAny(lower, "stop", "وقف", "اوقف", "توقف", "cancel", "الغ", "إلغاء")) {
+            return KaiParsedCommand.Stop
+        }
+
+        if (containsAny(lower, "refresh and reset", "reset and refresh", "soft reset", "refresh reset", "اعمل refresh و reset", "اعمل ريفرش و ريسيت", "ريفرش و ريسيت", "اعمل reset", "اعمل refresh", "اعمل سوفت ريسيت", "reset", "refresh")) {
+            return KaiParsedCommand.SoftReset
+        }
+
+        if (containsAny(lower, "report", "تقرير", "اعطني تقرير", "give me a report", "custom prompt", "prompt")) {
+            return KaiParsedCommand.Report
+        }
+
+        if (monitoringAliases.any { lower.contains(norm(it)) }) {
+            return KaiParsedCommand.ToggleAgent
+        }
+
+        if (containsAny(lower, "حلل الشاشه", "ماذا على الشاشه", "شو على الشاشه", "analyze screen", "inspect screen", "see screen", "what is on screen")) {
+            return KaiParsedCommand.AnalyzeScreen
+        }
+
+        if (containsAny(lower, "اقرا الشاشه", "read screen", "watch screen now", "اقرا اللي على الشاشه", "إقرأ اللي على الشاشة")) {
+            return KaiParsedCommand.ReadScreen
+        }
+
+        if (containsAny(lower, "back", "go back", "ارجع", "رجع", "عودة")) {
+            return KaiParsedCommand.Back
+        }
+
+        if (containsAny(lower, "home", "الرئيسيه", "الرئيسية", "هوم")) {
+            return KaiParsedCommand.Home
+        }
+
+        if (containsAny(lower, "recent", "recents", "التطبيقات", "المهام")) {
+            return KaiParsedCommand.Recents
+        }
 
         parseScrollCommand(lower, text)?.let { return it }
-        parseTypeCommand(text, lower)?.let { return it }
+
+        if (typeVerbs.any { lower.contains(norm(it)) }) {
+            val typed = extractAfter(text, *typeVerbs.toTypedArray()).trim()
+            return if (typed.isNotBlank()) {
+                KaiParsedCommand.TypeText(typed)
+            } else {
+                KaiParsedCommand.Ask(text)
+            }
+        }
 
         if (openVerbs.any { lower.contains(norm(it)) }) {
             val targetRaw = extractAfter(text, *openVerbs.toTypedArray())
@@ -291,11 +367,20 @@ object KaiCommandParser {
             val detectedApp = findAppAliasIn(target.ifBlank { text })
 
             return when {
-                target.isNotBlank() && shouldPreferUiClickTarget(text, target) -> KaiParsedCommand.Click(target)
-                detectedApp != null -> KaiParsedCommand.OpenApp(detectedApp)
-                target.isNotBlank() && looksLikeAppName(target) -> KaiParsedCommand.OpenApp(resolveAppAlias(target))
-                target.isNotBlank() && !isQuestionLike(text) -> KaiParsedCommand.Click(target)
-                else -> KaiParsedCommand.Ask(text)
+                target.isNotBlank() && shouldPreferUiClickTarget(text, target) ->
+                    KaiParsedCommand.Click(target)
+
+                detectedApp != null ->
+                    KaiParsedCommand.OpenApp(detectedApp)
+
+                target.isNotBlank() && looksLikeAppName(target) ->
+                    KaiParsedCommand.OpenApp(resolveAppAlias(target))
+
+                target.isNotBlank() && !isQuestionLike(text) ->
+                    KaiParsedCommand.Click(target)
+
+                else ->
+                    KaiParsedCommand.Ask(text)
             }
         }
 
@@ -303,22 +388,37 @@ object KaiCommandParser {
             val targetRaw = extractAfter(text, *clickVerbs.toTypedArray())
             val target = cleanupTargetText(targetRaw)
             val detectedApp = findAppAliasIn(target)
+
             return when {
-                target.isNotBlank() && shouldPreferUiClickTarget(text, target) -> KaiParsedCommand.Click(target)
-                detectedApp != null -> KaiParsedCommand.OpenApp(detectedApp)
-                target.isNotBlank() && looksLikeAppName(target) -> KaiParsedCommand.OpenApp(resolveAppAlias(target))
-                target.isNotBlank() -> KaiParsedCommand.Click(target)
-                else -> KaiParsedCommand.Ask(text)
+                target.isNotBlank() && shouldPreferUiClickTarget(text, target) ->
+                    KaiParsedCommand.Click(target)
+
+                detectedApp != null ->
+                    KaiParsedCommand.OpenApp(detectedApp)
+
+                looksLikeAppName(target) ->
+                    KaiParsedCommand.OpenApp(resolveAppAlias(target))
+
+                target.isNotBlank() ->
+                    KaiParsedCommand.Click(target)
+
+                else ->
+                    KaiParsedCommand.Ask(text)
             }
         }
 
-        if (!isQuestionLike(text)) {
-            findAppAliasIn(text)?.let { return KaiParsedCommand.OpenApp(it) }
-            if (looksLikeAppName(text)) return KaiParsedCommand.OpenApp(resolveAppAlias(text))
+        findAppAliasIn(text)?.let { detected ->
+            if (!isQuestionLike(text)) {
+                return KaiParsedCommand.OpenApp(detected)
+            }
+        }
+
+        if (looksLikeAppName(text) && !isQuestionLike(text)) {
+            return KaiParsedCommand.OpenApp(resolveAppAlias(text))
         }
 
         if (containsAny(lower, "اكتب", "type", "write") && isLikelyFreeTextTyping(text)) {
-            return KaiParsedCommand.TypeText(extractQuotedText(text).ifBlank { text })
+            return KaiParsedCommand.TypeText(text)
         }
 
         return KaiParsedCommand.Ask(text)

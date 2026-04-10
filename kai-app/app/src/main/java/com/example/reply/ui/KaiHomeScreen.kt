@@ -49,7 +49,6 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
-import androidx.compose.material.icons.filled.Call
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Mic
@@ -94,7 +93,6 @@ import androidx.compose.ui.unit.sp
 import com.example.reply.R
 import com.example.reply.agent.KaiAgentController
 import com.example.reply.agent.KaiAgentLoopEngine
-import com.example.reply.agent.KaiObservationRuntime
 import com.example.reply.data.supabase.KaiChatRepository
 import com.example.reply.data.supabase.KaiMemoryRepository
 import kotlinx.coroutines.Dispatchers
@@ -170,7 +168,7 @@ fun KaiHomeScreen(
     }
 
     LaunchedEffect(Unit) {
-        KaiObservationRuntime.ensureBridge(context.applicationContext)
+        KaiAgentController.ensureRuntimeObservationBridge(context.applicationContext)
     }
 
     var messages by rememberSaveable(stateSaver = ChatMsgListSaver) {
@@ -297,7 +295,7 @@ fun KaiHomeScreen(
     fun requestFreshDump(delayMs: Long = 120L) {
         scope.launch {
             delay(delayMs)
-            KaiObservationRuntime.requestImmediateDump()
+            sendKaiCmd(KaiAccessibilityService.CMD_DUMP)
         }
     }
 
@@ -615,9 +613,6 @@ fun KaiHomeScreen(
         if (KaiAgentController.isRunning()) {
             push(MsgRole.SYSTEM, "Monitoring carried into action loop")
         }
-        if (!KaiObservationRuntime.hasRecentUsefulObservation(1800L)) {
-            KaiObservationRuntime.requestImmediateDump()
-        }
 
         val myRunToken = agentRunToken + 1
         agentRunToken = myRunToken
@@ -735,6 +730,10 @@ fun KaiHomeScreen(
                 )
                 push(MsgRole.SYSTEM, if (running) "Agent active" else "Agent off")
                 restartVoiceLoop()
+            }
+
+            KaiParsedCommand.SoftReset -> {
+                performSoftReset(notify = true)
             }
 
             KaiParsedCommand.Back -> {
@@ -1278,13 +1277,6 @@ fun KaiHomeScreen(
                         icon = if (voiceLoop || isListening) Icons.Filled.Close else Icons.Filled.Mic,
                         tint = if (voiceLoop || isListening) Color(0xFFFF6B6B) else auroraA,
                         onClick = { toggleTalk() }
-                    )
-
-                    CircleIconButton(
-                        icon = Icons.Filled.Call,
-                        tint = if (KaiBubbleManager.isShowing()) auroraB else textMuted,
-                        onClick = { toggleIsland() },
-                        playSound = false
                     )
                 }
             }

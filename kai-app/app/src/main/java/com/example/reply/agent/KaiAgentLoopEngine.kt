@@ -64,6 +64,7 @@ class KaiAgentLoopEngine(
                     )
                 }
             } finally {
+                KaiObservationRuntime.softCleanupAfterRun()
                 KaiBubbleManager.releaseAllSuppression()
                 KaiBubbleManager.softResetUiState()
                 KaiAgentController.finishActionLoopSession()
@@ -130,18 +131,20 @@ class KaiAgentLoopEngine(
                 ensureActiveOrThrow()
 
                 KaiObservationRuntime.ensureBridge(appContext)
-                executor.resetRuntimeState(clearLastGoodScreen = true)
+                KaiObservationRuntime.softCleanupAfterRun()
+                executor.resetRuntimeState(clearLastGoodScreen = false)
                 executor.resetObservationTransitionStateForRun()
 
                 val startupObservationBaseline = System.currentTimeMillis()
                 if (!KaiObservationRuntime.isWatching) {
                     KaiObservationRuntime.startWatching(immediateDump = true)
-                } else if (!KaiObservationRuntime.hasRecentUsefulObservation(1200L)) {
-                    KaiObservationRuntime.requestImmediateDump()
+                }
+                if (!KaiObservationRuntime.hasRecentUsefulObservation(1600L)) {
+                    KaiObservationRuntime.requestWarmupObservation(burstCount = 4)
                 }
                 KaiObservationRuntime.awaitFresh(
                     afterTime = startupObservationBaseline,
-                    timeoutMs = 1400L
+                    timeoutMs = 2200L
                 )
                 KaiBubbleManager.releaseAllSuppression()
                 KaiBubbleManager.softResetUiState()
