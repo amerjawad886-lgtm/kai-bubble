@@ -85,10 +85,6 @@ private const val ACTION_KAI_APPEND_CHAT = "com.example.reply.APPEND_CHAT"
 private const val EXTRA_APPEND_TEXT = "append_text"
 private const val EXTRA_APPEND_ROLE = "append_role"
 
-// FIX: Removed the empty no-arg KaiBubbleUI() overload that existed as a "legacy wrapper"
-// with no body and no callers. It was dead code causing confusion about which overload
-// is the real one. The single real composable below is the only entry point.
-
 @Composable
 fun KaiBubbleUI(
     context: Context,
@@ -126,6 +122,20 @@ fun KaiBubbleUI(
         SpeechRecognizer.createSpeechRecognizer(context)
     }
     val memoryRepo = remember { KaiMemoryRepository(context.applicationContext) }
+
+    fun computedIdleStatus(): String {
+        return when {
+            loopRunning -> "Agent working"
+            bubbleListening -> "Listening"
+            bubbleLoop -> "Talk mode"
+            agentRunning -> "Monitoring"
+            eyeWatching -> {
+                if (KaiObservationRuntime.hasRecentAuthoritative(2200L)) "Watching"
+                else "Watching…"
+            }
+            else -> "Ready"
+        }
+    }
 
     LaunchedEffect(Unit) {
         KaiAgentController.ensureRuntimeObservationBridge(context.applicationContext)
@@ -180,17 +190,6 @@ fun KaiBubbleUI(
         }
     }
 
-    fun computedIdleStatus(): String {
-        return when {
-            loopRunning -> "Agent working"
-            agentRunning -> "Monitoring"
-            eyeWatching -> if (KaiObservationRuntime.hasRecentAuthoritative(2200L)) "Watching" else "Watching…"
-            bubbleListening -> "Listening"
-            bubbleLoop -> "Talk mode"
-            else -> "Ready"
-        }
-    }
-
     fun startEyeWatching() {
         KaiObservationRuntime.ensureBridge(context.applicationContext)
         KaiObservationRuntime.startWatching(immediateDump = true)
@@ -216,8 +215,14 @@ fun KaiBubbleUI(
         cancelPendingRestart()
         listenSession += 1
         bubbleListening = false
-        try { recognizer.stopListening() } catch (_: Exception) {}
-        try { recognizer.cancel() } catch (_: Exception) {}
+        try {
+            recognizer.stopListening()
+        } catch (_: Exception) {
+        }
+        try {
+            recognizer.cancel()
+        } catch (_: Exception) {
+        }
     }
 
     fun startBubbleListening() {
@@ -244,7 +249,10 @@ fun KaiBubbleUI(
         lastListenStartAt = now
 
         val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+            putExtra(
+                RecognizerIntent.EXTRA_LANGUAGE_MODEL,
+                RecognizerIntent.LANGUAGE_MODEL_FREE_FORM
+            )
             putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault())
             putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, Locale.getDefault())
             putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, false)
@@ -277,7 +285,10 @@ fun KaiBubbleUI(
         scope.launch {
             stopBubbleListening()
             recognizerErrorCount = 0
-            try { recognizer.destroy() } catch (_: Exception) {}
+            try {
+                recognizer.destroy()
+            } catch (_: Exception) {
+            }
             recognizerEpoch += 1
             delay(300)
             needsBubbleRecognizerRestart = true
@@ -419,7 +430,7 @@ fun KaiBubbleUI(
             }
         )
         agentRunning = running
-        statusText = if (running) "Monitoring" else "Ready"
+        statusText = if (running) "Monitoring" else computedIdleStatus()
         appendToMainChat(if (running) "Agent active" else "Agent off", "system")
     }
 
@@ -492,7 +503,10 @@ fun KaiBubbleUI(
     DisposableEffect(Unit) {
         onDispose {
             cancelPendingRestart()
-            try { agentLoopEngine?.cancel() } catch (_: Exception) {}
+            try {
+                agentLoopEngine?.cancel()
+            } catch (_: Exception) {
+            }
             KaiBubbleManager.setInputModeEnabled(false)
             KaiBubbleManager.softResetUiState()
         }
@@ -513,15 +527,18 @@ fun KaiBubbleUI(
                         cancelCurrentActionLoop("Agent loop cancelled")
                         stopBubbleTalk()
                     }
+
                     KaiParsedCommand.ToggleAgent -> {
                         toggleAgent()
                         restartBubbleListening()
                     }
+
                     KaiParsedCommand.Report -> {
                         expanded = true
                         promptComposerOpen = true
                         statusText = "Prompt ready"
                     }
+
                     KaiParsedCommand.ReadScreen,
                     KaiParsedCommand.AnalyzeScreen -> {
                         if (customPromptText.isNotBlank()) {
@@ -533,22 +550,31 @@ fun KaiBubbleUI(
                             statusText = "Prompt ready"
                         }
                     }
+
                     KaiParsedCommand.Back -> {
                         sendKaiCmd(KaiAccessibilityService.CMD_BACK)
                         restartBubbleListening()
                     }
+
                     KaiParsedCommand.Home -> {
                         sendKaiCmd(KaiAccessibilityService.CMD_HOME)
                         restartBubbleListening()
                     }
+
                     KaiParsedCommand.Recents -> {
                         sendKaiCmd(KaiAccessibilityService.CMD_RECENTS)
                         restartBubbleListening()
                     }
+
                     is KaiParsedCommand.Scroll -> {
-                        sendKaiCmd(KaiAccessibilityService.CMD_SCROLL, dir = command.dir, times = command.times)
+                        sendKaiCmd(
+                            KaiAccessibilityService.CMD_SCROLL,
+                            dir = command.dir,
+                            times = command.times
+                        )
                         restartBubbleListening()
                     }
+
                     is KaiParsedCommand.Click -> {
                         if (command.target.isNotBlank()) {
                             sendKaiCmd(KaiAccessibilityService.CMD_CLICK_TEXT, text = command.target)
@@ -557,6 +583,7 @@ fun KaiBubbleUI(
                             askKaiFromBubble(raw)
                         }
                     }
+
                     is KaiParsedCommand.TypeText -> {
                         if (command.text.isNotBlank()) {
                             sendKaiCmd(KaiAccessibilityService.CMD_TYPE, text = command.text)
@@ -565,12 +592,15 @@ fun KaiBubbleUI(
                             askKaiFromBubble(raw)
                         }
                     }
+
                     is KaiParsedCommand.OpenApp -> {
                         triggerBubbleAction("open ${command.appName}".trim())
                     }
+
                     is KaiParsedCommand.SaveMemory -> {
                         saveMemoryDirect(command.rawText, command.value)
                     }
+
                     is KaiParsedCommand.Ask -> askKaiFromBubble(command.text)
                 }
             }
@@ -607,13 +637,13 @@ fun KaiBubbleUI(
     DisposableEffect(recognizer) {
         recognizer.setRecognitionListener(bubbleListener)
         onDispose {
-            try { recognizer.destroy() } catch (_: Exception) {}
+            try {
+                recognizer.destroy()
+            } catch (_: Exception) {
+            }
         }
     }
 
-    // This receiver has real work: it updates agentRunning and statusText in the bubble
-    // UI when a dump arrives in response to a monitoring/continuous-analysis request.
-    // Unlike the empty dumpReceiver that was removed from KaiHomeScreen, this one is kept.
     DisposableEffect(Unit) {
         val receiver = object : BroadcastReceiver() {
             override fun onReceive(c: Context?, i: Intent?) {
@@ -636,7 +666,10 @@ fun KaiBubbleUI(
         }
 
         onDispose {
-            try { context.unregisterReceiver(receiver) } catch (_: Exception) {}
+            try {
+                context.unregisterReceiver(receiver)
+            } catch (_: Exception) {
+            }
         }
     }
 
@@ -709,9 +742,19 @@ fun KaiBubbleUI(
             horizontalArrangement = Arrangement.spacedBy(6.dp)
         ) {
             if (icon != null) {
-                Icon(imageVector = icon, contentDescription = null, tint = Color.White, modifier = Modifier.size(15.dp))
+                Icon(
+                    imageVector = icon,
+                    contentDescription = null,
+                    tint = Color.White,
+                    modifier = Modifier.size(15.dp)
+                )
             }
-            Text(text = label, color = textMain, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+            Text(
+                text = label,
+                color = textMain,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.SemiBold
+            )
         }
     }
 
@@ -729,7 +772,11 @@ fun KaiBubbleUI(
                 .clip(CircleShape)
                 .background(
                     Brush.radialGradient(
-                        listOf(aurora.copy(alpha = 0.16f), aurora2.copy(alpha = 0.08f), Color.Transparent)
+                        listOf(
+                            aurora.copy(alpha = 0.16f),
+                            aurora2.copy(alpha = 0.08f),
+                            Color.Transparent
+                        )
                     )
                 )
                 .border(1.dp, Color.White.copy(alpha = 0.10f), CircleShape)
@@ -774,7 +821,11 @@ fun KaiBubbleUI(
                     .border(
                         1.35.dp,
                         Brush.horizontalGradient(
-                            listOf(aurora.copy(alpha = 0.88f), aurora2.copy(alpha = 0.74f), aurora3.copy(alpha = 0.56f))
+                            listOf(
+                                aurora.copy(alpha = 0.88f),
+                                aurora2.copy(alpha = 0.74f),
+                                aurora3.copy(alpha = 0.56f)
+                            )
                         ),
                         RoundedCornerShape(32.dp)
                     )
@@ -790,8 +841,9 @@ fun KaiBubbleUI(
                         tint = if (bubbleLoop || bubbleListening) aurora3 else textMain,
                         size = 48,
                         onTap = {
-                            if (bubbleLoop || bubbleListening) stopBubbleTalk()
-                            else {
+                            if (bubbleLoop || bubbleListening) {
+                                stopBubbleTalk()
+                            } else {
                                 bubbleLoop = true
                                 startBubbleListening()
                             }
