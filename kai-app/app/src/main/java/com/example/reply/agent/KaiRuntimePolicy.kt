@@ -115,6 +115,11 @@ object KaiSurfaceModel {
     }
 
     fun familyOf(state: KaiScreenState): KaiSurfaceFamily {
+        if (state.packageName.isBlank()) return KaiSurfaceFamily.UNKNOWN_SURFACE
+        if (state.isOverlayPolluted() && !state.isLauncher()) return KaiSurfaceFamily.UNKNOWN_SURFACE
+        if (state.isWeakObservation() && !state.isLauncher() && state.elements.size < 2) {
+            return KaiSurfaceFamily.UNKNOWN_SURFACE
+        }
         if (state.isLauncher()) return KaiSurfaceFamily.LAUNCHER_SURFACE
         if (state.isSettingsSurface()) return KaiSurfaceFamily.SETTINGS_SURFACE
         if (state.isSheetOrDialogSurface()) return KaiSurfaceFamily.SHEET_OR_DIALOG_SURFACE

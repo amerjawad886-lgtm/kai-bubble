@@ -1,10 +1,7 @@
 package com.example.reply.ui
 
-import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
-import android.content.IntentFilter
-import android.os.Build
 import android.os.Bundle
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
@@ -138,7 +135,6 @@ fun KaiBubbleUI(
     }
 
     LaunchedEffect(Unit) {
-        KaiAgentController.ensureRuntimeObservationBridge(context.applicationContext)
         KaiObservationRuntime.ensureBridge(context.applicationContext)
         eyeWatching = KaiObservationRuntime.isWatching
         statusText = computedIdleStatus()
@@ -192,8 +188,12 @@ fun KaiBubbleUI(
 
     fun startEyeWatching() {
         KaiObservationRuntime.ensureBridge(context.applicationContext)
-        KaiObservationRuntime.startWatching(immediateDump = true)
-        eyeWatching = true
+        if (!KaiObservationRuntime.isWatching) {
+            KaiObservationRuntime.startWatching(immediateDump = true)
+        } else {
+            KaiObservationRuntime.requestImmediateDump()
+        }
+        eyeWatching = KaiObservationRuntime.isWatching
         statusText = computedIdleStatus()
         appendToMainChat("Kai eye watching ON", "system")
     }
@@ -422,7 +422,7 @@ fun KaiBubbleUI(
             customPrompt = customPromptText,
             onRequestDump = {
                 pendingAgentSilentDump = true
-                sendKaiCmd(KaiAccessibilityService.CMD_DUMP)
+                KaiObservationRuntime.requestImmediateDump()
             },
             onInsight = { insight ->
                 statusText = "Monitoring"
@@ -445,11 +445,11 @@ fun KaiBubbleUI(
         actionRunToken += 1
         val myRunToken = actionRunToken
 
-        if (!KaiObservationRuntime.isWatching) {
-            KaiObservationRuntime.ensureBridge(context.applicationContext)
-            KaiObservationRuntime.startWatching(immediateDump = true)
-            eyeWatching = true
+        KaiObservationRuntime.ensureBridge(context.applicationContext)
+        if (!KaiObservationRuntime.hasRecentUsefulObservation(1800L)) {
+            KaiObservationRuntime.requestImmediateDump()
         }
+        eyeWatching = KaiObservationRuntime.isWatching
 
         if (KaiAgentController.isRunning()) {
             agentRunning = false
@@ -644,32 +644,15 @@ fun KaiBubbleUI(
         }
     }
 
-    DisposableEffect(Unit) {
-        val receiver = object : BroadcastReceiver() {
-            override fun onReceive(c: Context?, i: Intent?) {
-                if (i?.action != KaiAccessibilityService.ACTION_KAI_DUMP_RESULT) return
-                if (pendingAgentSilentDump) {
-                    pendingAgentSilentDump = false
-                }
-                eyeWatching = KaiObservationRuntime.isWatching
-                agentRunning = KaiAgentController.isRunning()
-                statusText = computedIdleStatus()
+    LaunchedEffect(Unit) {
+        while (true) {
+            if (pendingAgentSilentDump && KaiObservationRuntime.hasRecentUsefulObservation(1800L)) {
+                pendingAgentSilentDump = false
             }
-        }
-
-        val filter = IntentFilter(KaiAccessibilityService.ACTION_KAI_DUMP_RESULT)
-        if (Build.VERSION.SDK_INT >= 33) {
-            context.registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED)
-        } else {
-            @Suppress("DEPRECATION")
-            context.registerReceiver(receiver, filter)
-        }
-
-        onDispose {
-            try {
-                context.unregisterReceiver(receiver)
-            } catch (_: Exception) {
-            }
+            eyeWatching = KaiObservationRuntime.isWatching
+            agentRunning = KaiAgentController.isRunning()
+            statusText = computedIdleStatus()
+            delay(280L)
         }
     }
 

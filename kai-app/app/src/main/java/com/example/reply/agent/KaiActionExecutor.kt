@@ -93,13 +93,29 @@ class KaiActionExecutor(
         set(_) { /* managed by gate */ }
 
     fun resetRuntimeState(clearLastGoodScreen: Boolean = true) {
-        gate.reset()
+        if (clearLastGoodScreen) {
+            gate.reset()
+        } else {
+            val preservedCanonical = gate.canonical
+            val preservedFingerprint = gate.lastAcceptedFingerprint
+            val preservedAcceptedAt = gate.lastAcceptedObservationAt
+            gate.reset()
+            gate.canonical = preservedCanonical
+            gate.lastAcceptedFingerprint = preservedFingerprint
+            gate.lastAcceptedObservationAt = preservedAcceptedAt
+        }
         lastRecoveryContextKey = ""
         repeatedRecoveryContextCount = 0
     }
 
     internal fun softResetObservationState() {
+        val preservedCanonical = gate.canonical
+        val preservedFingerprint = gate.lastAcceptedFingerprint
+        val preservedAcceptedAt = gate.lastAcceptedObservationAt
         gate.reset()
+        gate.canonical = preservedCanonical
+        gate.lastAcceptedFingerprint = preservedFingerprint
+        gate.lastAcceptedObservationAt = preservedAcceptedAt
         lastRecoveryContextKey = ""
         repeatedRecoveryContextCount = 0
     }

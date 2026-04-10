@@ -64,6 +64,15 @@ object KaiObservationRuntime {
         requestTransitionReset()
     }
 
+    fun clearRuntimeState(keepWatching: Boolean = true) {
+        if (!keepWatching) {
+            stopWatching()
+        }
+        lastWatchExpectedPackage = ""
+        reset()
+        requestTransitionReset()
+    }
+
     fun ensureBridge(context: Context) {
         val appCtx = context.applicationContext
         storedContext = appCtx
@@ -159,7 +168,7 @@ object KaiObservationRuntime {
             val l = live
             if (l.updatedAt > afterTime && isUsefulObservation(l)) return l
 
-            if (isWatching && System.currentTimeMillis() - nudgedAt >= 300L) {
+            if (System.currentTimeMillis() - nudgedAt >= 320L) {
                 nudgedAt = System.currentTimeMillis()
                 requestImmediateDump(lastWatchExpectedPackage)
             }
@@ -207,12 +216,7 @@ object KaiObservationRuntime {
 
         if (isWatching && watchJob?.isActive == true) {
             if (immediateDump) {
-                repeat(WATCH_BOOTSTRAP_BURST) { index ->
-                    watchScope.launch {
-                        if (index > 0) delay(index * WATCH_BOOTSTRAP_GAP_MS)
-                        requestImmediateDump(lastWatchExpectedPackage)
-                    }
-                }
+                requestImmediateDump(lastWatchExpectedPackage)
             }
             return
         }
@@ -247,6 +251,12 @@ object KaiObservationRuntime {
         return isUsefulObservation(obs) &&
             obs.updatedAt > 0 &&
             System.currentTimeMillis() - obs.updatedAt <= maxAgeMs
+    }
+
+    fun hasRecentUsefulObservation(maxAgeMs: Long): Boolean {
+        val now = System.currentTimeMillis()
+        return (isUsefulObservation(authoritative) && authoritative.updatedAt > 0 && now - authoritative.updatedAt <= maxAgeMs) ||
+            (isUsefulObservation(live) && live.updatedAt > 0 && now - live.updatedAt <= maxAgeMs)
     }
 
     fun getBestAvailable(): KaiObservation {

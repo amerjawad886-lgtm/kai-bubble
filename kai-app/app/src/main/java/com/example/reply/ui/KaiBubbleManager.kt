@@ -87,6 +87,9 @@ object KaiBubbleManager {
                 try {
                     bubbleView?.visibility = View.VISIBLE
                     applyActionUiState()
+                    if (!inputModeEnabled) {
+                        bubbleView?.clearFocus()
+                    }
                 } catch (_: Exception) {
                 }
                 onReady?.invoke()
@@ -149,6 +152,8 @@ object KaiBubbleManager {
             inputModeEnabled = false
             suppressionCounter = 0
             strongSuppressionCounter = 0
+            lastX = 0
+            lastY = topOffsetPx
         }
     }
 

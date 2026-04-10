@@ -94,6 +94,7 @@ import androidx.compose.ui.unit.sp
 import com.example.reply.R
 import com.example.reply.agent.KaiAgentController
 import com.example.reply.agent.KaiAgentLoopEngine
+import com.example.reply.agent.KaiObservationRuntime
 import com.example.reply.data.supabase.KaiChatRepository
 import com.example.reply.data.supabase.KaiMemoryRepository
 import kotlinx.coroutines.Dispatchers
@@ -169,7 +170,7 @@ fun KaiHomeScreen(
     }
 
     LaunchedEffect(Unit) {
-        KaiAgentController.ensureRuntimeObservationBridge(context.applicationContext)
+        KaiObservationRuntime.ensureBridge(context.applicationContext)
     }
 
     var messages by rememberSaveable(stateSaver = ChatMsgListSaver) {
@@ -296,7 +297,7 @@ fun KaiHomeScreen(
     fun requestFreshDump(delayMs: Long = 120L) {
         scope.launch {
             delay(delayMs)
-            sendKaiCmd(KaiAccessibilityService.CMD_DUMP)
+            KaiObservationRuntime.requestImmediateDump()
         }
     }
 
@@ -613,6 +614,9 @@ fun KaiHomeScreen(
 
         if (KaiAgentController.isRunning()) {
             push(MsgRole.SYSTEM, "Monitoring carried into action loop")
+        }
+        if (!KaiObservationRuntime.hasRecentUsefulObservation(1800L)) {
+            KaiObservationRuntime.requestImmediateDump()
         }
 
         val myRunToken = agentRunToken + 1

@@ -27,17 +27,10 @@ class KaiAgentLoopEngine(
     fun isRunning(): Boolean = runJob?.isActive == true
 
     fun cancel() {
-        // Only finish the action-loop session when a real in-flight run existed.
-        // start() calls cancel() as a pre-start eviction; firing finishActionLoopSession()
-        // in that case clears actionLoopActive too early and races the next run startup.
-        val wasActive = runJob?.isActive == true
         runJob?.cancel()
         runJob = null
         KaiBubbleManager.releaseAllSuppression()
         KaiBubbleManager.softResetUiState()
-        if (wasActive) {
-            KaiAgentController.finishActionLoopSession()
-        }
     }
 
     fun destroy() {
@@ -137,21 +130,21 @@ class KaiAgentLoopEngine(
                 ensureActiveOrThrow()
 
                 KaiObservationRuntime.ensureBridge(appContext)
-                KaiObservationRuntime.hardReset(stopWatching = true)
                 executor.resetRuntimeState(clearLastGoodScreen = true)
                 executor.resetObservationTransitionStateForRun()
-                // Give both the accessibility service and the runtime bridge time to clear
-                // previous-run residue before starting a fresh watching loop.
-                kotlinx.coroutines.delay(220L)
+
                 val startupObservationBaseline = System.currentTimeMillis()
-                KaiObservationRuntime.startWatching(immediateDump = true)
+                if (!KaiObservationRuntime.isWatching) {
+                    KaiObservationRuntime.startWatching(immediateDump = true)
+                } else if (!KaiObservationRuntime.hasRecentUsefulObservation(1200L)) {
+                    KaiObservationRuntime.requestImmediateDump()
+                }
                 KaiObservationRuntime.awaitFresh(
                     afterTime = startupObservationBaseline,
-                    timeoutMs = 1800L
+                    timeoutMs = 1400L
                 )
                 KaiBubbleManager.releaseAllSuppression()
                 KaiBubbleManager.softResetUiState()
-                KaiAgentController.startActionLoopSession(userPrompt)
 
                 fun shouldUseAppLaunchSafeGate(prompt: String): Boolean {
                     val normalized = KaiScreenStateParser.normalize(prompt)

@@ -38,17 +38,10 @@ object OpenAIClient {
         .build()
 
     private val streamSeq = AtomicInteger(0)
+    @Volatile private var activeStreamCall: Call? = null
+    @Volatile private var activeStreamToken: Int = 0
 
-    @Volatile
-    private var activeStreamCall: Call? = null
-
-    @Volatile
-    private var activeStreamToken: Int = 0
-
-    private fun isCurrentStream(token: Int): Boolean {
-        return activeStreamToken == token
-    }
-
+    private fun isCurrentStream(token: Int): Boolean = activeStreamToken == token
     private fun clearActiveStreamState() {
         activeStreamCall = null
         activeStreamToken = 0
@@ -56,11 +49,9 @@ object OpenAIClient {
 
     private fun detectLikelyLanguage(text: String): String {
         val lowered = text.lowercase()
-
         val arabicChars = text.count { it in '\u0600'..'\u06FF' }
         val ukrainianHits = lowered.count { it == 'ї' || it == 'є' || it == 'ґ' || it == 'і' }
         val latinChars = text.count { it.isLetter() && it.code in 65..122 }
-
         return when {
             arabicChars >= 2 && arabicChars >= latinChars -> "Arabic"
             ukrainianHits >= 1 -> "Ukrainian"
@@ -69,11 +60,14 @@ object OpenAIClient {
         }
     }
 
-    private fun sanitizeMessageText(text: String, maxLen: Int): String {
-        return text
-            .replace(Regex("""\s+"""), " ")
-            .trim()
-            .take(maxLen)
+    private fun sanitizeMessageText(text: String, maxLen: Int): String =
+        text.replace(Regex("""\s+"""), " ").trim().take(maxLen)
+
+    private fun temperatureFor(task: KaiTask): Double = when (task) {
+        KaiTask.FAST_COMMAND -> 0.15
+        KaiTask.ACTION_PLANNING -> 0.2
+        KaiTask.TTS -> 0.2
+        KaiTask.BRAIN -> 0.4
     }
 
     private fun systemPrompt(languageHint: String, task: KaiTask): String {
@@ -85,7 +79,6 @@ object OpenAIClient {
                 - Preserve app names exactly as spoken when possible.
                 - When useful, structure the answer clearly but keep it natural.
             """.trimIndent()
-
             KaiTask.ACTION_PLANNING -> """
                 - You are in action-planning mode for Android execution.
                 - Be concise and deterministic; avoid verbose prose.
@@ -94,14 +87,12 @@ object OpenAIClient {
                 - Prefer stage-based navigation: app -> surface -> entity -> input -> submit -> verify.
                 - Avoid speculative alternatives unless needed for safe fallback.
             """.trimIndent()
-
             KaiTask.FAST_COMMAND -> """
                 - Prefer short, practical output.
                 - Focus on command interpretation, app/action intent, and clarity.
                 - If the user mentions an app name, do not translate the app name.
                 - Avoid unnecessary explanation.
             """.trimIndent()
-
             KaiTask.TTS -> """
                 - Keep output short and voice-friendly.
                 - Avoid verbose formatting.
@@ -128,18 +119,11 @@ object OpenAIClient {
             - Priority languages: Arabic, English, Ukrainian.
             - If the latest message is mixed, follow the dominant language and script.
             - Never randomly switch languages.
-            - If the user speaks in English, answer fully in English.
-            - If the user speaks in Arabic, answer fully in Arabic.
-            - If the user speaks in Ukrainian, answer in Ukrainian.
-            - If the user clearly uses another language such as Turkish or Japanese, answer in that same language when possible.
-            - Never transliterate English words into Arabic letters.
-            - Never transliterate Arabic into English letters.
             - Preserve the original script naturally.
 
             App names:
             - Keep app names exactly as commonly written.
             - Never translate common app names into Arabic unless the user already did.
-            - Examples: Instagram, WhatsApp, Chrome, Settings, Messages, Telegram, Play Store, Notes, Google.
 
             Style:
             - Keep answers concise, natural, and voice-friendly.
@@ -154,51 +138,27 @@ object OpenAIClient {
     }
 
     fun titleFromText(text: String): String {
-        val clean = text
-            .replace(Regex("""\s+"""), " ")
-            .trim()
-
+        val clean = text.replace(Regex("""\s+"""), " ").trim()
         if (clean.isBlank()) return "New Chat"
         return clean.take(36).trim().ifBlank { "New Chat" }
     }
 
-    private fun buildMessages(
-        userText: String,
-        history: List<OpenAIHistoryItem>,
-        task: KaiTask
-    ): JSONArray {
+    private fun buildMessages(userText: String, history: List<OpenAIHistoryItem>, task: KaiTask): JSONArray {
         val detected = detectLikelyLanguage(userText)
         val safeUserText = sanitizeMessageText(userText, MAX_USER_TEXT_LEN)
-
-        val arr = JSONArray()
-            .put(
-                JSONObject()
-                    .put("role", "system")
-                    .put("content", systemPrompt(detected, task))
-            )
-
-        history
-            .takeLast(MAX_HISTORY_ITEMS)
-            .forEach { item ->
-                val role = item.role.trim().lowercase()
-                if (role !in listOf("system", "user", "assistant")) return@forEach
-
-                val safeText = sanitizeMessageText(item.text, MAX_HISTORY_TEXT_LEN)
-                if (safeText.isBlank()) return@forEach
-
-                arr.put(
-                    JSONObject()
-                        .put("role", role)
-                        .put("content", safeText)
-                )
-            }
-
-        arr.put(
-            JSONObject()
-                .put("role", "user")
-                .put("content", safeUserText)
+        val arr = JSONArray().put(
+            JSONObject().put("role", "system").put("content", systemPrompt(detected, task))
         )
 
+        history.takeLast(MAX_HISTORY_ITEMS).forEach { item ->
+            val role = item.role.trim().lowercase()
+            if (role !in listOf("system", "user", "assistant")) return@forEach
+            val safeText = sanitizeMessageText(item.text, MAX_HISTORY_TEXT_LEN)
+            if (safeText.isBlank()) return@forEach
+            arr.put(JSONObject().put("role", role).put("content", safeText))
+        }
+
+        arr.put(JSONObject().put("role", "user").put("content", safeUserText))
         return arr
     }
 
@@ -209,14 +169,10 @@ object OpenAIClient {
         return msg.getString("content").trim()
     }
 
-    private fun extractErrorMessage(text: String): String {
-        return try {
-            JSONObject(text).optJSONObject("error")?.optString("message")
-                ?.takeIf { it.isNotBlank() }
-                ?: text
-        } catch (_: Exception) {
-            text
-        }
+    private fun extractErrorMessage(text: String): String = try {
+        JSONObject(text).optJSONObject("error")?.optString("message")?.takeIf { it.isNotBlank() } ?: text
+    } catch (_: Exception) {
+        text
     }
 
     @Throws(Exception::class)
@@ -231,15 +187,10 @@ object OpenAIClient {
         }
 
         cancelActiveStream()
-
         val payload = JSONObject()
             .put("model", KaiModelRouter.forTask(task))
             .put("messages", buildMessages(userText, history, task))
-            .put("temperature", when (task) {
-                KaiTask.FAST_COMMAND -> 0.2
-                KaiTask.ACTION_PLANNING -> 0.25
-                else -> 0.45
-            })
+            .put("temperature", temperatureFor(task))
             .toString()
 
         val req = Request.Builder()
@@ -252,24 +203,18 @@ object OpenAIClient {
 
         client.newCall(req).execute().use { res ->
             val text = res.body?.string().orEmpty()
-            if (!res.isSuccessful) {
-                return "OpenAI error (${res.code}): ${extractErrorMessage(text)}"
-            }
+            if (!res.isSuccessful) return "OpenAI error (${res.code}): ${extractErrorMessage(text)}"
             return parseReply(text)
         }
     }
 
     fun cancelActiveStream() {
         streamSeq.incrementAndGet()
-        try {
-            activeStreamCall?.cancel()
-        } catch (_: Exception) {
-        }
+        try { activeStreamCall?.cancel() } catch (_: Exception) {}
         clearActiveStreamState()
     }
 
     fun resetTransientStateForNewRun() {
-        // Idempotent runtime reset: safe to call multiple times before a run.
         cancelActiveStream()
     }
 
@@ -294,11 +239,7 @@ object OpenAIClient {
         val payload = JSONObject()
             .put("model", KaiModelRouter.forTask(task))
             .put("messages", buildMessages(userText, history, task))
-            .put("temperature", when (task) {
-                KaiTask.FAST_COMMAND -> 0.2
-                KaiTask.ACTION_PLANNING -> 0.25
-                else -> 0.45
-            })
+            .put("temperature", temperatureFor(task))
             .put("stream", true)
             .toString()
 
@@ -314,27 +255,22 @@ object OpenAIClient {
         activeStreamCall = call
         activeStreamToken = mySeq
 
-        fun stillCurrent(): Boolean {
-            return isCurrentStream(mySeq) && streamSeq.get() == mySeq
-        }
-
+        fun stillCurrent(): Boolean = isCurrentStream(mySeq) && streamSeq.get() == mySeq
         fun clearIfCurrent() {
-            if (stillCurrent()) {
-                clearActiveStreamState()
-            }
+            if (stillCurrent()) clearActiveStreamState()
         }
 
         var streamCompleted = false
-        fun markCompleted(action: () -> Unit) {
+        fun complete(block: () -> Unit) {
             if (streamCompleted) return
             streamCompleted = true
-            action()
+            block()
         }
 
         call.enqueue(object : okhttp3.Callback {
             override fun onFailure(call: Call, e: IOException) {
                 if (!stillCurrent()) return
-                markCompleted {
+                complete {
                     clearIfCurrent()
                     onError("Connection failed: ${e.message ?: "Unknown"}")
                 }
@@ -350,7 +286,7 @@ object OpenAIClient {
                     if (!res.isSuccessful) {
                         if (!stillCurrent()) return
                         val text = res.body?.string().orEmpty()
-                        markCompleted {
+                        complete {
                             clearIfCurrent()
                             onError("OpenAI error (${res.code}): ${extractErrorMessage(text)}")
                         }
@@ -359,8 +295,7 @@ object OpenAIClient {
 
                     val source = res.body?.source()
                     if (source == null) {
-                        if (!stillCurrent()) return
-                        markCompleted {
+                        complete {
                             clearIfCurrent()
                             onError("Empty response")
                         }
@@ -368,20 +303,16 @@ object OpenAIClient {
                     }
 
                     val finalText = StringBuilder()
-
                     try {
                         while (!source.exhausted()) {
                             if (!stillCurrent()) return
-
                             val line = source.readUtf8Line() ?: continue
                             if (!line.startsWith("data:")) continue
 
                             val data = line.removePrefix("data:").trim()
                             if (data.isBlank()) continue
-
                             if (data == "[DONE]") {
-                                if (!stillCurrent()) return
-                                markCompleted {
+                                complete {
                                     clearIfCurrent()
                                     val final = finalText.toString().trim().ifBlank { "…" }
                                     onFinalText(final)
@@ -393,9 +324,7 @@ object OpenAIClient {
                             val delta = try {
                                 val obj = JSONObject(data)
                                 val choices = obj.optJSONArray("choices") ?: JSONArray()
-                                if (choices.length() == 0) {
-                                    ""
-                                } else {
+                                if (choices.length() == 0) "" else {
                                     val c0 = choices.getJSONObject(0)
                                     val d = c0.optJSONObject("delta")
                                     d?.optString("content").orEmpty()
@@ -411,8 +340,7 @@ object OpenAIClient {
                             }
                         }
 
-                        if (!stillCurrent()) return
-                        markCompleted {
+                        complete {
                             clearIfCurrent()
                             val final = finalText.toString().trim().ifBlank { "…" }
                             onFinalText(final)
@@ -420,7 +348,7 @@ object OpenAIClient {
                         }
                     } catch (e: Exception) {
                         if (!stillCurrent()) return
-                        markCompleted {
+                        complete {
                             clearIfCurrent()
                             onError("Read error: ${e.message ?: "Unknown"}")
                         }

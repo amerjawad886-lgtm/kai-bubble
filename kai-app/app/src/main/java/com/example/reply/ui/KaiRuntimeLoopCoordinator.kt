@@ -19,14 +19,13 @@ object KaiRuntimeLoopCoordinator {
     private const val LOOP_START = "Agent loop starting…"
 
     private fun resetTransientStateForNewRun(context: Context) {
-        // Primary global preflight reset path before launching a new action loop.
+        // Preflight should clean transient UI/voice/model state only.
+        // Observation runtime ownership stays with KaiObservationRuntime / engine startup.
         val appContext = context.applicationContext
         KaiVoice.resetTransientStateForNewRun()
         OpenAIClient.resetTransientStateForNewRun()
         KaiAgentController.resetTransientStateForNewRun()
         KaiObservationRuntime.ensureBridge(appContext)
-        KaiObservationRuntime.reset()
-        KaiObservationRuntime.startWatching(immediateDump = true)
         KaiBubbleManager.releaseAllSuppression()
         KaiBubbleManager.softResetUiState()
     }
@@ -44,13 +43,9 @@ object KaiRuntimeLoopCoordinator {
         val appContext = context.applicationContext
         resetTransientStateForNewRun(appContext)
 
-        // Activate runtime-owned observation intake and keep watching alive
-        // through the handoff into action execution.
         KaiAgentController.ensureRuntimeObservationBridge(appContext)
-        KaiObservationRuntime.ensureBridge(appContext)
-        KaiObservationRuntime.startWatching(immediateDump = true)
 
-        if (KaiAgentController.isRunning()) {
+        if (KaiObservationRuntime.isWatching) {
             appendLog("system", "Monitoring carried into action loop")
         }
 

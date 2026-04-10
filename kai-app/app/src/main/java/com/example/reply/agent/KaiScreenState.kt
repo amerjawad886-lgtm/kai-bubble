@@ -162,21 +162,24 @@ data class KaiScreenState(
     }
 
     fun isMeaningful(): Boolean {
+        val normalizedDump = KaiScreenStateParser.normalize(rawDump)
         if (packageName.isBlank()) return false
-        if (rawDump.isBlank()) return false
-        if (rawDump.equals("(no active window)", ignoreCase = true)) return false
-        if (rawDump.equals("(empty dump)", ignoreCase = true)) return false
+        if (normalizedDump.isBlank()) return false
+        if (normalizedDump == KaiScreenStateParser.normalize("(no active window)")) return false
+        if (normalizedDump == KaiScreenStateParser.normalize("(empty dump)")) return false
         if (isOverlayPolluted()) return false
 
         val meaningfulLines = lines.count {
             KaiScreenStateParser.normalize(it).length >= 2
         }
-        val hasStructuredUi = elements.size >= 2 || likelyInputFields.isNotEmpty() || likelyPrimaryActions.isNotEmpty()
-        val semanticallyUsable = semanticConfidence >= 0.28f && (elements.isNotEmpty() || meaningfulLines >= 1)
+        val hasStructuredUi =
+            elements.size >= 2 || likelyInputFields.isNotEmpty() || likelyPrimaryActions.isNotEmpty()
+        val semanticallyUsable = semanticConfidence >= 0.28f &&
+            (elements.isNotEmpty() || meaningfulLines >= 1)
 
-        if (meaningfulLines >= 1 && rawDump.trim().length >= 12) return true
-        if (hasStructuredUi && rawDump.trim().length >= 8) return true
-        if (semanticallyUsable && rawDump.trim().length >= 8) return true
+        if (meaningfulLines >= 2 && rawDump.trim().length >= 16) return true
+        if (hasStructuredUi && rawDump.trim().length >= 10) return true
+        if (semanticallyUsable && rawDump.trim().length >= 10) return true
         return false
     }
 
@@ -185,7 +188,7 @@ data class KaiScreenState(
         if (rawDump.isBlank()) return true
 
         val normalizedDump = KaiScreenStateParser.normalize(rawDump)
-
+        if (normalizedDump.isBlank()) return true
         if (normalizedDump == KaiScreenStateParser.normalize("(no active window)")) return true
         if (normalizedDump == KaiScreenStateParser.normalize("(empty dump)")) return true
         if (isOverlayPolluted()) return true
@@ -193,21 +196,36 @@ data class KaiScreenState(
         val meaningfulLines = lines.count {
             KaiScreenStateParser.normalize(it).length >= 2
         }
-        val hasStructuredUi = elements.size >= 2 || likelyInputFields.isNotEmpty() || likelyPrimaryActions.isNotEmpty()
-        val semanticallyUsable = semanticConfidence >= 0.32f && (elements.isNotEmpty() || meaningfulLines >= 1)
+        val hasStructuredUi =
+            elements.size >= 2 || likelyInputFields.isNotEmpty() || likelyPrimaryActions.isNotEmpty()
+        val semanticallyUsable = semanticConfidence >= 0.32f &&
+            (elements.isNotEmpty() || meaningfulLines >= 1)
 
         if (meaningfulLines < 1 && !hasStructuredUi && !semanticallyUsable) return true
-        if (rawDump.length < 8 && !hasStructuredUi) return true
+        if (rawDump.trim().length < 10 && !hasStructuredUi) return true
+        if (isLauncher() && meaningfulLines < 2 && elements.size < 3) return true
 
         return false
     }
 
     fun isOverlayPolluted(): Boolean {
         val normalized = KaiScreenStateParser.normalize(rawDump)
+        if (normalized.isBlank()) return false
+
         val hits = KaiScreenStateParser.overlayPollutionHints.count {
             normalized.contains(KaiScreenStateParser.normalize(it))
         }
-        return hits >= 2
+        if (hits <= 1) return false
+
+        val packageNormalized = KaiScreenStateParser.normalize(packageName)
+        if (packageNormalized.contains("com example reply") || packageNormalized.contains("reply")) {
+            return hits >= 1
+        }
+
+        val denseStructuredScreen =
+            elements.size >= 5 || likelyInputFields.isNotEmpty() || likelyPrimaryActions.isNotEmpty() || semanticConfidence >= 0.45f
+
+        return if (denseStructuredScreen && normalized.length >= 120) hits >= 3 else hits >= 2
     }
 
     fun likelyMatchesAppHint(appHint: String): Boolean {
@@ -259,7 +277,7 @@ data class KaiScreenState(
 
     fun semanticFingerprint(): String {
         val compact = lines
-            .take(8)
+            .take(6)
             .joinToString("|") { KaiScreenStateParser.normalize(it) }
         val family = KaiSurfaceModel.familyName(surfaceFamily())
         val roleSig = roleSignature()
@@ -275,6 +293,8 @@ data class KaiScreenState(
             if (isYouTubeBrowseSurface()) "yt_browse" else "",
             if (isYouTubeWatchSurface()) "yt_watch" else ""
         ).filter { it.isNotBlank() }.joinToString("|")
+        val lineCountBucket = (lines.count { KaiScreenStateParser.normalize(it).isNotBlank() } / 3)
+            .coerceIn(0, 8)
         return listOf(
             KaiScreenStateParser.normalize(packageName),
             KaiScreenStateParser.normalize(screenKind),
@@ -283,7 +303,7 @@ data class KaiScreenState(
             roleSig,
             inputSig,
             compact,
-            rawDump.trim().length.toString()
+            "lines:$lineCountBucket"
         ).joinToString("::")
     }
 

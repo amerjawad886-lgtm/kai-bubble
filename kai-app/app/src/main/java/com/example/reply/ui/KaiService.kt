@@ -9,7 +9,6 @@ import android.os.Build
 import android.os.IBinder
 import android.provider.Settings
 import androidx.core.app.NotificationCompat
-import com.example.reply.agent.KaiAgentController
 import com.example.reply.agent.KaiObservationRuntime
 
 class KaiService : Service() {
@@ -18,14 +17,8 @@ class KaiService : Service() {
         super.onCreate()
         startKaiForeground()
 
-        // Keep the runtime observation bridge available for loops and eye watching.
-        KaiAgentController.ensureRuntimeObservationBridge(applicationContext)
+        // Keep only the bridge available here. Observation ownership stays in the runtime/coordinator.
         KaiObservationRuntime.ensureBridge(applicationContext)
-
-        // Only auto-resume watching when the agent itself was already active.
-        if (KaiAgentController.getSnapshot().isRunning) {
-            KaiObservationRuntime.startWatching(immediateDump = true)
-        }
 
         if (Settings.canDrawOverlays(this)) {
             KaiBubbleManager.show(this)

@@ -63,9 +63,6 @@ object KaiAgentController {
 
     fun ensureRuntimeObservationBridge(context: Context) {
         KaiObservationRuntime.ensureBridge(context)
-        if (continuousRunning) {
-            KaiObservationRuntime.startWatching(immediateDump = true)
-        }
     }
 
     fun isRuntimeObservationBridgeActive(): Boolean = true
@@ -162,7 +159,6 @@ object KaiAgentController {
     }
 
     fun resetTransientStateForNewRun() {
-        KaiObservationRuntime.reset()
         synchronized(memory) { memory.clear() }
         insightBusy = false
         lastInsightAt = 0L
@@ -402,7 +398,6 @@ object KaiAgentController {
     ): KaiAgentLoopEngine {
         val clean = prompt.trim()
         ensureRuntimeObservationBridge(context.applicationContext)
-        KaiObservationRuntime.startWatching(immediateDump = true)
 
         startActionLoopSession(clean)
         setCustomPrompt(clean)

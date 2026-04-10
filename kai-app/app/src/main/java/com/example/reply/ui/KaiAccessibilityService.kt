@@ -423,18 +423,33 @@ class KaiAccessibilityService : AccessibilityService() {
         return ""
     }
 
-    private fun fallbackExternalPackage(expectedPackage: String = expectedDumpPackage): String {
+    private fun isSubstantiveDump(dump: String): Boolean {
+        val normalizedDump = norm(dump)
+        if (normalizedDump.isBlank()) return false
+        if (normalizedDump == norm("(no active window)")) return false
+        if (normalizedDump == norm("(empty dump)")) return false
+        if (isOverlayPolluted(dump)) return false
+        return dump.lines().count { it.trim().isNotBlank() } >= 2 || dump.trim().length >= 18
+    }
+
+    private fun fallbackExternalPackage(
+        expectedPackage: String = expectedDumpPackage,
+        dump: String = ""
+    ): String {
         val expected = expectedPackage.trim()
-        if (expected.isNotBlank() && isExternalAppPackage(expected)) return expected
+        val dumpIsSubstantive = isSubstantiveDump(dump)
+
+        if (expected.isNotBlank() && isExternalAppPackage(expected) && isRecentPackageTransition()) {
+            return expected
+        }
 
         val recent = lastKnownExternalPackage.orEmpty()
-        if (isExternalAppPackage(recent)) return recent
-
-        val previous = previousExternalPackage.orEmpty()
-        if (isExternalAppPackage(previous)) return previous
+        if (dumpIsSubstantive && isExternalAppPackage(recent) && isRecentPackageTransition()) {
+            return recent
+        }
 
         val launcher = currentVisibleLauncherPackage()
-        if (launcher.isNotBlank()) return launcher
+        if (dumpIsSubstantive && launcher.isNotBlank()) return launcher
 
         return ""
     }
@@ -445,11 +460,14 @@ class KaiAccessibilityService : AccessibilityService() {
         expectedPackage: String = expectedDumpPackage
     ): String {
         if (rawPackage.isNotBlank()) return rawPackage
+
         val normalizedDump = norm(dump)
-        if (normalizedDump.isBlank()) return fallbackExternalPackage(expectedPackage)
-        if (normalizedDump == norm("(no active window)")) return fallbackExternalPackage(expectedPackage)
-        if (normalizedDump == norm("(empty dump)")) return fallbackExternalPackage(expectedPackage)
-        return fallbackExternalPackage(expectedPackage)
+        if (normalizedDump.isBlank()) return ""
+        if (normalizedDump == norm("(no active window)")) return ""
+        if (normalizedDump == norm("(empty dump)")) return ""
+        if (isOverlayPolluted(dump)) return ""
+
+        return fallbackExternalPackage(expectedPackage, dump)
     }
 
     private fun isWeakDumpCandidate(candidate: DumpCandidate): Boolean {
@@ -474,8 +492,6 @@ class KaiAccessibilityService : AccessibilityService() {
         var best: DumpCandidate? = null
         var bestChanged: DumpCandidate? = null
         var bestPackageBearing: DumpCandidate? = null
-        var bestTransitionCandidate: DumpCandidate? = null
-        var settleDelay = 0L
 
         while (System.currentTimeMillis() - startedAt < budget) {
             val root = getTargetRoot(expectedPackage)
@@ -483,20 +499,10 @@ class KaiAccessibilityService : AccessibilityService() {
             val dump = dumpScreenText(root)
             val pkg = resolveEffectivePackage(rawPkg, dump, expectedPackage)
             val fingerprint = fingerprintFor(pkg, dump)
-            // Semantic extraction: keep the old dump path, but enrich with structured elements.
             val semantic = extractSemanticUi(root, pkg, dump)
             val score = scoreDumpQuality(pkg, dump, fingerprint) +
                 (semantic.elements.size.coerceAtMost(24) * 4) +
                 (semantic.confidence * 90f).toInt()
-
-            if (expectedPackage.isNotBlank() && !packageMatchesExpected(pkg, expectedPackage)) {
-                // Keep observing until a target-package candidate appears.
-                try {
-                    Thread.sleep(90L)
-                } catch (_: Exception) {
-                }
-                continue
-            }
 
             val candidate = DumpCandidate(
                 root = root,
@@ -509,71 +515,36 @@ class KaiAccessibilityService : AccessibilityService() {
                 semanticConfidence = semantic.confidence
             )
 
-            if (best == null || candidate.score > best.score) {
-                best = candidate
-            }
-
-            if (candidate.packageName.isNotBlank() && (bestPackageBearing == null || candidate.score > bestPackageBearing.score)) {
+            if (best == null || candidate.score > best!!.score) best = candidate
+            if (candidate.packageName.isNotBlank() && (bestPackageBearing == null || candidate.score > bestPackageBearing!!.score)) {
                 bestPackageBearing = candidate
             }
-
-            if (
-                fingerprint != lastDeliveredFingerprint &&
-                (bestChanged == null || candidate.score > bestChanged.score)
-            ) {
+            if (candidate.fingerprint != lastDeliveredFingerprint && (bestChanged == null || candidate.score > bestChanged!!.score)) {
                 bestChanged = candidate
             }
 
-            val isTransitionCandidate = pkg.isNotBlank() && pkg == lastKnownExternalPackage && pkg != previousExternalPackage && isRecentPackageTransition()
-            if (isTransitionCandidate && (bestTransitionCandidate == null || candidate.score > bestTransitionCandidate.score)) {
-                bestTransitionCandidate = candidate
-                settleDelay = 380L
-            }
+            val strongEnough =
+                candidate.packageName.isNotBlank() &&
+                    !isWeakDumpCandidate(candidate) &&
+                    candidate.score >= 300 &&
+                    candidate.fingerprint != lastDeliveredFingerprint
 
-            if (candidate.packageName.isNotBlank() && candidate.score >= 310 && fingerprint != lastDeliveredFingerprint) {
-                if (bestTransitionCandidate == null || isTransitionCandidate) {
-                    return candidate
-                }
+            val packageAcceptable =
+                expectedPackage.isBlank() || packageMatchesExpected(candidate.packageName, expectedPackage)
+
+            if (strongEnough && packageAcceptable) {
+                return candidate
             }
 
             try {
-                Thread.sleep(110L)
+                Thread.sleep(95L)
             } catch (_: Exception) {
             }
         }
 
-        if (settleDelay > 0 && bestTransitionCandidate != null) {
-            val settleStart = System.currentTimeMillis()
-            while (System.currentTimeMillis() - settleStart < settleDelay) {
-                val root = getTargetRoot(expectedPackage)
-                val rawPkg = root?.packageName?.toString().orEmpty()
-                val dump = dumpScreenText(root)
-                val pkg = resolveEffectivePackage(rawPkg, dump, expectedPackage)
-                if (pkg == bestTransitionCandidate.packageName) {
-                    val fingerprint = fingerprintFor(pkg, dump)
-                    val semantic = extractSemanticUi(root, pkg, dump)
-                    val score = scoreDumpQuality(pkg, dump, fingerprint) +
-                        (semantic.elements.size.coerceAtMost(24) * 4) +
-                        (semantic.confidence * 90f).toInt()
-                    if (score > bestTransitionCandidate.score) {
-                        return DumpCandidate(
-                            root = root,
-                            packageName = pkg,
-                            dump = dump,
-                            score = score,
-                            fingerprint = fingerprint,
-                            elements = semantic.elements,
-                            screenKind = semantic.screenKind,
-                            semanticConfidence = semantic.confidence
-                        )
-                    }
-                }
-                try { Thread.sleep(60L) } catch (_: Exception) {}
-            }
-        }
-
-        val prioritized = bestTransitionCandidate ?: bestPackageBearing ?: bestChanged ?: best
-        if (prioritized != null && prioritized.packageName.isNotBlank() && !isWeakDumpCandidate(prioritized)) {
+        val prioritized = listOf(bestPackageBearing, bestChanged, best).firstOrNull { it != null } 
+        if (prioritized != null && !isWeakDumpCandidate(prioritized) &&
+            (expectedPackage.isBlank() || packageMatchesExpected(prioritized.packageName, expectedPackage))) {
             return prioritized
         }
 
@@ -607,7 +578,7 @@ class KaiAccessibilityService : AccessibilityService() {
             val previewDump = dumpScreenText(root)
             val pkg = resolveEffectivePackage(rawPkg, previewDump, expectedPackage)
 
-            if (pkg.isBlank()) {
+            if (pkg.isBlank() || (expectedPackage.isNotBlank() && !packageMatchesExpected(pkg, expectedPackage))) {
                 try {
                     Thread.sleep(85L)
                 } catch (_: Exception) {
@@ -615,25 +586,16 @@ class KaiAccessibilityService : AccessibilityService() {
                 continue
             }
 
-            if (expectedPackage.isNotBlank() && !packageMatchesExpected(pkg, expectedPackage)) {
-                try {
-                    Thread.sleep(85L)
-                } catch (_: Exception) {
-                }
-                continue
-            }
-
-            val dump = previewDump
-            val fingerprint = fingerprintFor(pkg, dump)
-            val semantic = extractSemanticUi(root, pkg, dump)
-            val score = scoreDumpQuality(pkg, dump, fingerprint) +
+            val fingerprint = fingerprintFor(pkg, previewDump)
+            val semantic = extractSemanticUi(root, pkg, previewDump)
+            val score = scoreDumpQuality(pkg, previewDump, fingerprint) +
                 (semantic.elements.size.coerceAtMost(24) * 4) +
                 (semantic.confidence * 90f).toInt()
 
             val candidate = DumpCandidate(
                 root = root,
                 packageName = pkg,
-                dump = dump,
+                dump = previewDump,
                 score = score,
                 fingerprint = fingerprint,
                 elements = semantic.elements,
@@ -641,11 +603,8 @@ class KaiAccessibilityService : AccessibilityService() {
                 semanticConfidence = semantic.confidence
             )
 
-            if (best == null || candidate.score > best.score) {
-                best = candidate
-            }
-
-            if (candidate.score >= 260 && candidate.fingerprint != lastDeliveredFingerprint) {
+            if (best == null || candidate.score > best!!.score) best = candidate
+            if (candidate.score >= 250 && candidate.fingerprint != lastDeliveredFingerprint && !isWeakDumpCandidate(candidate)) {
                 return candidate
             }
 
@@ -663,63 +622,43 @@ class KaiAccessibilityService : AccessibilityService() {
         val clean = dump.trim()
         val normalized = norm(clean)
 
-        if (packageName.isNotBlank()) score += 80
-        if (!isIgnorablePackage(packageName)) score += 120
-        if (packageName == lastKnownExternalPackage) score += 180
-        
-        if (packageName.isNotBlank() && packageName == lastKnownExternalPackage && packageName != previousExternalPackage && isExternalAppPackage(packageName)) {
-            score += 240
-        }
-        
-        if (fingerprint != lastDeliveredFingerprint) score += 140
-        if (fingerprint == lastDeliveredFingerprint) {
-            if (isRecentPackageTransition()) {
-                score -= 120
-            } else {
-                score -= 260
-            }
-        }
-        if (isLauncherPackage(packageName)) score -= 45
+        if (packageName.isNotBlank()) score += 120
+        if (isExternalAppPackage(packageName)) score += 150
+        if (expectedDumpPackage.isNotBlank() && packageMatchesExpected(packageName, expectedDumpPackage)) score += 220
+        if (packageName == lastKnownExternalPackage && isRecentPackageTransition()) score += 90
 
-        if (clean.isBlank()) score -= 500
-        if (clean.equals("(no active window)", true)) score -= 500
-        if (clean.equals("(empty dump)", true)) score -= 420
+        if (fingerprint != lastDeliveredFingerprint) score += 120 else score -= 180
+        if (isLauncherPackage(packageName)) score -= 30
+
+        if (clean.isBlank()) score -= 650
+        if (clean.equals("(no active window)", true)) score -= 650
+        if (clean.equals("(empty dump)", true)) score -= 520
 
         val lines = clean.lines().map { it.trim() }.filter { it.isNotBlank() }
-        score += minOf(lines.size, 50) * 7
-        score += minOf(clean.length, 2200) / 16
+        score += minOf(lines.size, 50) * 8
+        score += minOf(clean.length, 2200) / 14
 
-        if (isOverlayPolluted(clean)) score -= 300
-        
-        if (!isRecorderPackage(packageName) && !isKeyboardPackage(packageName) && !isLauncherPackage(packageName)) {
-            score += 90
-        }
+        if (isOverlayPolluted(clean)) score -= 420
+        if (!isRecorderPackage(packageName) && !isKeyboardPackage(packageName)) score += 70
 
-        if (normalized.contains("instagram")) score += 24
-        if (normalized.contains("whatsapp")) score += 24
-        if (normalized.contains("notes")) score += 26
-        if (normalized.contains("ملاحظات")) score += 26
-        if (normalized.contains("youtube")) score += 24
-        if (normalized.contains("يوتيوب")) score += 24
-        if (normalized.contains("messages")) score += 18
-        if (normalized.contains("رسائل")) score += 18
-        if (normalized.contains("محادثات")) score += 18
-        if (normalized.contains("comments")) score += 16
-        if (normalized.contains("تعليقات")) score += 16
-        if (normalized.contains("ارسال") || normalized.contains("send")) score += 14
+        if (normalized.contains("instagram")) score += 18
+        if (normalized.contains("whatsapp")) score += 18
+        if (normalized.contains("notes") || normalized.contains("ملاحظات")) score += 20
+        if (normalized.contains("youtube") || normalized.contains("يوتيوب")) score += 18
+        if (normalized.contains("messages") || normalized.contains("رسائل") || normalized.contains("محادثات")) score += 14
 
         return score
     }
 
     private fun isOverlayPolluted(raw: String): Boolean {
         val clean = norm(raw)
+        if (clean.isBlank()) return false
         val hits = ignoredDumpTextHints.count { clean.contains(norm(it)) }
         return hits >= 2
     }
 
     private fun getTargetRoot(expectedPackage: String = expectedDumpPackage): AccessibilityNodeInfo? {
         val preferred = lastKnownExternalPackage
-        val recent = lastKnownExternalPackage
         val candidates = mutableListOf<Pair<AccessibilityNodeInfo, Int>>()
 
         try {
@@ -740,13 +679,9 @@ class KaiAccessibilityService : AccessibilityService() {
                 }
 
                 var score = scoreRoot(root, window, preferred, expectedPackage)
-                if (window.isFocused) score += 260
-                if (window.isActive) score += 220
-                if (window.type == AccessibilityWindowInfo.TYPE_APPLICATION) score += 240
-                
-                if (pkg == recent) score += 340
-                if (isRecentPackageTransition() && pkg.isNotBlank() && pkg == lastKnownExternalPackage && pkg != previousExternalPackage) score += 280
-                
+                if (window.isFocused) score += 220
+                if (window.isActive) score += 200
+                if (window.type == AccessibilityWindowInfo.TYPE_APPLICATION) score += 220
                 candidates += root to score
             }
         } catch (_: Exception) {
@@ -754,13 +689,9 @@ class KaiAccessibilityService : AccessibilityService() {
 
         rootInActiveWindow?.let { active ->
             val pkg = active.packageName?.toString().orEmpty()
-            if (pkg.isNotBlank() && !isIgnorablePackage(pkg)) {
-                if (candidates.none { it.first === active }) {
-                    var score = scoreRoot(active, null, preferred, expectedPackage) + 280
-                    if (pkg == recent) score += 340
-                    if (isRecentPackageTransition() && pkg.isNotBlank() && pkg == lastKnownExternalPackage && pkg != previousExternalPackage) score += 280
-                    candidates += active to score
-                }
+            if (pkg.isNotBlank() && !isIgnorablePackage(pkg) && candidates.none { it.first === active }) {
+                var score = scoreRoot(active, null, preferred, expectedPackage) + 240
+                candidates += active to score
             }
         }
 
@@ -770,15 +701,11 @@ class KaiAccessibilityService : AccessibilityService() {
                 packageMatchesExpected(pkg, expectedPackage)
             }
             if (expectedOnly.isNotEmpty()) {
-                return expectedOnly.sortedByDescending { it.second }.first().first
+                return expectedOnly.maxByOrNull { it.second }?.first
             }
         }
 
-        return candidates
-            .sortedByDescending { it.second }
-            .firstOrNull()
-            ?.first
-            ?: rootInActiveWindow
+        return candidates.maxByOrNull { it.second }?.first ?: rootInActiveWindow
     }
 
     private fun scoreRoot(
@@ -793,24 +720,23 @@ class KaiAccessibilityService : AccessibilityService() {
 
         var score = 0
 
-        if (pkg == preferredPackage) score += 480
-        if (pkg == lastKnownExternalPackage) score += 380
-        if (!isIgnorablePackage(pkg)) score += 180
         if (expectedPackage.isNotBlank()) {
             if (packageMatchesExpected(pkg, expectedPackage)) {
-                score += 820
+                score += 980
             } else {
-                score -= 620
+                score -= 520
             }
         }
-        
+
+        if (pkg == preferredPackage) score += 240
+        if (pkg == lastKnownExternalPackage && isRecentPackageTransition()) score += 140
         if (isExternalAppPackage(pkg)) score += 160
 
         if (window != null && Build.VERSION.SDK_INT >= 21) {
-            if (window.type == AccessibilityWindowInfo.TYPE_APPLICATION) score += 260
-            if (window.type == 5 /* AccessibilityWindowInfo.TYPE_APPLICATION_OVERLAY */) score -= 80
-            if (window.isFocused) score += 260
-            if (window.isActive) score += 220
+            if (window.type == AccessibilityWindowInfo.TYPE_APPLICATION) score += 240
+            if (window.type == 5 /* TYPE_APPLICATION_OVERLAY */) score -= 120
+            if (window.isFocused) score += 240
+            if (window.isActive) score += 200
         }
 
         val textCount = estimateMeaningfulNodeCount(root)
@@ -819,14 +745,14 @@ class KaiAccessibilityService : AccessibilityService() {
         val rect = Rect()
         try {
             root.getBoundsInScreen(rect)
-            val widthScore = (rect.width() / 14).coerceAtLeast(0)
-            val heightScore = (rect.height() / 20).coerceAtLeast(0)
+            val widthScore = (rect.width() / 16).coerceAtLeast(0)
+            val heightScore = (rect.height() / 22).coerceAtLeast(0)
             score += widthScore + heightScore
         } catch (_: Exception) {
         }
 
-        if (isLauncherPackage(pkg)) score -= 120
-        if (isRecorderPackage(pkg) || isKeyboardPackage(pkg)) score -= 220
+        if (isLauncherPackage(pkg)) score -= 80
+        if (isRecorderPackage(pkg) || isKeyboardPackage(pkg)) score -= 260
 
         return score
     }
