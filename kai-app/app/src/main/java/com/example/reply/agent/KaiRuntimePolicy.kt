@@ -1012,8 +1012,8 @@ object KaiExecutionDecisionAuthority {
                 )
 
                 KaiOpenAppOutcome.WRONG_PACKAGE_CONFIRMED -> {
-                    val sameFamily = requestedStep.expectedPackage.isNotBlank() &&
-                        KaiAppIdentityRegistry.packageMatchesFamily(requestedStep.expectedPackage, after.packageName)
+                    val sameFamily = step.expectedPackage.isNotBlank() &&
+                        KaiAppIdentityRegistry.packageMatchesFamily(step.expectedPackage, after.packageName)
                     if (sameFamily) {
                         RuntimeDecision(
                             directive = RuntimeDirective.CONTINUE,
