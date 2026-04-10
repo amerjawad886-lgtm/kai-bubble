@@ -23,6 +23,7 @@ object KaiObservationRuntime {
     private const val WATCH_INTERVAL_MS = 550L
     private const val WATCH_BOOTSTRAP_BURST = 3
     private const val WATCH_BOOTSTRAP_GAP_MS = 120L
+    private const val RESET_SETTLE_MS = 140L
 
     @Volatile
     var live: KaiObservation = KaiObservation("", "", updatedAt = 0L)
@@ -52,6 +53,15 @@ object KaiObservationRuntime {
         val blank = KaiObservation("", "", updatedAt = 0L)
         live = blank
         authoritative = blank
+    }
+
+    fun hardReset(stopWatching: Boolean = true) {
+        if (stopWatching) {
+            this.stopWatching()
+        }
+        lastWatchExpectedPackage = ""
+        reset()
+        requestTransitionReset()
     }
 
     fun ensureBridge(context: Context) {
@@ -173,6 +183,20 @@ object KaiObservationRuntime {
             appCtx.sendBroadcast(intent)
         } catch (e: Exception) {
             Log.e(TAG, "requestImmediateDump failed: ${e.message}", e)
+        }
+    }
+
+    private fun requestTransitionReset() {
+        val appCtx = storedContext ?: return
+        try {
+            val intent = Intent(KaiAccessibilityService.ACTION_KAI_COMMAND).apply {
+                setPackage(appCtx.packageName)
+                putExtra(KaiAccessibilityService.EXTRA_CMD, KaiAccessibilityService.CMD_RESET_TRANSITION_STATE)
+                putExtra(KaiAccessibilityService.EXTRA_TIMEOUT_MS, RESET_SETTLE_MS)
+            }
+            appCtx.sendBroadcast(intent)
+        } catch (e: Exception) {
+            Log.e(TAG, "requestTransitionReset failed: ${e.message}", e)
         }
     }
 

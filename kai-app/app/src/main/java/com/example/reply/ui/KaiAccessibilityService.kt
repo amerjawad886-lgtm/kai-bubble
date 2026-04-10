@@ -405,11 +405,38 @@ class KaiAccessibilityService : AccessibilityService() {
         return p == e || p.startsWith("$e.")
     }
 
+    private fun currentVisibleLauncherPackage(): String {
+        val activePkg = rootInActiveWindow?.packageName?.toString().orEmpty()
+        if (activePkg.isNotBlank() && isLauncherPackage(activePkg)) return activePkg
+
+        try {
+            windows?.forEach { window ->
+                val root = window.root ?: return@forEach
+                val pkg = root.packageName?.toString().orEmpty()
+                if (pkg.isNotBlank() && isLauncherPackage(pkg)) {
+                    return pkg
+                }
+            }
+        } catch (_: Exception) {
+        }
+
+        return ""
+    }
+
     private fun fallbackExternalPackage(expectedPackage: String = expectedDumpPackage): String {
         val expected = expectedPackage.trim()
         if (expected.isNotBlank() && isExternalAppPackage(expected)) return expected
+
         val recent = lastKnownExternalPackage.orEmpty()
-        return if (isExternalAppPackage(recent)) recent else ""
+        if (isExternalAppPackage(recent)) return recent
+
+        val previous = previousExternalPackage.orEmpty()
+        if (isExternalAppPackage(previous)) return previous
+
+        val launcher = currentVisibleLauncherPackage()
+        if (launcher.isNotBlank()) return launcher
+
+        return ""
     }
 
     private fun resolveEffectivePackage(
@@ -419,9 +446,9 @@ class KaiAccessibilityService : AccessibilityService() {
     ): String {
         if (rawPackage.isNotBlank()) return rawPackage
         val normalizedDump = norm(dump)
-        if (normalizedDump.isBlank()) return ""
-        if (normalizedDump == norm("(no active window)")) return ""
-        if (normalizedDump == norm("(empty dump)")) return ""
+        if (normalizedDump.isBlank()) return fallbackExternalPackage(expectedPackage)
+        if (normalizedDump == norm("(no active window)")) return fallbackExternalPackage(expectedPackage)
+        if (normalizedDump == norm("(empty dump)")) return fallbackExternalPackage(expectedPackage)
         return fallbackExternalPackage(expectedPackage)
     }
 

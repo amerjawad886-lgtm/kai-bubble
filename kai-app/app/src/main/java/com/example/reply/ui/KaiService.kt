@@ -18,10 +18,11 @@ class KaiService : Service() {
         super.onCreate()
         startKaiForeground()
 
-        // Keep the observation bridge ready at service startup.
+        // Keep the runtime observation bridge available for loops and eye watching.
         KaiAgentController.ensureRuntimeObservationBridge(applicationContext)
+        KaiObservationRuntime.ensureBridge(applicationContext)
 
-        // If monitoring was already intended to be active, keep observation runtime alive.
+        // Only auto-resume watching when the agent itself was already active.
         if (KaiAgentController.getSnapshot().isRunning) {
             KaiObservationRuntime.startWatching(immediateDump = true)
         }
@@ -39,7 +40,10 @@ class KaiService : Service() {
                 channelId,
                 "Kai Background Service",
                 NotificationManager.IMPORTANCE_LOW
-            )
+            ).apply {
+                setShowBadge(false)
+                description = "Kai overlay and runtime service"
+            }
             val manager = getSystemService(NotificationManager::class.java)
             manager.createNotificationChannel(channel)
         }
@@ -49,6 +53,9 @@ class KaiService : Service() {
                 .setContentTitle("Kai is alive")
                 .setContentText("Dynamic Island is running")
                 .setSmallIcon(android.R.drawable.ic_btn_speak_now)
+                .setOnlyAlertOnce(true)
+                .setSilent(true)
+                .setOngoing(true)
                 .build()
 
         startForeground(1, notification)
