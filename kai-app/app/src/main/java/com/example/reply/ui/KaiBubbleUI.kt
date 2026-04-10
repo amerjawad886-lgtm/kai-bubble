@@ -72,6 +72,7 @@ import androidx.compose.ui.unit.sp
 import com.example.reply.R
 import com.example.reply.agent.KaiAgentController
 import com.example.reply.agent.KaiAgentLoopEngine
+import com.example.reply.agent.KaiObservationRuntime
 import com.example.reply.data.supabase.KaiMemoryRepository
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -103,6 +104,7 @@ fun KaiBubbleUI(
     var bubbleLoop by remember { mutableStateOf(false) }
 
     var pendingAgentSilentDump by remember { mutableStateOf(false) }
+    var eyeWatching by remember { mutableStateOf(KaiObservationRuntime.isWatching) }
     var agentRunning by remember { mutableStateOf(KaiAgentController.isRunning()) }
     var recognizerErrorCount by remember { mutableIntStateOf(0) }
 
@@ -127,6 +129,9 @@ fun KaiBubbleUI(
 
     LaunchedEffect(Unit) {
         KaiAgentController.ensureRuntimeObservationBridge(context.applicationContext)
+        KaiObservationRuntime.ensureBridge(context.applicationContext)
+        eyeWatching = KaiObservationRuntime.isWatching
+        statusText = computedIdleStatus()
     }
 
     fun appendToMainChat(text: String, role: String = "assistant") {
@@ -171,7 +176,7 @@ fun KaiBubbleUI(
     fun requestFreshDump(delayMs: Long = 120L) {
         scope.launch {
             delay(delayMs)
-            sendKaiCmd(KaiAccessibilityService.CMD_DUMP)
+            KaiObservationRuntime.requestImmediateDump()
         }
     }
 
@@ -179,10 +184,26 @@ fun KaiBubbleUI(
         return when {
             loopRunning -> "Agent working"
             agentRunning -> "Monitoring"
+            eyeWatching -> if (KaiObservationRuntime.hasRecentAuthoritative(2200L)) "Watching" else "Watching…"
             bubbleListening -> "Listening"
             bubbleLoop -> "Talk mode"
             else -> "Ready"
         }
+    }
+
+    fun startEyeWatching() {
+        KaiObservationRuntime.ensureBridge(context.applicationContext)
+        KaiObservationRuntime.startWatching(immediateDump = true)
+        eyeWatching = true
+        statusText = computedIdleStatus()
+        appendToMainChat("Kai eye watching ON", "system")
+    }
+
+    fun stopEyeWatching() {
+        KaiObservationRuntime.stopWatching()
+        eyeWatching = false
+        statusText = computedIdleStatus()
+        appendToMainChat("Kai eye watching OFF", "system")
     }
 
     fun cancelPendingRestart() {
@@ -295,6 +316,7 @@ fun KaiBubbleUI(
 
     fun softResetBubbleRuntime() {
         pendingAgentSilentDump = false
+        eyeWatching = KaiObservationRuntime.isWatching
         KaiBubbleManager.releaseAllSuppression()
         KaiBubbleManager.softResetUiState()
         KaiAgentController.finishActionLoopSession()
@@ -389,6 +411,7 @@ fun KaiBubbleUI(
             customPrompt = customPromptText,
             onRequestDump = {
                 pendingAgentSilentDump = true
+                sendKaiCmd(KaiAccessibilityService.CMD_DUMP)
             },
             onInsight = { insight ->
                 statusText = "Monitoring"
@@ -397,10 +420,7 @@ fun KaiBubbleUI(
         )
         agentRunning = running
         statusText = if (running) "Monitoring" else "Ready"
-        appendToMainChat(
-            if (running) "Agent active — continuous watching started" else "Agent off",
-            "system"
-        )
+        appendToMainChat(if (running) "Agent active" else "Agent off", "system")
     }
 
     fun triggerBubbleAction(prompt: String) {
@@ -414,9 +434,15 @@ fun KaiBubbleUI(
         actionRunToken += 1
         val myRunToken = actionRunToken
 
+        if (!KaiObservationRuntime.isWatching) {
+            KaiObservationRuntime.ensureBridge(context.applicationContext)
+            KaiObservationRuntime.startWatching(immediateDump = true)
+            eyeWatching = true
+        }
+
         if (KaiAgentController.isRunning()) {
-            agentRunning = true
-            appendToMainChat("Monitoring carried into action loop", "system")
+            agentRunning = false
+            appendToMainChat("Monitoring paused before action loop", "system")
         }
 
         agentLoopEngine?.cancel()
@@ -594,9 +620,10 @@ fun KaiBubbleUI(
                 if (i?.action != KaiAccessibilityService.ACTION_KAI_DUMP_RESULT) return
                 if (pendingAgentSilentDump) {
                     pendingAgentSilentDump = false
-                    agentRunning = KaiAgentController.isRunning()
-                    statusText = computedIdleStatus()
                 }
+                eyeWatching = KaiObservationRuntime.isWatching
+                agentRunning = KaiAgentController.isRunning()
+                statusText = computedIdleStatus()
             }
         }
 
@@ -635,7 +662,8 @@ fun KaiBubbleUI(
 
     val eyeGlow = when {
         bubbleListening -> 1.18f
-        loopRunning -> 1.08f
+        loopRunning -> 1.10f
+        eyeWatching -> 1.06f
         agentRunning -> 1.0f
         KaiBubbleManager.isStronglySuppressed() -> 0.35f
         KaiBubbleManager.isActionUiSuppressed() -> 0.62f
@@ -820,8 +848,7 @@ fun KaiBubbleUI(
                             .pointerInput(Unit) {
                                 detectTapGestures(
                                     onTap = {
-                                        expanded = true
-                                        promptComposerOpen = true
+                                        if (eyeWatching) stopEyeWatching() else startEyeWatching()
                                     },
                                     onLongPress = {
                                         expanded = true
@@ -941,11 +968,12 @@ fun KaiBubbleUI(
                 text = when {
                     loopRunning -> "Agent loop active"
                     agentRunning -> "Agent active"
+                    eyeWatching -> "Kai eye active"
                     else -> ""
                 },
                 color = aurora3.copy(alpha = 0.86f),
                 fontSize = 11.sp,
-                modifier = Modifier.alpha(if (agentRunning || loopRunning) 1f else 0f)
+                modifier = Modifier.alpha(if (agentRunning || loopRunning || eyeWatching) 1f else 0f)
             )
         }
     }

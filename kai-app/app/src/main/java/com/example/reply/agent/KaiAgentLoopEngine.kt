@@ -138,6 +138,8 @@ class KaiAgentLoopEngine(
 
                 executor.resetRuntimeState(clearLastGoodScreen = true)
                 executor.resetObservationTransitionStateForRun()
+                KaiObservationRuntime.ensureBridge(appContext)
+                KaiObservationRuntime.startWatching(immediateDump = true)
                 // Give the accessibility service's main-thread handler time to process the
                 // transition reset before the first startup observation pulse.
                 kotlinx.coroutines.delay(300L)
@@ -145,10 +147,9 @@ class KaiAgentLoopEngine(
                     KaiObservationRuntime.live.updatedAt,
                     KaiObservationRuntime.authoritative.updatedAt
                 )
-                KaiObservationRuntime.requestImmediateDump()
                 KaiObservationRuntime.awaitFresh(
                     afterTime = startupObservationBaseline,
-                    timeoutMs = 900L
+                    timeoutMs = 1200L
                 )
                 KaiBubbleManager.releaseAllSuppression()
                 KaiBubbleManager.softResetUiState()

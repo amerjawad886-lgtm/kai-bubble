@@ -7,13 +7,22 @@ import android.content.IntentFilter
 import android.os.Build
 import android.util.Log
 import com.example.reply.ui.KaiAccessibilityService
-import kotlinx.coroutines.*
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import org.json.JSONArray
 
 object KaiObservationRuntime {
 
     private const val TAG = "KaiObsRuntime"
-    private const val WATCH_INTERVAL_MS = 900L
+    private const val WATCH_INTERVAL_MS = 550L
+    private const val WATCH_BOOTSTRAP_BURST = 3
+    private const val WATCH_BOOTSTRAP_GAP_MS = 120L
 
     @Volatile
     var live: KaiObservation = KaiObservation("", "", updatedAt = 0L)
@@ -32,6 +41,9 @@ object KaiObservationRuntime {
     @Volatile
     var isWatching: Boolean = false
         private set
+
+    @Volatile
+    private var lastWatchExpectedPackage: String = ""
 
     private var watchJob: Job? = null
     private val watchScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -102,36 +114,45 @@ object KaiObservationRuntime {
 
         live = obs
 
-        val normalized = KaiScreenStateParser.normalize(dump)
-
-        val validDump =
-            pkg.isNotBlank() &&
-            normalized.isNotBlank() &&
-            !isOverlayOnlyDump(normalized) &&
-            !pkg.startsWith("com.example.reply")
-
-        if (validDump) {
+        if (isUsefulObservation(obs)) {
             authoritative = obs
         }
 
         KaiAgentController.onObservationArrived(pkg, dump, elements, screenKind, confidence)
     }
 
-    // 🔥 FIX: بديل آمن بدل isOverlayOnlyDump المفقودة
     private fun isOverlayOnlyDump(text: String): Boolean {
         return text.contains("dynamic island", true) ||
-               text.contains("kai os", true) ||
-               text.contains("make action", true)
+            text.contains("kai os", true) ||
+            text.contains("make action", true)
+    }
+
+    private fun isUsefulObservation(obs: KaiObservation): Boolean {
+        val normalized = KaiScreenStateParser.normalize(obs.screenPreview)
+        if (obs.packageName.isBlank()) return false
+        if (normalized.isBlank()) return false
+        if (normalized == KaiScreenStateParser.normalize("(no active window)")) return false
+        if (normalized == KaiScreenStateParser.normalize("(empty dump)")) return false
+        if (isOverlayOnlyDump(normalized)) return false
+        if (obs.packageName.startsWith("com.example.reply")) return false
+        return true
     }
 
     suspend fun awaitFresh(afterTime: Long, timeoutMs: Long): KaiObservation? {
         val deadline = System.currentTimeMillis() + timeoutMs
+        var nudgedAt = 0L
+
         while (System.currentTimeMillis() < deadline) {
             val a = authoritative
-            if (a.updatedAt > afterTime) return a
+            if (a.updatedAt > afterTime && isUsefulObservation(a)) return a
 
             val l = live
-            if (l.updatedAt > afterTime) return l
+            if (l.updatedAt > afterTime && isUsefulObservation(l)) return l
+
+            if (isWatching && System.currentTimeMillis() - nudgedAt >= 300L) {
+                nudgedAt = System.currentTimeMillis()
+                requestImmediateDump(lastWatchExpectedPackage)
+            }
 
             delay(80L)
         }
@@ -144,7 +165,7 @@ object KaiObservationRuntime {
             val intent = Intent(KaiAccessibilityService.ACTION_KAI_COMMAND).apply {
                 setPackage(appCtx.packageName)
                 putExtra(KaiAccessibilityService.EXTRA_CMD, KaiAccessibilityService.CMD_DUMP)
-                putExtra(KaiAccessibilityService.EXTRA_TIMEOUT_MS, 2200L)
+                putExtra(KaiAccessibilityService.EXTRA_TIMEOUT_MS, 2400L)
                 if (expectedPackage.isNotBlank()) {
                     putExtra(KaiAccessibilityService.EXTRA_EXPECTED_PACKAGE, expectedPackage)
                 }
@@ -158,9 +179,17 @@ object KaiObservationRuntime {
     fun startWatching(immediateDump: Boolean = true, expectedPackage: String = "") {
         val appCtx = storedContext ?: return
         ensureBridge(appCtx)
+        lastWatchExpectedPackage = expectedPackage
 
         if (isWatching && watchJob?.isActive == true) {
-            if (immediateDump) requestImmediateDump(expectedPackage)
+            if (immediateDump) {
+                repeat(WATCH_BOOTSTRAP_BURST) { index ->
+                    watchScope.launch {
+                        if (index > 0) delay(index * WATCH_BOOTSTRAP_GAP_MS)
+                        requestImmediateDump(lastWatchExpectedPackage)
+                    }
+                }
+            }
             return
         }
 
@@ -168,9 +197,15 @@ object KaiObservationRuntime {
         watchJob?.cancel()
 
         watchJob = watchScope.launch {
-            if (immediateDump) requestImmediateDump(expectedPackage)
+            if (immediateDump) {
+                repeat(WATCH_BOOTSTRAP_BURST) { index ->
+                    if (!isActive || !isWatching) return@repeat
+                    requestImmediateDump(lastWatchExpectedPackage)
+                    if (index < WATCH_BOOTSTRAP_BURST - 1) delay(WATCH_BOOTSTRAP_GAP_MS)
+                }
+            }
             while (isActive && isWatching) {
-                requestImmediateDump(expectedPackage)
+                requestImmediateDump(lastWatchExpectedPackage)
                 delay(WATCH_INTERVAL_MS)
             }
         }
@@ -178,27 +213,32 @@ object KaiObservationRuntime {
 
     fun stopWatching() {
         isWatching = false
+        lastWatchExpectedPackage = ""
         watchJob?.cancel()
         watchJob = null
     }
 
     fun hasRecentAuthoritative(maxAgeMs: Long): Boolean {
         val obs = authoritative
-        return obs.updatedAt > 0 &&
-               System.currentTimeMillis() - obs.updatedAt <= maxAgeMs
+        return isUsefulObservation(obs) &&
+            obs.updatedAt > 0 &&
+            System.currentTimeMillis() - obs.updatedAt <= maxAgeMs
     }
 
     fun getBestAvailable(): KaiObservation {
-        return if (authoritative.updatedAt > 0L) authoritative else live
+        return when {
+            isUsefulObservation(authoritative) -> authoritative
+            isUsefulObservation(live) -> live
+            authoritative.updatedAt >= live.updatedAt -> authoritative
+            else -> live
+        }
     }
 
-
     fun currentScreenState(): KaiScreenState {
-        val best = if (authoritative.updatedAt > 0) authoritative else live
+        val best = getBestAvailable()
         return KaiScreenStateParser.fromDump(best.packageName, best.screenPreview)
     }
 
-    // 🔥 FIX: لازم تكون accessible
     internal fun parseElementsFromJson(raw: String?): List<KaiUiElement> {
         if (raw.isNullOrBlank()) return emptyList()
         return try {

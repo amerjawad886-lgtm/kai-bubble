@@ -371,12 +371,13 @@ class KaiAccessibilityService : AccessibilityService() {
         screenKind: String = "unknown",
         semanticConfidence: Float = 0f
     ) {
+        val resolvedPackage = resolveEffectivePackage(packageName, dump)
         val elementsJson = serializeElements(elements)
         sendBroadcast(
             Intent(ACTION_KAI_DUMP_RESULT).apply {
                 setPackage(this@KaiAccessibilityService.packageName)
                 putExtra(EXTRA_DUMP, dump)
-                putExtra(EXTRA_PACKAGE, packageName)
+                putExtra(EXTRA_PACKAGE, resolvedPackage)
                 putExtra(EXTRA_ELEMENTS_JSON, elementsJson)
                 putExtra(EXTRA_SCREEN_KIND, screenKind)
                 putExtra(EXTRA_SEMANTIC_CONFIDENCE, semanticConfidence)
@@ -402,6 +403,26 @@ class KaiAccessibilityService : AccessibilityService() {
         if (e.isBlank()) return true
         if (p.isBlank()) return false
         return p == e || p.startsWith("$e.")
+    }
+
+    private fun fallbackExternalPackage(expectedPackage: String = expectedDumpPackage): String {
+        val expected = expectedPackage.trim()
+        if (expected.isNotBlank() && isExternalAppPackage(expected)) return expected
+        val recent = lastKnownExternalPackage.orEmpty()
+        return if (isExternalAppPackage(recent)) recent else ""
+    }
+
+    private fun resolveEffectivePackage(
+        rawPackage: String,
+        dump: String,
+        expectedPackage: String = expectedDumpPackage
+    ): String {
+        if (rawPackage.isNotBlank()) return rawPackage
+        val normalizedDump = norm(dump)
+        if (normalizedDump.isBlank()) return ""
+        if (normalizedDump == norm("(no active window)")) return ""
+        if (normalizedDump == norm("(empty dump)")) return ""
+        return fallbackExternalPackage(expectedPackage)
     }
 
     private fun isWeakDumpCandidate(candidate: DumpCandidate): Boolean {
@@ -431,8 +452,9 @@ class KaiAccessibilityService : AccessibilityService() {
 
         while (System.currentTimeMillis() - startedAt < budget) {
             val root = getTargetRoot(expectedPackage)
-            val pkg = root?.packageName?.toString().orEmpty()
+            val rawPkg = root?.packageName?.toString().orEmpty()
             val dump = dumpScreenText(root)
+            val pkg = resolveEffectivePackage(rawPkg, dump, expectedPackage)
             val fingerprint = fingerprintFor(pkg, dump)
             // Semantic extraction: keep the old dump path, but enrich with structured elements.
             val semantic = extractSemanticUi(root, pkg, dump)
@@ -497,9 +519,10 @@ class KaiAccessibilityService : AccessibilityService() {
             val settleStart = System.currentTimeMillis()
             while (System.currentTimeMillis() - settleStart < settleDelay) {
                 val root = getTargetRoot(expectedPackage)
-                val pkg = root?.packageName?.toString().orEmpty()
+                val rawPkg = root?.packageName?.toString().orEmpty()
+                val dump = dumpScreenText(root)
+                val pkg = resolveEffectivePackage(rawPkg, dump, expectedPackage)
                 if (pkg == bestTransitionCandidate.packageName) {
-                    val dump = dumpScreenText(root)
                     val fingerprint = fingerprintFor(pkg, dump)
                     val semantic = extractSemanticUi(root, pkg, dump)
                     val score = scoreDumpQuality(pkg, dump, fingerprint) +
@@ -553,7 +576,9 @@ class KaiAccessibilityService : AccessibilityService() {
 
         while (System.currentTimeMillis() - startedAt < timeoutMs) {
             val root = getTargetRoot(expectedPackage)
-            val pkg = root?.packageName?.toString().orEmpty()
+            val rawPkg = root?.packageName?.toString().orEmpty()
+            val previewDump = dumpScreenText(root)
+            val pkg = resolveEffectivePackage(rawPkg, previewDump, expectedPackage)
 
             if (pkg.isBlank()) {
                 try {
@@ -571,7 +596,7 @@ class KaiAccessibilityService : AccessibilityService() {
                 continue
             }
 
-            val dump = dumpScreenText(root)
+            val dump = previewDump
             val fingerprint = fingerprintFor(pkg, dump)
             val semantic = extractSemanticUi(root, pkg, dump)
             val score = scoreDumpQuality(pkg, dump, fingerprint) +
@@ -726,6 +751,7 @@ class KaiAccessibilityService : AccessibilityService() {
             .sortedByDescending { it.second }
             .firstOrNull()
             ?.first
+            ?: rootInActiveWindow
     }
 
     private fun scoreRoot(
