@@ -13,16 +13,11 @@ class KaiActionExecutor(
     internal val context: Context,
     internal val onLog: (String) -> Unit = {}
 ) {
-    internal var canonicalRuntimeState: KaiScreenState? = null
-    internal var lastGoodScreenState: KaiScreenState? = null
-    internal var lastAcceptedFingerprint: String = ""
-    internal var lastAcceptedObservationAt: Long = 0L
-    internal var consecutiveWeakReads: Int = 0
-    internal var consecutiveStaleReads: Int = 0
-    internal var consecutiveNoProgressActions: Int = 0
-    internal var lastRecoveryContextKey: String = ""
-    internal var repeatedRecoveryContextCount: Int = 0
+    // ── Observation gate (owns all observation state) ────────────────
+    internal val gate = KaiObservationGate(context, onLog)
 
+    // ── Backward-compatible type aliases ─────────────────────────────
+    // KaiAgentLoopEngine references these via KaiActionExecutor.XYZ
     data class ScreenRefreshMeta(
         val fingerprint: String,
         val changedFromPrevious: Boolean,
@@ -46,6 +41,11 @@ class KaiActionExecutor(
         val attempts: Int
     )
 
+    enum class ObservationGateTier {
+        APP_LAUNCH_SAFE,
+        SEMANTIC_ACTION_SAFE
+    }
+
     private data class LauncherAppCandidate(
         val label: String,
         val normalizedLabel: String,
@@ -58,65 +58,73 @@ class KaiActionExecutor(
         val signature: String
     )
 
-    enum class ObservationGateTier {
-        APP_LAUNCH_SAFE,
-        SEMANTIC_ACTION_SAFE
-    }
+    // ── Delegated observation state (read-through to gate) ──────────
+    internal var canonicalRuntimeState: KaiScreenState?
+        get() = gate.canonical
+        set(value) { gate.canonical = value }
+    internal var lastGoodScreenState: KaiScreenState?
+        get() = gate.canonical
+        set(value) { gate.canonical = value }
+    internal var lastAcceptedFingerprint: String
+        get() = gate.lastAcceptedFingerprint
+        set(value) { gate.lastAcceptedFingerprint = value }
+    internal var lastAcceptedObservationAt: Long
+        get() = gate.lastAcceptedObservationAt
+        set(value) { gate.lastAcceptedObservationAt = value }
+    internal var consecutiveWeakReads: Int
+        get() = gate.consecutiveWeakReads
+        set(_) { /* managed by gate */ }
+    internal var consecutiveStaleReads: Int
+        get() = gate.consecutiveStaleReads
+        set(_) { /* managed by gate */ }
+    internal var consecutiveNoProgressActions: Int
+        get() = gate.consecutiveNoProgressActions
+        set(_) { /* managed by gate */ }
 
-    internal var lastRefreshMeta = ScreenRefreshMeta(
-        fingerprint = "",
-        changedFromPrevious = false,
-        usable = false,
-        fallback = false,
-        weak = false,
-        stale = false,
-        reusedLastGood = false
-    )
+    // ── Recovery state (stays in executor) ───────────────────────────
+    internal var lastRecoveryContextKey: String = ""
+    internal var repeatedRecoveryContextCount: Int = 0
+
+    internal var lastRefreshMeta: ScreenRefreshMeta
+        get() = gate.lastMeta.let {
+            ScreenRefreshMeta(it.fingerprint, it.changedFromPrevious, it.usable,
+                it.fallback, it.weak, it.stale, it.reusedLastGood)
+        }
+        set(_) { /* managed by gate */ }
 
     fun resetRuntimeState(clearLastGoodScreen: Boolean = true) {
-        canonicalRuntimeState = null
-        lastAcceptedFingerprint = ""
-        lastAcceptedObservationAt = 0L
-        consecutiveWeakReads = 0
-        consecutiveStaleReads = 0
-        consecutiveNoProgressActions = 0
+        gate.reset()
         lastRecoveryContextKey = ""
         repeatedRecoveryContextCount = 0
-        lastRefreshMeta = ScreenRefreshMeta(
-            fingerprint = "",
-            changedFromPrevious = false,
-            usable = false,
-            fallback = false,
-            weak = false,
-            stale = false,
-            reusedLastGood = false
-        )
-        if (clearLastGoodScreen) {
-            lastGoodScreenState = null
-        }
     }
 
     internal fun softResetObservationState() {
-        softResetObservationStateImpl()
+        gate.reset()
+        lastRecoveryContextKey = ""
+        repeatedRecoveryContextCount = 0
+    }
+
+    fun clearStartupFingerprintBaseline() {
+        gate.clearStartupBaseline()
     }
 
     internal fun adoptCanonicalRuntimeState(state: KaiScreenState) {
-        canonicalRuntimeState = state
-        KaiAgentController.mirrorRuntimeObservation(state)
+        gate.adopt(state)
     }
 
-    fun getCanonicalRuntimeState(): KaiScreenState? = canonicalRuntimeState
+    fun getCanonicalRuntimeState(): KaiScreenState? = gate.canonical
 
     internal fun resolveCanonicalRuntimeState(): KaiScreenState {
-        return canonicalRuntimeState ?: lastGoodScreenState ?: KaiAgentController.getLatestScreenState()
+        return gate.resolve()
     }
 
     private fun canonicalBeforePackage(): String {
-        return canonicalRuntimeState?.packageName ?: lastGoodScreenState?.packageName.orEmpty()
+        return gate.canonical?.packageName.orEmpty()
     }
 
     private fun canonicalBeforeFingerprint(): String {
-        return canonicalRuntimeState?.let { fingerprintFor(it.packageName, it.rawDump) } ?: lastAcceptedFingerprint
+        return gate.canonical?.let { fingerprintFor(it.packageName, it.rawDump) }
+            ?: gate.lastAcceptedFingerprint
     }
 
     private fun recoveryContextKey(step: KaiActionStep, state: KaiScreenState): String {
@@ -322,47 +330,17 @@ class KaiActionExecutor(
         }
     }
 
-    private fun isOverlayPolluted(raw: String): Boolean {
-        return isOverlayPollutedImpl(raw)
-    }
+    private fun isOverlayPolluted(raw: String): Boolean = gate.isOverlayPolluted(raw)
+    private fun isUsableDump(raw: String, packageName: String = ""): Boolean = gate.isUsableDump(raw, packageName)
 
-    private fun isBaseDumpValid(raw: String, packageName: String = ""): Boolean {
-        return isBaseDumpValidImpl(raw, packageName)
-    }
-
-    private fun isUsableDump(raw: String, packageName: String = ""): Boolean {
-        return isUsableDumpImpl(raw, packageName)
-    }
-
-    private fun isFallbackAcceptable(raw: String, packageName: String = ""): Boolean {
-        return isFallbackAcceptableImpl(raw, packageName)
-    }
-
-    private fun isWeakButMeaningfulDump(raw: String, packageName: String = ""): Boolean {
-        return isWeakButMeaningfulDumpImpl(raw, packageName)
-    }
-
-    internal fun fingerprintFor(packageName: String, rawDump: String): String {
-        return KaiScreenStateParser
-            .fromDump(packageName = packageName, dump = rawDump)
-            .semanticFingerprint()
-            .take(5000)
-    }
-
-    internal fun sameFingerprint(a: String, b: String): Boolean {
-        if (a.isBlank() || b.isBlank()) return false
-        return a == b
-    }
+    internal fun fingerprintFor(packageName: String, rawDump: String): String = gate.fingerprintFor(packageName, rawDump)
+    internal fun sameFingerprint(a: String, b: String): Boolean = gate.sameFingerprint(a, b)
 
     private fun inferAppHintFromText(text: String): String {
         return KaiScreenStateParser.inferAppHint(text)
     }
 
-    internal fun isExternalPackageChange(before: String, after: String): Boolean {
-        if (before.isBlank() || after.isBlank()) return false
-        if (before == context.packageName || after == context.packageName) return false
-        return before != after
-    }
+    internal fun isExternalPackageChange(before: String, after: String): Boolean = gate.isExternalPackageChange(before, after)
 
     private fun normalizeQueryText(text: String): String {
         return text
@@ -699,186 +677,21 @@ class KaiActionExecutor(
         return true
     }
 
-    private fun hasMeaningfulProgress(
-        beforePackage: String,
-        afterPackage: String,
-        beforeFingerprint: String,
-        afterFingerprint: String,
-        refreshMeta: ScreenRefreshMeta
-    ): Boolean {
-        val packageChanged = isExternalPackageChange(beforePackage, afterPackage)
-        val fingerprintChanged = !sameFingerprint(beforeFingerprint, afterFingerprint)
-        val weakButChanged = refreshMeta.weak && refreshMeta.changedFromPrevious
-        val externalObservation = afterPackage.isNotBlank() && afterPackage != context.packageName
-        return packageChanged || fingerprintChanged || (weakButChanged && externalObservation)
-    }
+    fun getLastRefreshMeta(): ScreenRefreshMeta = lastRefreshMeta
+    fun getConsecutiveWeakReads(): Int = gate.consecutiveWeakReads
+    fun getConsecutiveStaleReads(): Int = gate.consecutiveStaleReads
 
-    private fun updateRefreshMeta(
-        state: KaiScreenState,
-        usable: Boolean,
-        fallback: Boolean,
-        weak: Boolean,
-        previousFingerprint: String,
-        observationUpdatedAt: Long,
-        reusedLastGood: Boolean = false
-    ) {
-        updateRefreshMetaImpl(
-            state = state,
-            usable = usable,
-            fallback = fallback,
-            weak = weak,
-            previousFingerprint = previousFingerprint,
-            observationUpdatedAt = observationUpdatedAt,
-            reusedLastGood = reusedLastGood
-        )
-    }
+    private fun isExpectedPackageMatch(observedPackage: String, expectedPackage: String): Boolean =
+        gate.isExpectedPackageMatch(observedPackage, expectedPackage)
 
-    fun getLastRefreshMeta(): ScreenRefreshMeta = getLastRefreshMetaImpl()
-    fun getConsecutiveWeakReads(): Int = getConsecutiveWeakReadsImpl()
-    fun getConsecutiveStaleReads(): Int = getConsecutiveStaleReadsImpl()
-
-    private fun getLatestAuthoritativeObservation(): KaiObservation {
-        return KaiObservationRuntime.authoritative
-    }
-
-    private fun isExpectedPackageMatch(observedPackage: String, expectedPackage: String): Boolean {
-        val observed = KaiScreenStateParser.normalize(observedPackage)
-        val expected = KaiScreenStateParser.normalize(expectedPackage)
-        if (expected.isBlank()) return true
-        if (observed.isBlank()) return false
-        return observed == expected || observed.startsWith("$expected.")
-    }
-
-    fun bestRuntimeObservation(): KaiObservation {
-        return if (KaiObservationRuntime.authoritative.updatedAt > 0L) {
-            KaiObservationRuntime.authoritative
-        } else {
-            KaiObservationRuntime.live
-        }
-    }
+    fun bestRuntimeObservation(): KaiObservation = KaiObservationRuntime.getBestAvailable()
 
 
-    private fun evaluateObservationStrengthForSemantic(
-        state: KaiScreenState,
-        meta: ScreenRefreshMeta,
-        expectedPackage: String,
-        allowLauncherSurface: Boolean
-    ): Pair<Boolean, String> {
-        if (state.packageName.isBlank()) return false to "missing_package"
-        if (!isExpectedPackageMatch(state.packageName, expectedPackage)) {
-            return false to "expected_package_mismatch"
-        }
-        if (state.isOverlayPolluted()) return false to "overlay_polluted"
+    // ── Observation gating (delegated to KaiObservationGate) ───────────
 
-        val family = KaiSurfaceModel.normalizeLegacyFamily(KaiSurfaceModel.familyOf(state))
-        val inExpectedApp = expectedPackage.isBlank() || isExpectedPackageMatch(state.packageName, expectedPackage)
-        val coherentInAppContinuation =
-            inExpectedApp &&
-                !state.isLauncher() &&
-                family in setOf(
-                    KaiSurfaceFamily.LIST_SURFACE,
-                    KaiSurfaceFamily.RESULT_LIST_SURFACE,
-                    KaiSurfaceFamily.THREAD_SURFACE,
-                    KaiSurfaceFamily.COMPOSER_SURFACE,
-                    KaiSurfaceFamily.EDITOR_SURFACE,
-                    KaiSurfaceFamily.DETAIL_SURFACE,
-                    KaiSurfaceFamily.SEARCH_SURFACE,
-                    KaiSurfaceFamily.TABBED_HOME_SURFACE,
-                    KaiSurfaceFamily.CONTENT_FEED_SURFACE,
-                    KaiSurfaceFamily.PLAYER_SURFACE,
-                    KaiSurfaceFamily.APP_HOME_SURFACE,
-                    KaiSurfaceFamily.BROWSER_LIKE_SURFACE
-                )
-
-        // Restore practical continuity: tolerate weak/stale-but-changed observations in coherent in-app continuation.
-        if (coherentInAppContinuation && meta.changedFromPrevious && !meta.reusedLastGood) {
-            return true to "in_app_continuation_tolerated"
-        }
-
-        if (state.isWeakObservation()) return false to "weak_observation"
-        if (meta.weak) return false to "weak_refresh_meta"
-        if (meta.fallback) return false to "fallback_observation"
-        if (meta.reusedLastGood) return false to "reused_last_good_observation"
-        if (meta.stale) return false to "stale_observation"
-        if (state.semanticConfidence < 0.42f) return false to "low_semantic_confidence"
-        if (state.elements.size < 2 && state.lines.size < 3) return false to "insufficient_semantic_structure"
-
-        if (!allowLauncherSurface && family == KaiSurfaceFamily.LAUNCHER_SURFACE) {
-            return false to "launcher_surface_not_semantic_ready"
-        }
-        if (family in setOf(
-                KaiSurfaceFamily.UNKNOWN_SURFACE,
-                KaiSurfaceFamily.SHEET_OR_DIALOG_SURFACE,
-                KaiSurfaceFamily.MEDIA_CAPTURE_SURFACE,
-                KaiSurfaceFamily.SEARCH_SURFACE
-            )
-        ) {
-            return false to "wrong_surface_family:${KaiSurfaceModel.familyName(family)}"
-        }
-
-        return true to "strong"
-    }
-
-    private fun isLauncherHomeCoherent(state: KaiScreenState): Boolean {
-        val family = KaiSurfaceModel.normalizeLegacyFamily(KaiSurfaceModel.familyOf(state))
-        return state.isLauncher() || family == KaiSurfaceFamily.LAUNCHER_SURFACE
-    }
-
-    private fun evaluateObservationStrengthForAppLaunch(
-        state: KaiScreenState,
-        meta: ScreenRefreshMeta,
-        expectedPackage: String,
-        allowLauncherSurface: Boolean
-    ): Pair<Boolean, String> {
-        if (state.packageName.isBlank()) return false to "missing_package"
-        if (!isExpectedPackageMatch(state.packageName, expectedPackage)) {
-            return false to "expected_package_mismatch"
-        }
-        if (state.isOverlayPolluted()) return false to "overlay_polluted"
-        if (state.isWeakObservation()) return false to "weak_observation"
-        if (meta.weak) return false to "weak_refresh_meta"
-        if (meta.fallback) return false to "fallback_observation"
-        if (meta.reusedLastGood) return false to "reused_last_good_observation"
-
-        val family = KaiSurfaceModel.normalizeLegacyFamily(KaiSurfaceModel.familyOf(state))
-        if (!allowLauncherSurface && family == KaiSurfaceFamily.LAUNCHER_SURFACE) {
-            return false to "launcher_surface_not_semantic_ready"
-        }
-
-        // App launch from launcher/home is safe with stable screen snapshots.
-        if (meta.stale && isLauncherHomeCoherent(state)) {
-            return true to "app_launch_safe_launcher_coherent"
-        }
-
-        if (meta.stale) return false to "stale_observation"
-        if (state.semanticConfidence < 0.28f) return false to "low_semantic_confidence"
-        if (state.elements.isEmpty() && state.lines.size < 2) return false to "insufficient_app_launch_structure"
-
-        return true to "app_launch_safe"
-    }
-
-    private fun evaluateObservationStrengthByTier(
-        state: KaiScreenState,
-        meta: ScreenRefreshMeta,
-        expectedPackage: String,
-        allowLauncherSurface: Boolean,
-        tier: ObservationGateTier
-    ): Pair<Boolean, String> {
-        return when (tier) {
-            ObservationGateTier.APP_LAUNCH_SAFE -> evaluateObservationStrengthForAppLaunch(
-                state = state,
-                meta = meta,
-                expectedPackage = expectedPackage,
-                allowLauncherSurface = allowLauncherSurface
-            )
-
-            ObservationGateTier.SEMANTIC_ACTION_SAFE -> evaluateObservationStrengthForSemantic(
-                state = state,
-                meta = meta,
-                expectedPackage = expectedPackage,
-                allowLauncherSurface = allowLauncherSurface
-            )
-        }
+    private fun toGateTier(tier: ObservationGateTier): KaiObservationGate.GateTier = when (tier) {
+        ObservationGateTier.APP_LAUNCH_SAFE -> KaiObservationGate.GateTier.APP_LAUNCH_SAFE
+        ObservationGateTier.SEMANTIC_ACTION_SAFE -> KaiObservationGate.GateTier.SEMANTIC_ACTION_SAFE
     }
 
     suspend fun ensureStrongObservationGate(
@@ -890,61 +703,9 @@ class KaiActionExecutor(
         staleRetryAttempts: Int = 2,
         missingPackageRetryAttempts: Int = 2
     ): ObservationGateResult {
-        var lastState = resolveCanonicalRuntimeState()
-        var lastReason = "not_observed"
-
-        repeat(maxAttempts.coerceAtLeast(1)) { attempt ->
-            val state = requestFreshScreen(timeoutMs = timeoutMs, expectedPackage = expectedPackage)
-            val meta = getLastRefreshMeta()
-            lastState = state
-
-            val launcherAllowed = allowLauncherSurface && tier == ObservationGateTier.APP_LAUNCH_SAFE
-            val packageMissing = state.packageName.isBlank()
-            val packageMismatch =
-                expectedPackage.isNotBlank() &&
-                    state.packageName.isNotBlank() &&
-                    !isExpectedPackageMatch(state.packageName, expectedPackage)
-            val weak = meta.weak || state.isWeakObservation() || state.isOverlayPolluted()
-            val stale = meta.stale
-            val launcherRejected = state.isLauncher() && !launcherAllowed
-
-            lastReason = when {
-                packageMissing -> "missing_package"
-                packageMismatch -> "expected_package_mismatch"
-                stale -> "stale_observation"
-                weak -> "weak_refresh_meta"
-                launcherRejected -> "launcher_surface_not_semantic_ready"
-                else -> ""
-            }
-
-            if (lastReason.isBlank()) {
-                return ObservationGateResult(
-                    passed = true,
-                    state = state,
-                    reason = "strong_observation_gate_passed"
-                )
-            }
-
-            if (lastReason == "stale_observation" && attempt < staleRetryAttempts.coerceAtLeast(1)) {
-                delay(150L)
-                return@repeat
-            }
-
-            if (lastReason == "missing_package" && attempt < missingPackageRetryAttempts.coerceAtLeast(1)) {
-                delay(150L)
-                return@repeat
-            }
-
-            if (attempt < maxAttempts - 1) {
-                delay(220L)
-            }
-        }
-
-        return ObservationGateResult(
-            passed = false,
-            state = lastState,
-            reason = "strong_observation_gate_failed:$lastReason"
-        )
+        val r = gate.ensureStrongGate(expectedPackage, timeoutMs, maxAttempts,
+            allowLauncherSurface, toGateTier(tier), staleRetryAttempts, missingPackageRetryAttempts)
+        return ObservationGateResult(r.passed, r.state, r.reason)
     }
 
     suspend fun ensureAuthoritativeObservationReady(
@@ -953,78 +714,12 @@ class KaiActionExecutor(
         allowLauncherSurface: Boolean = true,
         tier: ObservationGateTier = ObservationGateTier.APP_LAUNCH_SAFE
     ): ObservationReadinessResult {
-        var lastState = resolveCanonicalRuntimeState()
-        var lastReason = "not_observed"
-
-        repeat(maxAttempts.coerceAtLeast(1)) { attempt ->
-            val auth = getLatestAuthoritativeObservation()
-            if (auth.updatedAt > 0L) {
-                val authState = KaiScreenStateParser.fromDump(auth.packageName, auth.screenPreview)
-                val authWeak =
-                    authState.packageName.isBlank() ||
-                        authState.rawDump.isBlank() ||
-                        authState.isWeakObservation() ||
-                        authState.isOverlayPolluted()
-
-                if (!authWeak) {
-                    adoptCanonicalRuntimeState(authState)
-                    lastGoodScreenState = authState
-                    lastAcceptedFingerprint = fingerprintFor(authState.packageName, authState.rawDump)
-                    lastAcceptedObservationAt = auth.updatedAt
-                    lastRefreshMeta = ScreenRefreshMeta(
-                        fingerprint = lastAcceptedFingerprint,
-                        changedFromPrevious = true,
-                        usable = true,
-                        fallback = false,
-                        weak = false,
-                        stale = false,
-                        reusedLastGood = false
-                    )
-                    return ObservationReadinessResult(
-                        passed = true,
-                        state = authState,
-                        reason = "authoritative_observation_ready",
-                        attempts = attempt + 1
-                    )
-                }
-            }
-
-            val gate = ensureStrongObservationGate(
-                expectedPackage = "",
-                timeoutMs = timeoutMs,
-                maxAttempts = 1,
-                allowLauncherSurface = allowLauncherSurface,
-                tier = tier,
-                staleRetryAttempts = 1,
-                missingPackageRetryAttempts = 1
-            )
-            lastState = gate.state
-            lastReason = gate.reason
-
-            if (gate.passed) {
-                return ObservationReadinessResult(
-                    passed = true,
-                    state = gate.state,
-                    reason = "authoritative_observation_ready_via_strong_gate",
-                    attempts = attempt + 1
-                )
-            }
-
-            if (attempt < maxAttempts - 1) {
-                delay(180L)
-            }
-        }
-
-        return ObservationReadinessResult(
-            passed = false,
-            state = lastState,
-            reason = "authoritative_observation_not_ready:$lastReason",
-            attempts = maxAttempts.coerceAtLeast(1)
-        )
+        val r = gate.ensureAuthoritative(timeoutMs, maxAttempts, allowLauncherSurface, toGateTier(tier))
+        return ObservationReadinessResult(r.passed, r.state, r.reason, r.attempts)
     }
 
     suspend fun requestFreshScreen(timeoutMs: Long = 2500L, expectedPackage: String = ""): KaiScreenState {
-        return requestFreshScreenImpl(timeoutMs, expectedPackage)
+        return gate.requestFreshScreen(timeoutMs, expectedPackage)
     }
 
     internal fun markActionProgress(
@@ -1034,13 +729,7 @@ class KaiActionExecutor(
         afterFingerprint: String,
         message: String
     ) {
-        markActionProgressImpl(
-            beforePackage = beforePackage,
-            afterPackage = afterPackage,
-            beforeFingerprint = beforeFingerprint,
-            afterFingerprint = afterFingerprint,
-            message = message
-        )
+        gate.markActionProgress(beforePackage, afterPackage, beforeFingerprint, afterFingerprint, message)
     }
 
     private fun mapAppNameToPackage(appName: String): String? {
@@ -1089,6 +778,49 @@ class KaiActionExecutor(
         } catch (e: Exception) {
             onLog("Direct launch intent failed for $packageName: ${e.message}")
             false
+        }
+    }
+
+    /**
+     * Shared execution pattern for simple gesture commands (back, home, recents,
+     * scroll, tap_xy, long_press_text, long_press_xy, swipe_xy).
+     * Captures before-state, sends the command, waits, refreshes, and checks progress.
+     */
+    private suspend fun executeSimpleGesture(
+        cmd: String,
+        label: String,
+        step: KaiActionStep,
+        message: String
+    ): KaiActionExecutionResult {
+        val beforeFingerprint = canonicalBeforeFingerprint()
+        val beforePackage = canonicalBeforePackage()
+        sendKaiCmdSuppressed(
+            cmd = cmd,
+            text = step.text,
+            dir = step.dir.ifBlank { "" },
+            times = step.times,
+            x = step.x,
+            y = step.y,
+            endX = step.endX,
+            endY = step.endY,
+            holdMs = step.holdMs,
+            preDelayMs = 60L
+        )
+        delay(step.waitMs.coerceAtLeast(420L))
+        val state = requestFreshScreen(2800L)
+        val meta = getLastRefreshMeta()
+        val afterFingerprint = fingerprintFor(state.packageName, state.rawDump)
+        val afterPackage = state.packageName
+        markActionProgress(beforePackage, afterPackage, beforeFingerprint, afterFingerprint, "$label verification")
+
+        val hasMeaningfulChange = !sameFingerprint(beforeFingerprint, afterFingerprint) ||
+            isExternalPackageChange(beforePackage, afterPackage) ||
+            (meta.changedFromPrevious && !meta.reusedLastGood)
+
+        return if (!hasMeaningfulChange && meta.weak) {
+            weakNoProgressFailure(state, label)
+        } else {
+            KaiActionExecutionResult(success = true, message = message, screenState = state)
         }
     }
 
@@ -2310,36 +2042,7 @@ class KaiActionExecutor(
                 }
             }
 
-            "long_press_text" -> {
-                val beforeFingerprint = canonicalBeforeFingerprint()
-                val beforePackage = canonicalBeforePackage()
-                sendKaiCmdSuppressed(
-                    cmd = KaiAccessibilityService.CMD_LONG_PRESS_TEXT,
-                    text = step.text,
-                    holdMs = step.holdMs,
-                    preDelayMs = 80L
-                )
-                delay(step.waitMs.coerceAtLeast(620L))
-                val state = requestFreshScreen(3200L)
-                val meta = getLastRefreshMeta()
-                val afterFingerprint = fingerprintFor(state.packageName, state.rawDump)
-                val afterPackage = state.packageName
-                markActionProgress(beforePackage, afterPackage, beforeFingerprint, afterFingerprint, "long_press_text verification")
-
-                val fingerprintChanged = !sameFingerprint(beforeFingerprint, afterFingerprint)
-                val packageChanged = isExternalPackageChange(beforePackage, afterPackage)
-                val hasMeaningfulChange = fingerprintChanged || packageChanged || (meta.changedFromPrevious && !meta.reusedLastGood)
-                
-                if (!hasMeaningfulChange && meta.weak) {
-                    weakNoProgressFailure(state, "long_press_text")
-                } else {
-                    KaiActionExecutionResult(
-                        success = true,
-                        message = "Requested long press: ${step.text}",
-                        screenState = state
-                    )
-                }
-            }
+            "long_press_text" -> executeSimpleGesture(KaiAccessibilityService.CMD_LONG_PRESS_TEXT, "long_press_text", step, "Requested long press: ${step.text}")
 
             "input_text" -> {
                 val beforeState = requestFreshScreen(2300L)
@@ -2383,220 +2086,19 @@ class KaiActionExecutor(
                 )
             }
 
-            "scroll" -> {
-                val beforeFingerprint = canonicalBeforeFingerprint()
-                val beforePackage = canonicalBeforePackage()
-                sendKaiCmdSuppressed(
-                    cmd = KaiAccessibilityService.CMD_SCROLL,
-                    dir = step.dir.ifBlank { "down" },
-                    times = step.times,
-                    preDelayMs = 60L
-                )
-                delay(step.waitMs.coerceAtLeast(620L))
-                val state = requestFreshScreen(2800L)
-                val meta = getLastRefreshMeta()
-                val afterFingerprint = fingerprintFor(state.packageName, state.rawDump)
-                val afterPackage = state.packageName
-                markActionProgress(beforePackage, afterPackage, beforeFingerprint, afterFingerprint, "scroll verification")
+            "scroll" -> executeSimpleGesture(KaiAccessibilityService.CMD_SCROLL, "scroll", step, "Requested scroll ${step.dir} x${step.times}")
 
-                val fingerprintChanged = !sameFingerprint(beforeFingerprint, afterFingerprint)
-                val packageChanged = isExternalPackageChange(beforePackage, afterPackage)
-                val hasMeaningfulChange = fingerprintChanged || packageChanged || (meta.changedFromPrevious && !meta.reusedLastGood)
+            "back" -> executeSimpleGesture(KaiAccessibilityService.CMD_BACK, "back", step, "Requested back")
 
-                if (!hasMeaningfulChange && meta.weak) {
-                    weakNoProgressFailure(state, "scroll")
-                } else {
-                    KaiActionExecutionResult(
-                        success = true,
-                        message = "Requested scroll ${step.dir} x${step.times}",
-                        screenState = state
-                    )
-                }
-            }
+            "home" -> executeSimpleGesture(KaiAccessibilityService.CMD_HOME, "home", step, "Requested home")
 
-            "back" -> {
-                val beforeFingerprint = canonicalBeforeFingerprint()
-                val beforePackage = canonicalBeforePackage()
-                sendKaiCmdSuppressed(
-                    cmd = KaiAccessibilityService.CMD_BACK,
-                    preDelayMs = 50L
-                )
-                delay(step.waitMs.coerceAtLeast(420L))
-                val state = requestFreshScreen(2600L)
-                val meta = getLastRefreshMeta()
-                val afterFingerprint = fingerprintFor(state.packageName, state.rawDump)
-                val afterPackage = state.packageName
-                markActionProgress(beforePackage, afterPackage, beforeFingerprint, afterFingerprint, "back verification")
+            "recents" -> executeSimpleGesture(KaiAccessibilityService.CMD_RECENTS, "recents", step, "Requested recents")
 
-                val fingerprintChanged = !sameFingerprint(beforeFingerprint, afterFingerprint)
-                val packageChanged = isExternalPackageChange(beforePackage, afterPackage)
-                val hasMeaningfulChange = fingerprintChanged || packageChanged || (meta.changedFromPrevious && !meta.reusedLastGood)
+            "tap_xy" -> executeSimpleGesture(KaiAccessibilityService.CMD_TAP_XY, "tap_xy", step, "Requested tap_xy")
 
-                if (!hasMeaningfulChange && meta.weak) {
-                    weakNoProgressFailure(state, "back")
-                } else {
-                    KaiActionExecutionResult(
-                        success = true,
-                        message = "Requested back",
-                        screenState = state
-                    )
-                }
-            }
+            "long_press_xy" -> executeSimpleGesture(KaiAccessibilityService.CMD_LONG_PRESS_XY, "long_press_xy", step, "Requested long_press_xy")
 
-            "home" -> {
-                val beforeFingerprint = canonicalBeforeFingerprint()
-                val beforePackage = canonicalBeforePackage()
-                sendKaiCmdSuppressed(
-                    cmd = KaiAccessibilityService.CMD_HOME,
-                    preDelayMs = 50L
-                )
-                delay(step.waitMs.coerceAtLeast(450L))
-                val state = requestFreshScreen(2600L)
-                val meta = getLastRefreshMeta()
-                val afterFingerprint = fingerprintFor(state.packageName, state.rawDump)
-                val afterPackage = state.packageName
-                markActionProgress(beforePackage, afterPackage, beforeFingerprint, afterFingerprint, "home verification")
-
-                val fingerprintChanged = !sameFingerprint(beforeFingerprint, afterFingerprint)
-                val packageChanged = isExternalPackageChange(beforePackage, afterPackage)
-                val hasMeaningfulChange = fingerprintChanged || packageChanged || (meta.changedFromPrevious && !meta.reusedLastGood)
-
-                if (!hasMeaningfulChange && meta.weak) {
-                    weakNoProgressFailure(state, "home")
-                } else {
-                    KaiActionExecutionResult(
-                        success = true,
-                        message = "Requested home",
-                        screenState = state
-                    )
-                }
-            }
-
-            "recents" -> {
-                val beforeFingerprint = canonicalBeforeFingerprint()
-                val beforePackage = canonicalBeforePackage()
-                sendKaiCmdSuppressed(
-                    cmd = KaiAccessibilityService.CMD_RECENTS,
-                    preDelayMs = 50L
-                )
-                delay(step.waitMs.coerceAtLeast(500L))
-                val state = requestFreshScreen(2800L)
-                val meta = getLastRefreshMeta()
-                val afterFingerprint = fingerprintFor(state.packageName, state.rawDump)
-                val afterPackage = state.packageName
-                markActionProgress(beforePackage, afterPackage, beforeFingerprint, afterFingerprint, "recents verification")
-
-                val fingerprintChanged = !sameFingerprint(beforeFingerprint, afterFingerprint)
-                val packageChanged = isExternalPackageChange(beforePackage, afterPackage)
-                val hasMeaningfulChange = fingerprintChanged || packageChanged || (meta.changedFromPrevious && !meta.reusedLastGood)
-
-                if (!hasMeaningfulChange && meta.weak) {
-                    weakNoProgressFailure(state, "recents")
-                } else {
-                    KaiActionExecutionResult(
-                        success = true,
-                        message = "Requested recents",
-                        screenState = state
-                    )
-                }
-            }
-
-            "tap_xy" -> {
-                val beforeFingerprint = canonicalBeforeFingerprint()
-                val beforePackage = canonicalBeforePackage()
-                sendKaiCmdSuppressed(
-                    cmd = KaiAccessibilityService.CMD_TAP_XY,
-                    x = step.x,
-                    y = step.y,
-                    preDelayMs = 50L
-                )
-                delay(step.waitMs.coerceAtLeast(420L))
-                val state = requestFreshScreen(2800L)
-                val meta = getLastRefreshMeta()
-                val afterFingerprint = fingerprintFor(state.packageName, state.rawDump)
-                val afterPackage = state.packageName
-                markActionProgress(beforePackage, afterPackage, beforeFingerprint, afterFingerprint, "tap_xy verification")
-
-                val fingerprintChanged = !sameFingerprint(beforeFingerprint, afterFingerprint)
-                val packageChanged = isExternalPackageChange(beforePackage, afterPackage)
-                val hasMeaningfulChange = fingerprintChanged || packageChanged || (meta.changedFromPrevious && !meta.reusedLastGood)
-
-                if (!hasMeaningfulChange && meta.weak) {
-                    weakNoProgressFailure(state, "tap_xy")
-                } else {
-                    KaiActionExecutionResult(
-                        success = true,
-                        message = "Requested tap_xy",
-                        screenState = state
-                    )
-                }
-            }
-
-            "long_press_xy" -> {
-                val beforeFingerprint = canonicalBeforeFingerprint()
-                val beforePackage = canonicalBeforePackage()
-                sendKaiCmdSuppressed(
-                    cmd = KaiAccessibilityService.CMD_LONG_PRESS_XY,
-                    x = step.x,
-                    y = step.y,
-                    holdMs = step.holdMs,
-                    preDelayMs = 60L
-                )
-                delay(step.waitMs.coerceAtLeast(650L))
-                val state = requestFreshScreen(3000L)
-                val meta = getLastRefreshMeta()
-                val afterFingerprint = fingerprintFor(state.packageName, state.rawDump)
-                val afterPackage = state.packageName
-                markActionProgress(beforePackage, afterPackage, beforeFingerprint, afterFingerprint, "long_press_xy verification")
-
-                val fingerprintChanged = !sameFingerprint(beforeFingerprint, afterFingerprint)
-                val packageChanged = isExternalPackageChange(beforePackage, afterPackage)
-                val hasMeaningfulChange = fingerprintChanged || packageChanged || (meta.changedFromPrevious && !meta.reusedLastGood)
-
-                if (!hasMeaningfulChange && meta.weak) {
-                    weakNoProgressFailure(state, "long_press_xy")
-                } else {
-                    KaiActionExecutionResult(
-                        success = true,
-                        message = "Requested long_press_xy",
-                        screenState = state
-                    )
-                }
-            }
-
-            "swipe_xy" -> {
-                val beforeFingerprint = canonicalBeforeFingerprint()
-                val beforePackage = canonicalBeforePackage()
-                sendKaiCmdSuppressed(
-                    cmd = KaiAccessibilityService.CMD_SWIPE_XY,
-                    x = step.x,
-                    y = step.y,
-                    endX = step.endX,
-                    endY = step.endY,
-                    holdMs = step.holdMs,
-                    preDelayMs = 60L
-                )
-                delay(step.waitMs.coerceAtLeast(700L))
-                val state = requestFreshScreen(3000L)
-                val meta = getLastRefreshMeta()
-                val afterFingerprint = fingerprintFor(state.packageName, state.rawDump)
-                val afterPackage = state.packageName
-                markActionProgress(beforePackage, afterPackage, beforeFingerprint, afterFingerprint, "swipe_xy verification")
-
-                val fingerprintChanged = !sameFingerprint(beforeFingerprint, afterFingerprint)
-                val packageChanged = isExternalPackageChange(beforePackage, afterPackage)
-                val hasMeaningfulChange = fingerprintChanged || packageChanged || (meta.changedFromPrevious && !meta.reusedLastGood)
-
-                if (!hasMeaningfulChange && meta.weak) {
-                    weakNoProgressFailure(state, "swipe_xy")
-                } else {
-                    KaiActionExecutionResult(
-                        success = true,
-                        message = "Requested swipe_xy",
-                        screenState = state
-                    )
-                }
-            }
+            "swipe_xy" -> executeSimpleGesture(KaiAccessibilityService.CMD_SWIPE_XY, "swipe_xy", step, "Requested swipe_xy")
 
             else -> {
                 KaiActionExecutionResult(
@@ -2646,298 +2148,6 @@ class KaiActionExecutor(
         )
     }
 }
-// ── KaiExecutorScreenOps ──────────────────────────────────────────────
-
-
-internal fun KaiActionExecutor.softResetObservationStateImpl() {
-    canonicalRuntimeState = null
-    lastAcceptedFingerprint = ""
-    lastAcceptedObservationAt = 0L
-    lastGoodScreenState = null
-    consecutiveWeakReads = 0
-    consecutiveStaleReads = 0
-    consecutiveNoProgressActions = 0
-    lastRecoveryContextKey = ""
-    repeatedRecoveryContextCount = 0
-    lastRefreshMeta = lastRefreshMeta.copy(
-        fingerprint = "",
-        changedFromPrevious = false,
-        usable = false,
-        fallback = false,
-        weak = false,
-        stale = false,
-        reusedLastGood = false
-    )
-}
-
-internal fun KaiActionExecutor.isOverlayPollutedImpl(raw: String): Boolean {
-    val clean = raw.trim().lowercase(Locale.ROOT)
-    if (clean.isBlank()) return false
-
-    val hints = listOf(
-        "dynamic island",
-        "custom prompt",
-        "make action",
-        "control panel",
-        "agent loop active",
-        "agent planning",
-        "agent executing",
-        "agent observing",
-        "monitoring paused before action loop",
-        "screen recorder",
-        "recording",
-        "tap to stop",
-        "stop recording"
-    )
-
-    return hints.count { clean.contains(it) } >= 2
-}
-
-internal fun KaiActionExecutor.isBaseDumpValidImpl(raw: String, packageName: String = ""): Boolean {
-    val clean = raw.trim()
-    if (clean.isBlank()) return false
-    if (clean.equals("(no active window)", ignoreCase = true)) return false
-    if (clean.equals("(empty dump)", ignoreCase = true)) return false
-    if (clean.lines().size < 2) return false
-    if (packageName == context.packageName) return false
-    return true
-}
-
-internal fun KaiActionExecutor.isUsableDumpImpl(raw: String, packageName: String = ""): Boolean {
-    val clean = raw.trim()
-    if (!isBaseDumpValidImpl(clean, packageName)) return false
-    if (isOverlayPollutedImpl(clean)) return false
-    return true
-}
-
-internal fun KaiActionExecutor.isFallbackAcceptableImpl(raw: String, packageName: String = ""): Boolean {
-    val clean = raw.trim()
-    if (!isBaseDumpValidImpl(clean, packageName)) return false
-
-    val lineCount = clean.lines().size
-    val likelyRealExternalScreen = packageName.isNotBlank() && packageName != context.packageName
-
-    return likelyRealExternalScreen && lineCount >= 6
-}
-
-internal fun KaiActionExecutor.isWeakButMeaningfulDumpImpl(raw: String, packageName: String = ""): Boolean {
-    val clean = raw.trim()
-    if (clean.isBlank()) return false
-    if (clean.equals("(no active window)", ignoreCase = true)) return false
-    if (clean.equals("(empty dump)", ignoreCase = true)) return false
-    if (packageName == context.packageName) return false
-    return true
-}
-
-private fun packageMatchesExpected(actual: String, expectedPackage: String): Boolean {
-    val a = KaiScreenStateParser.normalize(actual)
-    val e = KaiScreenStateParser.normalize(expectedPackage)
-    if (e.isBlank()) return true
-    if (a.isBlank()) return false
-    return a == e || a.startsWith("$e.")
-}
-
-private fun isLauncherRecoveryObservation(expectedPackage: String, state: KaiScreenState): Boolean {
-    if (expectedPackage.isNotBlank()) return false
-    if (!state.isLauncher()) return false
-    return state.elements.size >= 2 || state.lines.size >= 3
-}
-
-internal fun KaiActionExecutor.updateRefreshMetaImpl(
-    state: KaiScreenState,
-    usable: Boolean,
-    fallback: Boolean,
-    weak: Boolean,
-    previousFingerprint: String,
-    observationUpdatedAt: Long,
-    reusedLastGood: Boolean = false
-) {
-    val newFingerprint = fingerprintFor(state.packageName, state.rawDump)
-    val changed = !sameFingerprint(previousFingerprint, newFingerprint)
-    val stale = !changed
-
-    if (usable) {
-        consecutiveWeakReads = 0
-        consecutiveStaleReads = if (stale) consecutiveStaleReads + 1 else 0
-        lastGoodScreenState = state
-        lastAcceptedFingerprint = newFingerprint
-        lastAcceptedObservationAt = observationUpdatedAt
-        adoptCanonicalRuntimeState(state)
-    } else {
-        consecutiveWeakReads += 1
-        consecutiveStaleReads = if (stale) consecutiveStaleReads + 1 else 0
-        // Strict runtime contract: weak/fallback/reused observations never become canonical semantic truth.
-    }
-
-    lastRefreshMeta = KaiActionExecutor.ScreenRefreshMeta(
-        fingerprint = newFingerprint,
-        changedFromPrevious = changed,
-        usable = usable,
-        fallback = fallback,
-        weak = weak,
-        stale = stale,
-        reusedLastGood = reusedLastGood
-    )
-}
-
-internal fun KaiActionExecutor.getLastRefreshMetaImpl(): KaiActionExecutor.ScreenRefreshMeta = lastRefreshMeta
-internal fun KaiActionExecutor.getConsecutiveWeakReadsImpl(): Int = consecutiveWeakReads
-internal fun KaiActionExecutor.getConsecutiveStaleReadsImpl(): Int = consecutiveStaleReads
-
-private fun KaiScreenState.isWrongSurfaceFamilyForSemanticProgress(): Boolean {
-    val kind = KaiScreenStateParser.normalize(screenKind)
-    if (kind in setOf("instagram_camera_overlay", "instagram_search", "notes_search", "search")) return true
-    return isCameraOrMediaOverlaySurface() || isInstagramSearchSurface() || isSearchLikeSurface()
-}
-
-private fun KaiActionExecutor.isSemanticContinuationContext(expectedPackage: String): Boolean {
-    return expectedPackage.isNotBlank()
-}
-
-private fun KaiActionExecutor.isContinuationEligibleObservation(state: KaiScreenState, expectedPackage: String): Boolean {
-    if (state.packageName.isBlank()) return false
-    if (state.isOverlayPolluted()) return false
-    if (state.isLauncher()) return false
-
-    val expected = KaiScreenStateParser.normalize(expectedPackage)
-    val observed = KaiScreenStateParser.normalize(state.packageName)
-    if (expected.isNotBlank() && observed.isNotBlank() && observed != expected && !observed.startsWith("$expected.")) {
-        return false
-    }
-
-    val weak = state.isWeakObservation()
-
-    return when {
-        observed.contains("instagram") -> {
-            if (state.isInstagramCameraOverlaySurface() || state.isInstagramSearchSurface()) return false
-            val strong = state.isInstagramDmListSurface() || state.isInstagramDmThreadSurface() || state.isInstagramMessagesEntrySurface()
-            strong || !state.isWrongSurfaceFamilyForSemanticProgress()
-        }
-
-        observed.contains("whatsapp") -> {
-            val strong = state.isWhatsAppChatsListSurface() || state.isWhatsAppConversationThreadSurface()
-            strong || !state.isWrongSurfaceFamilyForSemanticProgress()
-        }
-
-        observed.contains("notes") || observed.contains("keep") -> {
-            val strong = state.isNotesListSurface() || state.isStrictVerifiedNotesEditorSurface() || state.isNotesTitleInputSurface() || state.isNotesBodyInputSurface()
-            strong || !state.isWrongSurfaceFamilyForSemanticProgress()
-        }
-
-        observed.contains("youtube") -> {
-            val strong = state.isYouTubeBrowseSurface() || state.isYouTubeWatchSurface() || KaiSurfaceModel.isVerifiedYouTubeWorkingSurface(state)
-            strong || !state.isWrongSurfaceFamilyForSemanticProgress()
-        }
-
-        else -> {
-            !weak && !state.isWrongSurfaceFamilyForSemanticProgress()
-        }
-    }
-}
-
-internal suspend fun KaiActionExecutor.requestFreshScreenImpl(timeoutMs: Long = 2500L, expectedPackage: String = ""): KaiScreenState {
-    val beforeUpdatedAt = maxOf(
-        KaiObservationRuntime.live.updatedAt,
-        KaiObservationRuntime.authoritative.updatedAt,
-        lastAcceptedObservationAt
-    )
-    val previousFingerprint = lastAcceptedFingerprint.ifBlank {
-        canonicalRuntimeState?.let { fingerprintFor(it.packageName, it.rawDump) }.orEmpty()
-    }
-
-    sendKaiCmdSuppressed(
-        cmd = KaiAccessibilityService.CMD_DUMP,
-        expectedPackage = expectedPackage,
-        timeoutMs = timeoutMs,
-        preDelayMs = 30L,
-        postDelayMs = 0L,
-        strongObservationMode = true
-    )
-
-    val fresh = KaiObservationRuntime.awaitFresh(
-        afterTime = beforeUpdatedAt,
-        timeoutMs = timeoutMs
-    )
-
-    val obs = fresh ?: bestRuntimeObservation()
-    val state = KaiScreenStateParser.fromDump(
-        packageName = obs.packageName,
-        dump = obs.screenPreview
-    )
-
-    val fp = fingerprintFor(state.packageName, state.rawDump)
-    val changed = fp.isNotBlank() && !sameFingerprint(fp, previousFingerprint)
-    val weak =
-        state.packageName.isBlank() ||
-            state.rawDump.isBlank() ||
-            state.isOverlayPolluted() ||
-            state.isWeakObservation()
-    val stale = !changed && obs.updatedAt <= lastAcceptedObservationAt
-
-    if (!weak && !stale) {
-        adoptCanonicalRuntimeState(state)
-        lastGoodScreenState = state
-        lastAcceptedFingerprint = fp
-        lastAcceptedObservationAt = obs.updatedAt
-    }
-
-    updateRefreshMetaImpl(
-        state = state,
-        usable = !weak && !stale,
-        fallback = fresh == null,
-        weak = weak,
-        previousFingerprint = previousFingerprint,
-        observationUpdatedAt = obs.updatedAt,
-        reusedLastGood = fresh == null && lastGoodScreenState != null && weak
-    )
-
-    if (weak) {
-        consecutiveWeakReads += 1
-        onLog("refresh_failed_no_usable_observation_arrived")
-    } else {
-        consecutiveWeakReads = 0
-    }
-
-    if (stale) {
-        consecutiveStaleReads += 1
-    } else {
-        consecutiveStaleReads = 0
-    }
-
-    return when {
-        !weak -> state
-        lastGoodScreenState != null -> {
-            onLog("Observation is weak/stale; requesting fresh dump")
-            lastGoodScreenState!!
-        }
-        else -> state
-    }
-}
-
-internal fun KaiActionExecutor.markActionProgressImpl(
-    beforePackage: String,
-    afterPackage: String,
-    beforeFingerprint: String,
-    afterFingerprint: String,
-    message: String
-) {
-    val fingerprintChanged = !sameFingerprint(beforeFingerprint, afterFingerprint)
-    val packageChanged = isExternalPackageChange(beforePackage, afterPackage)
-    val hasMeaningfulChange = fingerprintChanged || packageChanged
-
-    if (!hasMeaningfulChange) {
-        consecutiveNoProgressActions += 1
-        onLog("$message | no visible progress")
-    } else {
-        consecutiveNoProgressActions = 0
-    }
-
-    if (consecutiveNoProgressActions >= 8) {
-        onLog("Too many no-progress actions in a row. Soft-resetting observation state, but keeping agent alive.")
-        softResetObservationStateImpl()
-    }
-}
-
 // ── KaiExecutorSemanticActions ──────────────────────────────────────────────
 
 
