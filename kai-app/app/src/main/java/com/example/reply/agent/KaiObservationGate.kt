@@ -487,37 +487,9 @@ class KaiObservationGate(
                 }
             }
 
-            // If authoritative is blank but the live observation is already coherent and package-bearing,
-            // allow it as startup readiness instead of failing blind on missing_package.
-            val bestLive = KaiObservationRuntime.getBestAvailable(authoritativeOnly = false)
-            if (bestLive.updatedAt > 0L) {
-                val liveState = KaiScreenStateParser.fromDump(bestLive.packageName, bestLive.screenPreview)
-                val liveWeak = liveState.packageName.isBlank() ||
-                    liveState.rawDump.isBlank() ||
-                    liveState.isWeakObservation() ||
-                    liveState.isOverlayPolluted() ||
-                    !liveState.isMeaningful()
-
-                if (!liveWeak) {
-                    adopt(liveState)
-                    lastAcceptedFingerprint = fingerprintFor(liveState.packageName, liveState.rawDump)
-                    lastAcceptedObservationAt = bestLive.updatedAt
-                    lastMeta = RefreshMeta(
-                        fingerprint = lastAcceptedFingerprint,
-                        changedFromPrevious = true,
-                        usable = true
-                    )
-                    return ReadinessResult(
-                        passed = true,
-                        state = liveState,
-                        reason = "authoritative_observation_ready_via_live_runtime",
-                        attempts = attempt + 1
-                    )
-                }
-            }
-
             // If authoritative is blank but the best live observation already carries a
-            // real external package, accept it during startup instead of forcing a blind fail.
+            // real external package and a meaningful dump, accept it during startup
+            // instead of failing blind.
             val bestLive = KaiObservationRuntime.getBestAvailable(authoritativeOnly = false)
             if (bestLive.updatedAt > 0L &&
                 bestLive.packageName.isNotBlank() &&
@@ -573,9 +545,7 @@ class KaiObservationGate(
 
         // Cold-start lenient fallback: after all strict attempts fail, accept any
         // non-Kai observation that carries a real external package, even if it didn't
-        // pass the full quality gate.  This prevents open-app and similar commands
-        // from failing with missing_package immediately after app restart, when the
-        // accessibility tree hasn't fully settled but does carry a valid package hint.
+        // pass the full quality gate.
         val coldStartFallback = KaiObservationRuntime.getBestAvailable(authoritativeOnly = false)
         if (coldStartFallback.updatedAt > 0L &&
             coldStartFallback.packageName.isNotBlank() &&
@@ -598,31 +568,6 @@ class KaiObservationGate(
                 state = fallbackState,
                 reason = "authoritative_observation_ready_via_cold_start_lenient_fallback",
                 attempts = maxAttempts.coerceAtLeast(1) + 1
-            )
-        }
-
-        val coldStartFallback = KaiObservationRuntime.getBestAvailable(authoritativeOnly = false)
-        if (coldStartFallback.updatedAt > 0L &&
-            coldStartFallback.packageName.isNotBlank() &&
-            !coldStartFallback.packageName.startsWith("com.example.reply")
-        ) {
-            val fallbackState = KaiScreenStateParser.fromDump(
-                coldStartFallback.packageName,
-                coldStartFallback.screenPreview
-            )
-            adopt(fallbackState)
-            lastAcceptedFingerprint = fingerprintFor(fallbackState.packageName, fallbackState.rawDump)
-            lastAcceptedObservationAt = coldStartFallback.updatedAt
-            lastMeta = RefreshMeta(
-                fingerprint = lastAcceptedFingerprint,
-                changedFromPrevious = true,
-                usable = true
-            )
-            return ReadinessResult(
-                passed = true,
-                state = fallbackState,
-                reason = "authoritative_observation_ready_via_cold_start_lenient_fallback",
-                attempts = maxAttempts.coerceAtLeast(1)
             )
         }
 
