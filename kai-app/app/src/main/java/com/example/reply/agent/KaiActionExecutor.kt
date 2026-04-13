@@ -1,10 +1,10 @@
+
 package com.example.reply.agent
 
 import android.content.Context
 import android.content.Intent
 import com.example.reply.ui.KaiAccessibilityService
 import com.example.reply.ui.KaiBubbleManager
-import com.example.reply.ui.KaiCommandParser
 import kotlinx.coroutines.delay
 import java.util.Locale
 
@@ -44,27 +44,19 @@ class KaiActionExecutor(
 
     internal var canonicalRuntimeState: KaiScreenState?
         get() = gate.canonical
-        set(value) {
-            gate.canonical = value
-        }
+        set(value) { gate.canonical = value }
 
     internal var lastGoodScreenState: KaiScreenState?
         get() = gate.canonical
-        set(value) {
-            gate.canonical = value
-        }
+        set(value) { gate.canonical = value }
 
     internal var lastAcceptedFingerprint: String
         get() = gate.lastAcceptedFingerprint
-        set(value) {
-            gate.lastAcceptedFingerprint = value
-        }
+        set(value) { gate.lastAcceptedFingerprint = value }
 
     internal var lastAcceptedObservationAt: Long
         get() = gate.lastAcceptedObservationAt
-        set(value) {
-            gate.lastAcceptedObservationAt = value
-        }
+        set(value) { gate.lastAcceptedObservationAt = value }
 
     internal var consecutiveWeakReads: Int
         get() = gate.consecutiveWeakReads
@@ -136,43 +128,9 @@ class KaiActionExecutor(
     internal fun resolveCanonicalRuntimeState(): KaiScreenState = gate.resolve()
 
     fun getLastRefreshMeta(): ScreenRefreshMeta = lastRefreshMeta
-
     fun getConsecutiveWeakReads(): Int = gate.consecutiveWeakReads
-
     fun getConsecutiveStaleReads(): Int = gate.consecutiveStaleReads
-
     fun bestRuntimeObservation(): KaiObservation = KaiObservationRuntime.getBestAvailable()
-
-    internal fun expectedStateSatisfied(step: KaiActionStep, state: KaiScreenState): Boolean {
-        val expectedPkg = KaiScreenStateParser.normalize(step.expectedPackage)
-        if (expectedPkg.isNotBlank() && !state.matchesExpectedPackage(expectedPkg)) {
-            return false
-        }
-
-        val expectedKind = KaiScreenStateParser.normalize(step.expectedScreenKind)
-        if (expectedKind.isNotBlank()) {
-            val kindSatisfied = when (expectedKind) {
-                "instagram_dm_list" -> KaiSurfaceModel.isVerifiedInstagramDmListSurface(state)
-                "instagram_dm_thread", "chat_thread" -> KaiSurfaceModel.isVerifiedInstagramThreadTextSurface(state) || state.isChatThreadScreen()
-                "instagram_camera_overlay" -> KaiSurfaceModel.isVerifiedInstagramCameraOverlay(state)
-                "youtube_working_surface" -> KaiSurfaceModel.isVerifiedYouTubeWorkingSurface(state)
-                "notes_list" -> KaiSurfaceModel.isVerifiedNotesListSurface(state)
-                "notes_editor", "notes_title_input", "notes_body_input" -> KaiSurfaceModel.isVerifiedNotesEditorSurface(state)
-                "chat_list" -> state.isChatListScreen() && !state.isSearchLikeSurface() && !state.isCameraOrMediaOverlaySurface()
-                "search" -> state.isSearchLikeSurface()
-                "detail" -> state.isDetailSurface() || state.isPlayerSurface()
-                else -> KaiScreenStateParser.normalize(state.screenKind) == expectedKind
-            }
-            if (!kindSatisfied) return false
-        }
-
-        if (step.expectedTexts.isNotEmpty()) {
-            val allHit = step.expectedTexts.all { state.containsText(it) }
-            if (!allHit) return false
-        }
-
-        return true
-    }
 
     suspend fun resetObservationTransitionStateForRun() {
         sendKaiCmdSuppressed(
@@ -253,16 +211,15 @@ class KaiActionExecutor(
             )
         }
 
-        val backRecovery = when {
-            state.isOverlayPolluted() -> true
-            state.isCameraOrMediaOverlaySurface() -> true
-            state.isSheetOrDialogSurface() -> true
-            else -> false
-        }
+        val needsBack = state.isOverlayPolluted() ||
+            state.isCameraOrMediaOverlaySurface() ||
+            state.isSheetOrDialogSurface() ||
+            state.isSearchLikeSurface()
 
-        return if (backRecovery) {
+        return if (needsBack) {
             sendKaiCmdSuppressed(
                 cmd = KaiAccessibilityService.CMD_BACK,
+                expectedPackage = step.expectedPackage.ifBlank { state.packageName },
                 preDelayMs = 70L,
                 postDelayMs = 100L
             )
@@ -295,7 +252,7 @@ class KaiActionExecutor(
         val cmd = step.cmd.trim().lowercase(Locale.ROOT)
         val expectedPackage = step.expectedPackage.ifBlank { currentState.packageName }
 
-        val policyGateCommands = setOf(
+        val gateCommands = setOf(
             "click_best_match",
             "focus_best_input",
             "input_into_best_field",
@@ -304,7 +261,7 @@ class KaiActionExecutor(
             "verify_state"
         )
 
-        if (cmd in policyGateCommands) {
+        if (cmd in gateCommands) {
             val gateResult = ensureStrongObservationGate(
                 expectedPackage = expectedPackage,
                 timeoutMs = 2200L,
@@ -327,8 +284,7 @@ class KaiActionExecutor(
             "long_press_text" -> executeLongPressText(step, currentState)
             "click_best_match", "open_best_list_item" -> executeClickBestMatch(step, currentState)
             "focus_best_input" -> executeFocusBestInput(step, currentState)
-            "input_into_best_field" -> executeInputIntoBestField(step, currentState)
-            "input_text", "type_text" -> executeInputText(step, currentState)
+            "input_into_best_field", "input_text", "type_text" -> executeInput(step, currentState)
             "press_primary_action" -> executePressPrimaryAction(step, currentState)
             "scroll" -> executeScroll(step, currentState)
             "back" -> executeSystemNav(KaiAccessibilityService.CMD_BACK, step, currentState)
@@ -347,43 +303,101 @@ class KaiActionExecutor(
         }
     }
 
+    internal fun expectedStateSatisfied(step: KaiActionStep, state: KaiScreenState): Boolean {
+        return KaiExecutionDecisionAuthority.expectedEvidenceSatisfied(step, state)
+    }
+
     private suspend fun executeOpenApp(
         step: KaiActionStep,
         currentState: KaiScreenState
     ): KaiActionExecutionResult {
-        val target = step.text.ifBlank { step.selectorText }.trim()
-        val resolved = KaiCommandParser.resolveAppAlias(target).ifBlank { target }
-        val inferredKey = KaiScreenStateParser.inferAppHint(target)
-        val expectedPackage = step.expectedPackage.ifBlank {
-            KaiAppIdentityRegistry.packageCandidatesForKey(inferredKey).firstOrNull().orEmpty()
+        val rawTarget = step.text.ifBlank { step.selectorText }.trim()
+        val targetHint = KaiAppIdentityRegistry.resolveAppKey(rawTarget).ifBlank {
+            KaiScreenStateParser.inferAppHint(rawTarget)
+        }
+        val targetPackage = step.expectedPackage.ifBlank {
+            KaiAppIdentityRegistry.resolvePrimaryPackage(rawTarget)
+        }
+
+        if (rawTarget.isBlank() && targetHint.isBlank() && targetPackage.isBlank()) {
+            return KaiActionExecutionResult(
+                success = false,
+                message = "open_app_missing_target",
+                screenState = currentState
+            )
+        }
+
+        if (targetPackage.isNotBlank() && currentState.matchesExpectedPackage(targetPackage)) {
+            return KaiActionExecutionResult(
+                success = true,
+                message = "open_app_already_in_target",
+                screenState = currentState,
+                openAppOutcome = KaiOpenAppOutcome.TARGET_READY
+            )
         }
 
         sendKaiCmdSuppressed(
             cmd = KaiAccessibilityService.CMD_OPEN_APP,
-            text = resolved,
-            expectedPackage = expectedPackage,
-            preDelayMs = 80L
+            text = targetHint.ifBlank { rawTarget },
+            expectedPackage = targetPackage,
+            preDelayMs = 40L,
+            postDelayMs = 220L
         )
 
-        var after = requestFreshScreen(
-            timeoutMs = step.timeoutMs.coerceIn(1200L, 3200L),
-            expectedPackage = expectedPackage
-        )
+        val beforeFingerprint = currentState.semanticFingerprint()
+        repeat(4) { attempt ->
+            val after = requestFreshScreen(
+                timeoutMs = 1800L + (attempt * 300L),
+                expectedPackage = ""
+            )
+            val inTarget = when {
+                targetPackage.isNotBlank() -> after.matchesExpectedPackage(targetPackage)
+                targetHint.isNotBlank() -> after.likelyMatchesAppHint(targetHint)
+                else -> after.packageName.isNotBlank() && !after.isLauncher()
+            }
 
-        if (after.packageName.isBlank() && expectedPackage.isNotBlank()) {
-            after = requestFreshScreen(1600L, expectedPackage)
+            val moved = KaiExecutionDecisionAuthority.hasMeaningfulProgress(currentState, after) ||
+                beforeFingerprint != after.semanticFingerprint()
+
+            if (inTarget && !after.isLauncher()) {
+                val outcome = if (after.isWeakObservation()) {
+                    KaiOpenAppOutcome.USABLE_INTERMEDIATE_IN_TARGET_APP
+                } else {
+                    KaiOpenAppOutcome.TARGET_READY
+                }
+                gate.markActionProgress(
+                    currentState.packageName,
+                    after.packageName,
+                    beforeFingerprint,
+                    after.semanticFingerprint(),
+                    "open_app"
+                )
+                return KaiActionExecutionResult(
+                    success = true,
+                    message = "open_app_confirmed:$outcome",
+                    screenState = after,
+                    openAppOutcome = outcome
+                )
+            }
+
+            if (moved && after.packageName.isNotBlank() && !after.isLauncher()) {
+                return KaiActionExecutionResult(
+                    success = true,
+                    message = "open_app_intermediate_transition",
+                    screenState = after,
+                    openAppOutcome = KaiOpenAppOutcome.USABLE_INTERMEDIATE_IN_TARGET_APP
+                )
+            }
+
+            delay(120L)
         }
 
-        val arrived = after.packageName.isNotBlank() && (
-            expectedPackage.isBlank() ||
-                KaiAppIdentityRegistry.packageMatchesFamily(expectedPackage, after.packageName) ||
-                after.matchesExpectedPackage(expectedPackage)
-            )
-
+        val finalState = requestFreshScreen(timeoutMs = 1400L, expectedPackage = "")
         return KaiActionExecutionResult(
-            success = arrived,
-            message = if (arrived) "open_app_arrived" else "open_app_failed",
-            screenState = after
+            success = false,
+            message = "open_app_not_confirmed_yet",
+            screenState = finalState,
+            openAppOutcome = KaiOpenAppOutcome.OPEN_TRANSITION_IN_PROGRESS
         )
     }
 
@@ -391,53 +405,26 @@ class KaiActionExecutor(
         step: KaiActionStep,
         currentState: KaiScreenState
     ): KaiActionExecutionResult {
-        val target = step.text.ifBlank { step.selectorText }.trim()
-        if (target.isBlank()) {
-            return KaiActionExecutionResult(false, "click_text_missing_target", currentState)
+        val text = step.text.ifBlank { step.selectorText }.trim()
+        if (text.isBlank()) {
+            return KaiActionExecutionResult(false, "click_text_missing_text", currentState)
         }
-
         sendKaiCmdSuppressed(
             cmd = KaiAccessibilityService.CMD_CLICK_TEXT,
-            text = target,
+            text = text,
             expectedPackage = step.expectedPackage.ifBlank { currentState.packageName },
-            preDelayMs = 60L,
-            postDelayMs = 80L
+            preDelayMs = 40L,
+            postDelayMs = 160L
         )
-
-        var after = requestFreshScreen(
+        val after = requestFreshScreen(
             timeoutMs = step.timeoutMs.coerceIn(1200L, 2600L),
             expectedPackage = step.expectedPackage.ifBlank { currentState.packageName }
         )
-
-        if (!KaiExecutionDecisionAuthority.hasMeaningfulProgress(currentState, after) &&
-            !KaiExecutionDecisionAuthority.expectedEvidenceSatisfied(step, after)
-        ) {
-            val candidate = findTapCandidate(currentState, target, step)
-            if (candidate != null) {
-                onLog("click_text fallback attempt (click_text + gesture) for '$target'")
-                sendKaiCmdSuppressed(
-                    cmd = KaiAccessibilityService.CMD_TAP_XY,
-                    x = candidate.first,
-                    y = candidate.second,
-                    expectedPackage = step.expectedPackage.ifBlank { currentState.packageName },
-                    preDelayMs = 70L,
-                    postDelayMs = 120L
-                )
-                after = requestFreshScreen(
-                    timeoutMs = 2200L,
-                    expectedPackage = step.expectedPackage.ifBlank { currentState.packageName }
-                )
-            } else {
-                onLog("click_text gesture fallback skipped: no safe coordinates")
-            }
-        }
-
         val success = KaiExecutionDecisionAuthority.hasMeaningfulProgress(currentState, after) ||
-            KaiExecutionDecisionAuthority.expectedEvidenceSatisfied(step, after)
-
+            after.containsText(text)
         return KaiActionExecutionResult(
             success = success,
-            message = if (success) "click_text_ok" else "click_text_failed",
+            message = if (success) "click_text_ok" else "click_text_no_progress",
             screenState = after
         )
     }
@@ -446,31 +433,23 @@ class KaiActionExecutor(
         step: KaiActionStep,
         currentState: KaiScreenState
     ): KaiActionExecutionResult {
-        val target = step.text.ifBlank { step.selectorText }.trim()
-        if (target.isBlank()) {
-            return KaiActionExecutionResult(false, "long_press_text_missing_target", currentState)
+        val text = step.text.ifBlank { step.selectorText }.trim()
+        if (text.isBlank()) {
+            return KaiActionExecutionResult(false, "long_press_text_missing_text", currentState)
         }
-
         sendKaiCmdSuppressed(
             cmd = KaiAccessibilityService.CMD_LONG_PRESS_TEXT,
-            text = target,
-            expectedPackage = step.expectedPackage.ifBlank { currentState.packageName },
+            text = text,
             holdMs = step.holdMs,
-            preDelayMs = 60L,
-            postDelayMs = 120L
+            expectedPackage = step.expectedPackage.ifBlank { currentState.packageName },
+            preDelayMs = 40L,
+            postDelayMs = 180L
         )
-
-        val after = requestFreshScreen(
-            timeoutMs = step.timeoutMs.coerceIn(1400L, 2800L),
-            expectedPackage = step.expectedPackage.ifBlank { currentState.packageName }
-        )
-
-        val success = KaiExecutionDecisionAuthority.hasMeaningfulProgress(currentState, after) ||
-            KaiExecutionDecisionAuthority.expectedEvidenceSatisfied(step, after)
-
+        val after = requestFreshScreen(2200L, step.expectedPackage.ifBlank { currentState.packageName })
+        val success = KaiExecutionDecisionAuthority.hasMeaningfulProgress(currentState, after)
         return KaiActionExecutionResult(
             success = success,
-            message = if (success) "long_press_text_ok" else "long_press_text_failed",
+            message = if (success) "long_press_text_ok" else "long_press_text_no_progress",
             screenState = after
         )
     }
@@ -479,35 +458,40 @@ class KaiActionExecutor(
         step: KaiActionStep,
         currentState: KaiScreenState
     ): KaiActionExecutionResult {
-        val candidate = findTapCandidate(
-            state = currentState,
-            fallbackText = step.selectorText.ifBlank { step.text },
-            step = step
-        )
-        if (candidate == null) {
-            return KaiActionExecutionResult(false, "click_best_match_no_candidate", currentState)
+        val query = step.selectorText.ifBlank { step.text }.trim()
+        val element = selectSemanticElement(currentState, step)
+        val issued = when {
+            element != null -> tapSemanticElement(element)
+            query.isNotBlank() -> {
+                sendKaiCmdSuppressed(
+                    cmd = KaiAccessibilityService.CMD_CLICK_TEXT,
+                    text = query,
+                    expectedPackage = step.expectedPackage.ifBlank { currentState.packageName },
+                    preDelayMs = 50L,
+                    postDelayMs = 150L
+                )
+                true
+            }
+            else -> false
         }
 
-        sendKaiCmdSuppressed(
-            cmd = KaiAccessibilityService.CMD_TAP_XY,
-            x = candidate.first,
-            y = candidate.second,
-            expectedPackage = step.expectedPackage.ifBlank { currentState.packageName },
-            preDelayMs = 60L,
-            postDelayMs = 100L
-        )
+        if (!issued) {
+            return KaiActionExecutionResult(
+                success = false,
+                message = "ambiguous_click_target",
+                screenState = currentState
+            )
+        }
 
         val after = requestFreshScreen(
-            timeoutMs = step.timeoutMs.coerceIn(1400L, 2600L),
+            timeoutMs = step.timeoutMs.coerceIn(1400L, 2800L),
             expectedPackage = step.expectedPackage.ifBlank { currentState.packageName }
         )
-
         val success = KaiExecutionDecisionAuthority.hasMeaningfulProgress(currentState, after) ||
-            KaiExecutionDecisionAuthority.expectedEvidenceSatisfied(step, after)
-
+            expectedStateSatisfied(step, after)
         return KaiActionExecutionResult(
             success = success,
-            message = if (success) "click_best_match_ok" else "click_best_match_failed",
+            message = if (success) "click_best_match_ok" else "click_best_match_no_progress",
             screenState = after
         )
     }
@@ -516,73 +500,71 @@ class KaiActionExecutor(
         step: KaiActionStep,
         currentState: KaiScreenState
     ): KaiActionExecutionResult {
-        val candidate = findBestInputCandidate(currentState, step)
-        if (candidate == null) {
-            return KaiActionExecutionResult(false, "focus_best_input_no_candidate", currentState)
+        val field = currentState.findBestInputField(step.selectorHint.ifBlank { step.selectorText.ifBlank { step.text } })
+        val issued = when {
+            field != null -> tapSemanticElement(field)
+            step.selectorText.isNotBlank() -> {
+                sendKaiCmdSuppressed(
+                    cmd = KaiAccessibilityService.CMD_CLICK_TEXT,
+                    text = step.selectorText,
+                    expectedPackage = step.expectedPackage.ifBlank { currentState.packageName },
+                    preDelayMs = 40L,
+                    postDelayMs = 140L
+                )
+                true
+            }
+            else -> false
         }
 
-        sendKaiCmdSuppressed(
-            cmd = KaiAccessibilityService.CMD_TAP_XY,
-            x = candidate.first,
-            y = candidate.second,
-            expectedPackage = step.expectedPackage.ifBlank { currentState.packageName },
-            preDelayMs = 70L,
-            postDelayMs = 100L
-        )
+        if (!issued) {
+            return KaiActionExecutionResult(
+                success = false,
+                message = "focus_input_not_found",
+                screenState = currentState
+            )
+        }
 
-        val after = requestFreshScreen(
-            timeoutMs = step.timeoutMs.coerceIn(1200L, 2400L),
-            expectedPackage = step.expectedPackage.ifBlank { currentState.packageName }
-        )
-
-        val success = KaiExecutionDecisionAuthority.hasMeaningfulProgress(currentState, after) ||
-            KaiExecutionDecisionAuthority.expectedEvidenceSatisfied(step, after)
-
+        val after = requestFreshScreen(2200L, step.expectedPackage.ifBlank { currentState.packageName })
+        val success = after.findBestInputField(step.selectorHint.ifBlank { step.selectorText.ifBlank { step.text } }) != null ||
+            KaiExecutionDecisionAuthority.hasMeaningfulProgress(currentState, after)
         return KaiActionExecutionResult(
             success = success,
-            message = if (success) "focus_best_input_ok" else "focus_best_input_failed",
+            message = if (success) "focus_best_input_ok" else "focus_best_input_no_progress",
             screenState = after
         )
     }
 
-    private suspend fun executeInputIntoBestField(
+    private suspend fun executeInput(
         step: KaiActionStep,
         currentState: KaiScreenState
     ): KaiActionExecutionResult {
-        val focused = executeFocusBestInput(step, currentState)
-        if (!focused.success) return focused
-        return executeInputText(step, focused.screenState ?: currentState)
-    }
-
-    private suspend fun executeInputText(
-        step: KaiActionStep,
-        currentState: KaiScreenState
-    ): KaiActionExecutionResult {
-        val text = step.text.trim()
+        val text = step.text.ifBlank { step.selectorText }.trim()
         if (text.isBlank()) {
             return KaiActionExecutionResult(false, "input_text_missing_text", currentState)
         }
 
+        val focused = currentState.findBestInputField(step.selectorHint)
+        if (focused != null) {
+            tapSemanticElement(focused)
+            delay(90L)
+        }
+
         sendKaiCmdSuppressed(
-            cmd = KaiAccessibilityService.CMD_INPUT_TEXT,
+            cmd = KaiAccessibilityService.CMD_TYPE,
             text = text,
             expectedPackage = step.expectedPackage.ifBlank { currentState.packageName },
-            preDelayMs = 70L,
-            postDelayMs = 140L
+            preDelayMs = 40L,
+            postDelayMs = 160L
         )
-
         val after = requestFreshScreen(
-            timeoutMs = step.timeoutMs.coerceIn(1500L, 3200L),
+            timeoutMs = step.timeoutMs.coerceIn(1400L, 2800L),
             expectedPackage = step.expectedPackage.ifBlank { currentState.packageName }
         )
-
-        val success = KaiExecutionDecisionAuthority.hasMeaningfulProgress(currentState, after) ||
-            KaiExecutionDecisionAuthority.expectedEvidenceSatisfied(step, after) ||
-            after.containsText(text)
-
+        val success = after.containsText(text) ||
+            after.editableTextSignature().contains(KaiScreenStateParser.normalize(text))
         return KaiActionExecutionResult(
             success = success,
-            message = if (success) "input_text_ok" else "input_text_failed",
+            message = if (success) "input_text_ok" else "input_text_not_verified",
             screenState = after
         )
     }
@@ -591,31 +573,39 @@ class KaiActionExecutor(
         step: KaiActionStep,
         currentState: KaiScreenState
     ): KaiActionExecutionResult {
-        val candidate = findPrimaryActionCandidate(currentState, step)
-        if (candidate == null) {
-            return KaiActionExecutionResult(false, "press_primary_action_no_candidate", currentState)
+        val send = currentState.findSendAction()
+        val issued = when {
+            send != null -> tapSemanticElement(send)
+            step.selectorText.isNotBlank() -> {
+                sendKaiCmdSuppressed(
+                    cmd = KaiAccessibilityService.CMD_CLICK_TEXT,
+                    text = step.selectorText,
+                    expectedPackage = step.expectedPackage.ifBlank { currentState.packageName },
+                    preDelayMs = 40L,
+                    postDelayMs = 160L
+                )
+                true
+            }
+            else -> false
         }
 
-        sendKaiCmdSuppressed(
-            cmd = KaiAccessibilityService.CMD_TAP_XY,
-            x = candidate.first,
-            y = candidate.second,
-            expectedPackage = step.expectedPackage.ifBlank { currentState.packageName },
-            preDelayMs = 60L,
-            postDelayMs = 120L
-        )
+        if (!issued) {
+            return KaiActionExecutionResult(
+                success = false,
+                message = "primary_action_not_found",
+                screenState = currentState
+            )
+        }
 
         val after = requestFreshScreen(
-            timeoutMs = step.timeoutMs.coerceIn(1500L, 2800L),
+            timeoutMs = step.timeoutMs.coerceIn(1400L, 2800L),
             expectedPackage = step.expectedPackage.ifBlank { currentState.packageName }
         )
-
         val success = KaiExecutionDecisionAuthority.hasMeaningfulProgress(currentState, after) ||
-            KaiExecutionDecisionAuthority.expectedEvidenceSatisfied(step, after)
-
+            currentState.findSendAction() != null && after.findSendAction() == null
         return KaiActionExecutionResult(
             success = success,
-            message = if (success) "press_primary_action_ok" else "press_primary_action_failed",
+            message = if (success) "press_primary_action_ok" else "press_primary_action_no_progress",
             screenState = after
         )
     }
@@ -627,17 +617,15 @@ class KaiActionExecutor(
         sendKaiCmdSuppressed(
             cmd = KaiAccessibilityService.CMD_SCROLL,
             dir = step.dir.ifBlank { "down" },
-            times = step.times.coerceIn(1, 10),
+            times = step.times.coerceAtLeast(1),
             expectedPackage = step.expectedPackage.ifBlank { currentState.packageName },
-            preDelayMs = 50L,
+            preDelayMs = 40L,
             postDelayMs = 180L
         )
-
         val after = requestFreshScreen(
             timeoutMs = step.timeoutMs.coerceIn(1200L, 2400L),
             expectedPackage = step.expectedPackage.ifBlank { currentState.packageName }
         )
-
         val success = KaiExecutionDecisionAuthority.hasMeaningfulProgress(currentState, after)
         return KaiActionExecutionResult(
             success = success,
@@ -651,15 +639,19 @@ class KaiActionExecutor(
         step: KaiActionStep,
         currentState: KaiScreenState
     ): KaiActionExecutionResult {
-        sendKaiCmdSuppressed(cmd = cmd, preDelayMs = 50L, postDelayMs = 120L)
-        val after = requestFreshScreen(
-            timeoutMs = step.timeoutMs.coerceIn(1200L, 2200L),
-            expectedPackage = step.expectedPackage
+        sendKaiCmdSuppressed(
+            cmd = cmd,
+            expectedPackage = step.expectedPackage.ifBlank { currentState.packageName },
+            preDelayMs = 40L,
+            postDelayMs = 150L
         )
-        val success = KaiExecutionDecisionAuthority.hasMeaningfulProgress(currentState, after)
+        val after = requestFreshScreen(timeoutMs = 2200L, expectedPackage = "")
+        val success = KaiExecutionDecisionAuthority.hasMeaningfulProgress(currentState, after) ||
+            cmd == KaiAccessibilityService.CMD_HOME ||
+            cmd == KaiAccessibilityService.CMD_BACK
         return KaiActionExecutionResult(
             success = success,
-            message = if (success) "${cmd}_ok" else "${cmd}_no_progress",
+            message = "${cmd}_ok",
             screenState = after
         )
     }
@@ -668,15 +660,24 @@ class KaiActionExecutor(
         step: KaiActionStep,
         currentState: KaiScreenState
     ): KaiActionExecutionResult {
-        val after = requestFreshScreen(
-            timeoutMs = step.timeoutMs.coerceIn(1000L, 2400L),
-            expectedPackage = step.expectedPackage.ifBlank { currentState.packageName }
-        )
-        val success = KaiExecutionDecisionAuthority.expectedEvidenceSatisfied(step, after) ||
+        val after = if (step.cmd.equals("wait_for_text", true) && step.expectedTexts.isNotEmpty()) {
+            waitForExpectedText(
+                expectedTexts = step.expectedTexts,
+                timeoutMs = step.timeoutMs.coerceIn(1000L, 8000L),
+                expectedPackage = step.expectedPackage.ifBlank { currentState.packageName }
+            )
+        } else {
+            requestFreshScreen(
+                timeoutMs = step.timeoutMs.coerceIn(1000L, 2600L),
+                expectedPackage = step.expectedPackage.ifBlank { currentState.packageName }
+            )
+        }
+
+        val success = expectedStateSatisfied(step, after) ||
             KaiExecutionDecisionAuthority.hasMeaningfulProgress(currentState, after)
         return KaiActionExecutionResult(
             success = success,
-            message = if (success) "verify_state_ok" else "verify_state_failed",
+            message = if (success) "verify_state_ok" else "verify_state_not_satisfied",
             screenState = after
         )
     }
@@ -691,10 +692,10 @@ class KaiActionExecutor(
             y = step.y,
             expectedPackage = step.expectedPackage.ifBlank { currentState.packageName },
             preDelayMs = 40L,
-            postDelayMs = 100L
+            postDelayMs = 140L
         )
         val after = requestFreshScreen(
-            timeoutMs = step.timeoutMs.coerceIn(1000L, 2200L),
+            timeoutMs = step.timeoutMs.coerceIn(1200L, 2400L),
             expectedPackage = step.expectedPackage.ifBlank { currentState.packageName }
         )
         val success = KaiExecutionDecisionAuthority.hasMeaningfulProgress(currentState, after)
@@ -716,7 +717,7 @@ class KaiActionExecutor(
             holdMs = step.holdMs,
             expectedPackage = step.expectedPackage.ifBlank { currentState.packageName },
             preDelayMs = 40L,
-            postDelayMs = 120L
+            postDelayMs = 160L
         )
         val after = requestFreshScreen(
             timeoutMs = step.timeoutMs.coerceIn(1200L, 2400L),
@@ -743,7 +744,7 @@ class KaiActionExecutor(
             holdMs = step.holdMs,
             expectedPackage = step.expectedPackage.ifBlank { currentState.packageName },
             preDelayMs = 40L,
-            postDelayMs = 150L
+            postDelayMs = 160L
         )
         val after = requestFreshScreen(
             timeoutMs = step.timeoutMs.coerceIn(1200L, 2400L),
@@ -761,265 +762,131 @@ class KaiActionExecutor(
         step: KaiActionStep,
         currentState: KaiScreenState
     ): KaiActionExecutionResult {
-        delay(step.waitMs.coerceIn(80L, 12000L))
+        delay(step.waitMs.coerceIn(80L, 12_000L))
         val after = requestFreshScreen(
             timeoutMs = 1400L,
             expectedPackage = step.expectedPackage.ifBlank { currentState.packageName }
         )
-        val success = KaiExecutionDecisionAuthority.hasMeaningfulProgress(currentState, after) ||
-            KaiExecutionDecisionAuthority.expectedEvidenceSatisfied(step, after)
         return KaiActionExecutionResult(
             success = true,
-            message = if (success) "wait_observed_progress" else "wait_complete",
+            message = if (KaiExecutionDecisionAuthority.hasMeaningfulProgress(currentState, after)) {
+                "wait_observed_progress"
+            } else {
+                "wait_complete"
+            },
             screenState = after
         )
     }
 
-    private fun screenWidth(): Int = KaiBubbleManager.getScreenWidth(context)
-
-    private fun screenHeight(): Int = KaiBubbleManager.getScreenHeight(context)
-
-    private fun findTapCandidate(
-        state: KaiScreenState,
-        fallbackText: String,
-        step: KaiActionStep
-    ): Pair<Float, Float>? {
-        val queryTexts = buildList {
-            val primary = step.selectorText.ifBlank { fallbackText }.trim()
-            if (primary.isNotBlank()) add(primary)
-            if (step.text.isNotBlank() && step.text != primary) add(step.text.trim())
-            if (step.selectorHint.isNotBlank()) add(step.selectorHint.trim())
-        }.distinct()
-
-        val pool = buildList {
-            addAll(state.elements)
-            addAll(state.likelyNavigationTargets)
-            addAll(state.likelyPrimaryActions)
-            addAll(state.likelyInputFields)
-        }.distinctBy {
-            "${it.text}|${it.contentDescription}|${it.hint}|${it.viewId}|${it.bounds}|${it.roleGuess}"
+    internal fun selectSemanticElement(state: KaiScreenState, step: KaiActionStep): KaiUiElement? {
+        if (step.expectedPackage.isNotBlank() && !state.matchesExpectedPackage(step.expectedPackage)) {
+            return null
         }
 
-        val best = pool
-            .mapNotNull { element ->
-                val score = scoreElementForStep(element, queryTexts, step)
-                if (score <= 0) null else element to score
+        val query = step.selectorText.ifBlank { step.text }
+        return when {
+            step.selectorRole.equals("input", true) ||
+                step.selectorRole.equals("editor", true) ||
+                step.selectorRole.equals("search_field", true) -> {
+                state.findBestInputField(step.selectorHint.ifBlank { query })
             }
-            .maxByOrNull { it.second }
-            ?.first
 
-        return best?.bounds?.let { KaiGestureUtils.safeTapFromBounds(it, screenWidth(), screenHeight()) }
+            step.selectorRole.equals("send_button", true) -> state.findSendAction()
+            query.isNotBlank() -> state.findBestClickableTarget(query)
+            else -> state.likelyPrimaryActions.firstOrNull() ?: state.likelyNavigationTargets.firstOrNull()
+        }
     }
 
-    private fun findBestInputCandidate(
-        state: KaiScreenState,
-        step: KaiActionStep
-    ): Pair<Float, Float>? {
-        val pool = buildList {
-            addAll(state.likelyInputFields)
-            addAll(state.elements.filter { it.editable })
-        }.distinctBy {
-            "${it.text}|${it.contentDescription}|${it.hint}|${it.viewId}|${it.bounds}|${it.roleGuess}"
-        }
-
-        val queryTexts = listOf(
-            step.selectorHint.trim(),
-            step.selectorText.trim(),
-            step.text.trim()
-        ).filter { it.isNotBlank() }
-
-        val best = pool
-            .mapNotNull { element ->
-                val score = scoreElementForInput(element, queryTexts)
-                if (score <= 0) null else element to score
-            }
-            .maxByOrNull { it.second }
-            ?.first
-
-        return best?.bounds?.let { KaiGestureUtils.safeTapFromBounds(it, screenWidth(), screenHeight()) }
-    }
-
-    private fun findPrimaryActionCandidate(
-        state: KaiScreenState,
-        step: KaiActionStep
-    ): Pair<Float, Float>? {
-        val pool = buildList {
-            addAll(state.likelyPrimaryActions)
-            addAll(state.elements.filter { it.clickable })
-        }.distinctBy {
-            "${it.text}|${it.contentDescription}|${it.hint}|${it.viewId}|${it.bounds}|${it.roleGuess}"
-        }
-
-        val queryTexts = listOf(
-            step.selectorText.trim(),
-            step.text.trim(),
-            "send",
-            "ارسال",
-            "إرسال",
-            "save",
-            "done",
-            "تم"
-        ).filter { it.isNotBlank() }
-
-        val best = pool
-            .mapNotNull { element ->
-                val score = scoreElementForPrimaryAction(element, queryTexts)
-                if (score <= 0) null else element to score
-            }
-            .maxByOrNull { it.second }
-            ?.first
-
-        return best?.bounds?.let { KaiGestureUtils.safeTapFromBounds(it, screenWidth(), screenHeight()) }
-    }
-
-    private fun scoreElementForStep(
-        element: KaiUiElement,
-        queries: List<String>,
-        step: KaiActionStep
-    ): Int {
-        val joined = semanticJoined(element)
-        var score = 0
-
-        queries.forEach { query ->
-            val normQuery = KaiScreenStateParser.normalize(query)
-            if (normQuery.isBlank()) return@forEach
-            if (joined == normQuery) score += 90
-            if (joined.contains(normQuery)) score += 50
-            if (KaiScreenStateParser.isLooseTextMatch(joined, normQuery)) score += 24
-        }
-
-        val role = step.selectorRole.trim().lowercase(Locale.ROOT)
-        if (role.isNotBlank()) {
-            val r = element.roleGuess.trim().lowercase(Locale.ROOT)
-            if (r == role) score += 26
-            if (r.contains(role) || role.contains(r)) score += 12
-        }
-
-        if (element.clickable) score += 10
-        if (element.bounds.isNotBlank()) score += 6
-        return score
-    }
-
-    private fun scoreElementForInput(
-        element: KaiUiElement,
-        queries: List<String>
-    ): Int {
-        val joined = semanticJoined(element)
-        var score = 0
-        if (element.editable) score += 60
-        if (element.roleGuess.contains("input", true) || element.roleGuess.contains("composer", true)) score += 25
-
-        queries.forEach { query ->
-            val normQuery = KaiScreenStateParser.normalize(query)
-            if (normQuery.isBlank()) return@forEach
-            if (joined == normQuery) score += 50
-            if (joined.contains(normQuery)) score += 32
-            if (KaiScreenStateParser.isLooseTextMatch(joined, normQuery)) score += 18
-        }
-
-        if (element.bounds.isNotBlank()) score += 6
-        return score
-    }
-
-    private fun scoreElementForPrimaryAction(
-        element: KaiUiElement,
-        queries: List<String>
-    ): Int {
-        val joined = semanticJoined(element)
-        var score = 0
-        if (element.clickable) score += 18
-        if (element.roleGuess.contains("send", true) || element.roleGuess.contains("primary", true)) score += 32
-
-        queries.forEach { query ->
-            val normQuery = KaiScreenStateParser.normalize(query)
-            if (normQuery.isBlank()) return@forEach
-            if (joined == normQuery) score += 50
-            if (joined.contains(normQuery)) score += 30
-            if (KaiScreenStateParser.isLooseTextMatch(joined, normQuery)) score += 16
-        }
-
-        if (element.bounds.isNotBlank()) score += 6
-        return score
-    }
-
-    private fun semanticJoined(element: KaiUiElement): String {
-        return KaiScreenStateParser.normalize(
-            listOf(
-                element.text,
-                element.contentDescription,
-                element.hint,
-                element.viewId,
-                element.roleGuess
-            ).joinToString(" ")
+    private fun tapSemanticElement(element: KaiUiElement): Boolean {
+        val (cx, cy) = parseCenterFromBounds(element.bounds)
+        if (cx == null || cy == null) return false
+        sendKaiCmd(
+            cmd = KaiAccessibilityService.CMD_TAP_XY,
+            x = cx,
+            y = cy
         )
+        return true
+    }
+
+    private fun parseCenterFromBounds(bounds: String): Pair<Float?, Float?> {
+        val match = Regex("""\[(\d+),(\d+)]\[(\d+),(\d+)]""").find(bounds.trim()) ?: return null to null
+        val left = match.groupValues.getOrNull(1)?.toFloatOrNull() ?: return null to null
+        val top = match.groupValues.getOrNull(2)?.toFloatOrNull() ?: return null to null
+        val right = match.groupValues.getOrNull(3)?.toFloatOrNull() ?: return null to null
+        val bottom = match.groupValues.getOrNull(4)?.toFloatOrNull() ?: return null to null
+        return ((left + right) / 2f) to ((top + bottom) / 2f)
+    }
+
+    private suspend fun waitForExpectedText(
+        expectedTexts: List<String>,
+        timeoutMs: Long,
+        expectedPackage: String
+    ): KaiScreenState {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        var latest = resolveCanonicalRuntimeState()
+        while (System.currentTimeMillis() < deadline) {
+            latest = requestFreshScreen(timeoutMs = 1200L, expectedPackage = expectedPackage)
+            if (expectedTexts.all { latest.containsText(it) }) {
+                return latest
+            }
+            delay(120L)
+        }
+        return latest
     }
 
     private suspend fun sendKaiCmdSuppressed(
         cmd: String,
         text: String = "",
-        expectedPackage: String = "",
         dir: String = "",
         times: Int = 1,
         x: Float? = null,
         y: Float? = null,
         endX: Float? = null,
         endY: Float? = null,
-        holdMs: Long? = null,
-        timeoutMs: Long? = null,
-        preDelayMs: Long = 60L,
-        postDelayMs: Long = 0L,
-        strongObservationMode: Boolean = false
+        holdMs: Long = 450L,
+        timeoutMs: Long = 0L,
+        expectedPackage: String = "",
+        preDelayMs: Long = 0L,
+        postDelayMs: Long = 0L
     ) {
-        KaiBubbleManager.beginActionUiSuppression(strongObservationMode)
+        KaiBubbleManager.temporarilyHideForAction()
         try {
-            if (preDelayMs > 0L) delay(preDelayMs)
-            sendKaiCmd(
-                cmd = cmd,
-                text = text,
-                expectedPackage = expectedPackage,
-                dir = dir,
-                times = times,
-                x = x,
-                y = y,
-                endX = endX,
-                endY = endY,
-                holdMs = holdMs,
-                timeoutMs = timeoutMs
-            )
-            if (postDelayMs > 0L) delay(postDelayMs)
+            if (preDelayMs > 0) delay(preDelayMs)
+            sendKaiCmd(cmd, text, dir, times, x, y, endX, endY, holdMs, timeoutMs, expectedPackage)
+            if (postDelayMs > 0) delay(postDelayMs)
         } finally {
-            KaiBubbleManager.endActionUiSuppression(strongObservationMode)
+            KaiBubbleManager.releaseAllSuppression()
         }
     }
 
     private fun sendKaiCmd(
         cmd: String,
         text: String = "",
-        expectedPackage: String = "",
         dir: String = "",
         times: Int = 1,
         x: Float? = null,
         y: Float? = null,
         endX: Float? = null,
         endY: Float? = null,
-        holdMs: Long? = null,
-        timeoutMs: Long? = null
+        holdMs: Long = 450L,
+        timeoutMs: Long = 0L,
+        expectedPackage: String = ""
     ) {
         val intent = Intent(KaiAccessibilityService.ACTION_KAI_COMMAND).apply {
             setPackage(context.packageName)
             putExtra(KaiAccessibilityService.EXTRA_CMD, cmd)
-            putExtra(KaiAccessibilityService.EXTRA_TEXT, text)
-            if (expectedPackage.isNotBlank()) {
-                putExtra(KaiAccessibilityService.EXTRA_EXPECTED_PACKAGE, expectedPackage)
-            }
-            putExtra(KaiAccessibilityService.EXTRA_TIMES, times.coerceIn(1, 10))
+            if (text.isNotBlank()) putExtra(KaiAccessibilityService.EXTRA_TEXT, text)
             if (dir.isNotBlank()) putExtra(KaiAccessibilityService.EXTRA_DIR, dir)
+            if (times > 1) putExtra(KaiAccessibilityService.EXTRA_TIMES, times)
             if (x != null) putExtra(KaiAccessibilityService.EXTRA_X, x)
             if (y != null) putExtra(KaiAccessibilityService.EXTRA_Y, y)
             if (endX != null) putExtra(KaiAccessibilityService.EXTRA_END_X, endX)
             if (endY != null) putExtra(KaiAccessibilityService.EXTRA_END_Y, endY)
-            if (holdMs != null) putExtra(KaiAccessibilityService.EXTRA_HOLD_MS, holdMs)
-            if (timeoutMs != null) putExtra(KaiAccessibilityService.EXTRA_TIMEOUT_MS, timeoutMs)
+            if (holdMs > 0L) putExtra(KaiAccessibilityService.EXTRA_HOLD_MS, holdMs)
+            if (timeoutMs > 0L) putExtra(KaiAccessibilityService.EXTRA_TIMEOUT_MS, timeoutMs)
+            if (expectedPackage.isNotBlank()) {
+                putExtra(KaiAccessibilityService.EXTRA_EXPECTED_PACKAGE, expectedPackage)
+            }
         }
         context.sendBroadcast(intent)
     }
