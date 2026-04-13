@@ -250,33 +250,6 @@ class KaiActionExecutor(
         currentState: KaiScreenState
     ): KaiActionExecutionResult {
         val cmd = step.cmd.trim().lowercase(Locale.ROOT)
-        val expectedPackage = step.expectedPackage.ifBlank { currentState.packageName }
-
-        val gateCommands = setOf(
-            "click_best_match",
-            "focus_best_input",
-            "input_into_best_field",
-            "press_primary_action",
-            "open_best_list_item",
-            "verify_state"
-        )
-
-        if (cmd in gateCommands) {
-            val gateResult = ensureStrongObservationGate(
-                expectedPackage = expectedPackage,
-                timeoutMs = 2200L,
-                maxAttempts = 2,
-                allowLauncherSurface = false,
-                tier = ObservationGateTier.SEMANTIC_ACTION_SAFE
-            )
-            if (!gateResult.passed) {
-                return KaiActionExecutionResult(
-                    success = false,
-                    message = gateResult.reason,
-                    screenState = gateResult.state
-                )
-            }
-        }
 
         return when (cmd) {
             "open_app" -> executeOpenApp(step, currentState)

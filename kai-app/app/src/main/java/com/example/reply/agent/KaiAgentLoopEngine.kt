@@ -250,6 +250,9 @@ class KaiAgentLoopEngine(
                     onLog("kai", plan.summary.ifBlank { "Executing next step." })
                 }
 
+                var replanRequested = false
+                var cycleHadProgress = false
+
                 for (step in plan.steps) {
                     ensureActiveOrThrow()
                     totalSteps += 1
@@ -300,6 +303,7 @@ class KaiAgentLoopEngine(
 
                     if (decision.progressLevel != KaiExecutionDecisionAuthority.ProgressLevel.NONE) {
                         repeatedNoProgressSteps = 0
+                        cycleHadProgress = true
                     } else {
                         repeatedNoProgressSteps += 1
                     }
@@ -350,11 +354,15 @@ class KaiAgentLoopEngine(
                             }
                         }
 
-                        KaiExecutionDecisionAuthority.RuntimeDirective.REPLAN,
+                        KaiExecutionDecisionAuthority.RuntimeDirective.REPLAN -> {
+                            replanRequested = true
+                        }
+
                         KaiExecutionDecisionAuthority.RuntimeDirective.CONTINUE -> {
-                            // Let the loop continue naturally.
+                            // Continue to next step.
                         }
                     }
+                    if (replanRequested) break
                 }
 
                 val cycleDecision = KaiExecutionDecisionAuthority.evaluateCycleOutcome(
@@ -411,7 +419,7 @@ class KaiAgentLoopEngine(
                     else -> Unit
                 }
 
-                noProgressCycles += 1
+                if (!cycleHadProgress) noProgressCycles += 1
             }
 
             val finalMessage = "Runtime authority stop: loop_limit_reached. Refine the prompt and try again."

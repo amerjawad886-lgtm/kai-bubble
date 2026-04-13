@@ -92,7 +92,14 @@ object KaiExecutionDecisionAuthority {
         if (!stepSucceeded) return false
 
         return when (step.cmd.trim().lowercase()) {
-            "open_app" -> !after.isLauncher() && after.packageName.isNotBlank()
+            "open_app" -> {
+                val targetPkg = step.expectedPackage
+                when {
+                    targetPkg.isNotBlank() -> after.matchesExpectedPackage(targetPkg) && !after.isLauncher()
+                    else -> !after.isLauncher() && after.packageName.isNotBlank() &&
+                        before.packageName != after.packageName
+                }
+            }
             "verify_state" -> expectedEvidenceSatisfied(step, after)
             "input_text", "input_into_best_field" -> {
                 val payload = step.text.ifBlank { step.selectorText }.trim()
@@ -172,28 +179,36 @@ object KaiExecutionDecisionAuthority {
     ): RuntimeDecision {
         val progress = hasMeaningfulProgress(before, after) && !telemetry.observationReusedLastGood
         val evidence = expectedEvidenceSatisfied(step, after)
-        val committed = isGoalCommitted(step, before, after, result.success)
-        val goalSatisfied = likelyGoalSatisfied(userPrompt, after)
 
-        if (committed && goalSatisfied) {
-            return RuntimeDecision(
-                directive = RuntimeDirective.STOP_SUCCESS,
-                progressLevel = ProgressLevel.GOAL_COMMITTED,
-                goalCommitted = true,
-                reason = "goal_satisfied_after_step"
-            )
-        }
-
-        if (step.cmd.equals("open_app", true) &&
-            result.success &&
-            after.packageName.isNotBlank() &&
-            !after.isLauncher()
-        ) {
+        // open_app: require target package confirmation, stop after repeated failures
+        if (step.cmd.equals("open_app", true)) {
+            val targetPkg = step.expectedPackage
+            val inTarget = when {
+                targetPkg.isNotBlank() -> after.matchesExpectedPackage(targetPkg) && !after.isLauncher()
+                else -> after.packageName.isNotBlank() && !after.isLauncher() &&
+                    before.packageName != after.packageName
+            }
+            if (result.success && inTarget) {
+                return RuntimeDecision(
+                    directive = RuntimeDirective.CONTINUE,
+                    progressLevel = ProgressLevel.TARGET_READY,
+                    goalCommitted = false,
+                    reason = "open_app_target_confirmed"
+                )
+            }
+            if (repeatedNoProgressSteps >= 3) {
+                return RuntimeDecision(
+                    directive = RuntimeDirective.STOP_FAILURE,
+                    progressLevel = ProgressLevel.NONE,
+                    goalCommitted = false,
+                    reason = "open_app_repeated_failure"
+                )
+            }
             return RuntimeDecision(
                 directive = RuntimeDirective.CONTINUE,
-                progressLevel = ProgressLevel.TARGET_READY,
+                progressLevel = if (progress) ProgressLevel.INTERMEDIATE else ProgressLevel.NONE,
                 goalCommitted = false,
-                reason = "target_app_entry_ready"
+                reason = if (result.success) "open_app_no_target_match" else "open_app_not_confirmed"
             )
         }
 
