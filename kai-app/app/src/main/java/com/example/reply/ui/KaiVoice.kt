@@ -53,8 +53,12 @@ object KaiVoice {
     @Volatile private var lastStopAt: Long = 0L
 
     fun speakingNow(): Boolean = isSpeaking || isStopping
-    fun speechFullyCompleted(): Boolean = !isSpeaking && !isStopping && player == null && activeCall == null
-    fun recentlyStopped(withinMs: Long = 320L): Boolean = System.currentTimeMillis() - lastStopAt <= withinMs
+
+    fun speechFullyCompleted(): Boolean =
+        !isSpeaking && !isStopping && player == null && activeCall == null
+
+    fun recentlyStopped(withinMs: Long = 320L): Boolean =
+        System.currentTimeMillis() - lastStopAt <= withinMs
 
     private fun sanitizeForSpeech(text: String): String =
         text.replace(Regex("""[`*_#>\[\]\(\)"]"""), " ")
@@ -67,7 +71,10 @@ object KaiVoice {
             .replace("\r", " ")
             .replace("\t", " ")
             .replace(Regex("""https?://\S+"""), " ")
-            .replace(Regex("""\b[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[A-Za-z]{2,}\b"""), " ")
+            .replace(
+                Regex("""\b[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[A-Za-z]{2,}\b"""),
+                " "
+            )
             .replace(Regex("""\s+"""), " ")
             .trim()
 
@@ -85,7 +92,9 @@ object KaiVoice {
         for (s in badStarts) {
             if (lowered.startsWith(s)) {
                 val cutIndex = cleaned.indexOfFirst { it == '.' || it == '!' || it == '?' }
-                return cleaned.substring((cutIndex.takeIf { it >= 0 }?.plus(1)) ?: cleaned.length).trim().ifBlank { cleaned }
+                return cleaned.substring(
+                    (cutIndex.takeIf { it >= 0 }?.plus(1)) ?: cleaned.length
+                ).trim().ifBlank { cleaned }
             }
         }
         return cleaned
@@ -146,6 +155,7 @@ object KaiVoice {
     ) {
         val key = BuildConfig.OPENAI_API_KEY.trim()
         val spokenText = prepareSpeechText(text, tone)
+
         if (key.isBlank()) {
             onError?.invoke("missing api key")
             onDone?.invoke()
@@ -179,8 +189,13 @@ object KaiVoice {
             activeCall = call
 
             var sessionFinalized = false
+
             fun stillCurrent(): Boolean = seq.get() == mySeq
-            fun finalizeSession(error: String? = null, invokeDone: Boolean = true) {
+
+            fun finalizeSession(
+                error: String? = null,
+                invokeDone: Boolean = true
+            ) {
                 if (!stillCurrent() || sessionFinalized) return
                 sessionFinalized = true
                 clearPlaybackState(releasePlayer = true)
@@ -216,7 +231,9 @@ object KaiVoice {
                         try {
                             FileOutputStream(file).use { it.write(bytes) }
                         } catch (e: Exception) {
-                            main.post { finalizeSession("file write error: ${e.message ?: "unknown"}") }
+                            main.post {
+                                finalizeSession("file write error: ${e.message ?: "unknown"}")
+                            }
                             return
                         }
 
@@ -232,6 +249,7 @@ object KaiVoice {
 
                             val newPlayer = MediaPlayer()
                             player = newPlayer
+
                             try {
                                 newPlayer.setAudioAttributes(
                                     AudioAttributes.Builder()
@@ -240,6 +258,7 @@ object KaiVoice {
                                         .build()
                                 )
                                 newPlayer.setDataSource(file.absolutePath)
+
                                 newPlayer.setOnPreparedListener { mp ->
                                     if (!stillCurrent() || player !== mp) {
                                         try { mp.release() } catch (_: Exception) {}
@@ -256,6 +275,7 @@ object KaiVoice {
                                         finalizeSession(e.message ?: "start playback error")
                                     }
                                 }
+
                                 newPlayer.setOnCompletionListener { mp ->
                                     if (!stillCurrent() || player !== mp) {
                                         try { mp.release() } catch (_: Exception) {}
@@ -267,6 +287,7 @@ object KaiVoice {
                                     isStopping = false
                                     finalizeSession(invokeDone = true)
                                 }
+
                                 newPlayer.setOnErrorListener { mp, _, _ ->
                                     if (!stillCurrent() || player !== mp) {
                                         try { mp.release() } catch (_: Exception) {}
@@ -277,6 +298,7 @@ object KaiVoice {
                                     finalizeSession("MediaPlayer error")
                                     true
                                 }
+
                                 newPlayer.prepareAsync()
                             } catch (e: Exception) {
                                 if (player === newPlayer) player = null
@@ -296,7 +318,7 @@ object KaiVoice {
         }
     }
 
-    fun stop() {    fun stop() {
+    fun stop() {
         seq.incrementAndGet()
         lastStopAt = System.currentTimeMillis()
         isStopping = true

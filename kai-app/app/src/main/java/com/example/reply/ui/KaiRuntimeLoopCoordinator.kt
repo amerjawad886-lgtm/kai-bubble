@@ -15,20 +15,26 @@ enum class KaiRuntimePhase {
 }
 
 object KaiRuntimeLoopCoordinator {
-    private const val EXECUTION_ACK = "Make Action accepted as full execution permission on your responsibility."
+    private const val EXECUTION_ACK =
+        "Make Action accepted as full execution permission on your responsibility."
     private const val LOOP_START = "Agent loop starting…"
 
-    @Volatile private var lastStartTs = 0L
+    @Volatile
+    private var lastStartTs = 0L
 
     private fun resetTransientStateForNewRun(context: Context) {
         // Preflight should clean transient UI/voice/model state only.
         // Observation runtime ownership stays with KaiObservationRuntime / engine startup.
         val appContext = context.applicationContext
+
         KaiVoice.resetTransientStateForNewRun()
         OpenAIClient.resetTransientStateForNewRun()
         KaiAgentController.resetTransientStateForNewRun()
+
         KaiObservationRuntime.ensureBridge(appContext)
         KaiBubbleManager.releaseAllSuppression()
+
+        // Softer reset: only touch bubble layout state if the overlay is actually showing.
         if (KaiBubbleManager.isShowing()) {
             KaiBubbleManager.softResetUiState()
         }
@@ -87,10 +93,6 @@ object KaiRuntimeLoopCoordinator {
 
     fun cancelLoop(engine: KaiAgentLoopEngine?) {
         // KaiAgentLoopEngine is the single owner of action-loop lifecycle cleanup.
-        // engine.cancel() handles BubbleManager suppression release, UI state reset, and
-        // finishActionLoopSession.  Do not duplicate those calls here — doing so causes
-        // finishActionLoopSession to fire twice, which races with voice/talk callbacks that
-        // read snapshot.actionLoopActive between the two calls.
         try {
             engine?.cancel()
         } catch (_: Exception) {
