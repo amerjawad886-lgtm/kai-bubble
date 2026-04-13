@@ -137,6 +137,43 @@ class KaiActionExecutor(
 
     fun getLastRefreshMeta(): ScreenRefreshMeta = lastRefreshMeta
 
+    fun getConsecutiveWeakReads(): Int = gate.consecutiveWeakReads
+
+    fun getConsecutiveStaleReads(): Int = gate.consecutiveStaleReads
+
+    fun bestRuntimeObservation(): KaiObservation = KaiObservationRuntime.getBestAvailable()
+
+    internal fun expectedStateSatisfied(step: KaiActionStep, state: KaiScreenState): Boolean {
+        val expectedPkg = KaiScreenStateParser.normalize(step.expectedPackage)
+        if (expectedPkg.isNotBlank() && !state.matchesExpectedPackage(expectedPkg)) {
+            return false
+        }
+
+        val expectedKind = KaiScreenStateParser.normalize(step.expectedScreenKind)
+        if (expectedKind.isNotBlank()) {
+            val kindSatisfied = when (expectedKind) {
+                "instagram_dm_list" -> KaiSurfaceModel.isVerifiedInstagramDmListSurface(state)
+                "instagram_dm_thread", "chat_thread" -> KaiSurfaceModel.isVerifiedInstagramThreadTextSurface(state) || state.isChatThreadScreen()
+                "instagram_camera_overlay" -> KaiSurfaceModel.isVerifiedInstagramCameraOverlay(state)
+                "youtube_working_surface" -> KaiSurfaceModel.isVerifiedYouTubeWorkingSurface(state)
+                "notes_list" -> KaiSurfaceModel.isVerifiedNotesListSurface(state)
+                "notes_editor", "notes_title_input", "notes_body_input" -> KaiSurfaceModel.isVerifiedNotesEditorSurface(state)
+                "chat_list" -> state.isChatListScreen() && !state.isSearchLikeSurface() && !state.isCameraOrMediaOverlaySurface()
+                "search" -> state.isSearchLikeSurface()
+                "detail" -> state.isDetailSurface() || state.isPlayerSurface()
+                else -> KaiScreenStateParser.normalize(state.screenKind) == expectedKind
+            }
+            if (!kindSatisfied) return false
+        }
+
+        if (step.expectedTexts.isNotEmpty()) {
+            val allHit = step.expectedTexts.all { state.containsText(it) }
+            if (!allHit) return false
+        }
+
+        return true
+    }
+
     suspend fun resetObservationTransitionStateForRun() {
         sendKaiCmdSuppressed(
             cmd = KaiAccessibilityService.CMD_RESET_TRANSITION_STATE,
@@ -157,7 +194,9 @@ class KaiActionExecutor(
         timeoutMs: Long = 2600L,
         maxAttempts: Int = 2,
         allowLauncherSurface: Boolean = false,
-        tier: ObservationGateTier = ObservationGateTier.SEMANTIC_ACTION_SAFE
+        tier: ObservationGateTier = ObservationGateTier.SEMANTIC_ACTION_SAFE,
+        staleRetryAttempts: Int = 2,
+        missingPackageRetryAttempts: Int = 2
     ): ObservationGateResult {
         val result = gate.ensureStrongGate(
             expectedPackage = expectedPackage,
@@ -168,7 +207,9 @@ class KaiActionExecutor(
                 KaiObservationGate.GateTier.APP_LAUNCH_SAFE
             } else {
                 KaiObservationGate.GateTier.SEMANTIC_ACTION_SAFE
-            }
+            },
+            staleRetryAttempts = staleRetryAttempts,
+            missingPackageRetryAttempts = missingPackageRetryAttempts
         )
         return ObservationGateResult(result.passed, result.state, result.reason)
     }
@@ -510,7 +551,7 @@ class KaiActionExecutor(
     ): KaiActionExecutionResult {
         val focused = executeFocusBestInput(step, currentState)
         if (!focused.success) return focused
-        return executeInputText(step, focused.screenState)
+        return executeInputText(step, focused.screenState ?: currentState)
     }
 
     private suspend fun executeInputText(
@@ -734,6 +775,10 @@ class KaiActionExecutor(
         )
     }
 
+    private fun screenWidth(): Int = KaiBubbleManager.getScreenWidth(context)
+
+    private fun screenHeight(): Int = KaiBubbleManager.getScreenHeight(context)
+
     private fun findTapCandidate(
         state: KaiScreenState,
         fallbackText: String,
@@ -763,7 +808,7 @@ class KaiActionExecutor(
             .maxByOrNull { it.second }
             ?.first
 
-        return best?.bounds?.let { KaiGestureUtils.safeTapFromBounds(it) }
+        return best?.bounds?.let { KaiGestureUtils.safeTapFromBounds(it, screenWidth(), screenHeight()) }
     }
 
     private fun findBestInputCandidate(
@@ -791,7 +836,7 @@ class KaiActionExecutor(
             .maxByOrNull { it.second }
             ?.first
 
-        return best?.bounds?.let { KaiGestureUtils.safeTapFromBounds(it) }
+        return best?.bounds?.let { KaiGestureUtils.safeTapFromBounds(it, screenWidth(), screenHeight()) }
     }
 
     private fun findPrimaryActionCandidate(
@@ -824,7 +869,7 @@ class KaiActionExecutor(
             .maxByOrNull { it.second }
             ?.first
 
-        return best?.bounds?.let { KaiGestureUtils.safeTapFromBounds(it) }
+        return best?.bounds?.let { KaiGestureUtils.safeTapFromBounds(it, screenWidth(), screenHeight()) }
     }
 
     private fun scoreElementForStep(

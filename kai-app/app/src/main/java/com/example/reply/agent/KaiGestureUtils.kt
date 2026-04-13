@@ -77,6 +77,14 @@ object KaiGestureUtils {
         return x to y
     }
 
+    fun safeTapFromBounds(
+        bounds: String,
+        preferUpperHalf: Boolean = false
+    ): Pair<Float, Float>? {
+        val rect = parseBoundsRect(bounds) ?: return null
+        return rect.centerX to (if (preferUpperHalf) rect.top + rect.height * 0.38f else rect.centerY)
+    }
+
     fun normalizedDistance(
         x1: Float,
         y1: Float,

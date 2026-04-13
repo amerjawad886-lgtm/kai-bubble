@@ -112,6 +112,10 @@ class KaiObservationGate(
         return canonical ?: KaiAgentController.getLatestScreenState()
     }
 
+    fun weakReadCount(): Int = consecutiveWeakReads
+
+    fun staleReadCount(): Int = consecutiveStaleReads
+
     // ── Fingerprinting ──────────────────────────────────────────────────
 
     fun fingerprintFor(packageName: String, rawDump: String): String {

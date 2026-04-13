@@ -49,6 +49,16 @@ object KaiObservationRuntime {
     private var watchJob: Job? = null
     private val watchScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
+    fun currentExpectedPackage(): String = lastWatchExpectedPackage
+
+    fun hasUsableAuthoritative(expectedPackage: String = ""): Boolean {
+        return hasRecentAuthoritative(
+            maxAgeMs = 1800L,
+            expectedPackage = expectedPackage,
+            requireSemantic = expectedPackage.isNotBlank()
+        )
+    }
+
     fun reset() {
         val blank = KaiObservation("", "", updatedAt = 0L)
         live = blank
