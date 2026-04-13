@@ -2,7 +2,6 @@ package com.example.reply.agent
 
 import android.content.Context
 import android.content.Intent
-import android.content.pm.PackageManager
 import com.example.reply.ui.KaiAccessibilityService
 import com.example.reply.ui.KaiBubbleManager
 import com.example.reply.ui.KaiCommandParser
@@ -13,11 +12,8 @@ class KaiActionExecutor(
     internal val context: Context,
     internal val onLog: (String) -> Unit = {}
 ) {
-    // ── Observation gate (owns all observation state) ────────────────
     internal val gate = KaiObservationGate(context, onLog)
 
-    // ── Backward-compatible type aliases ─────────────────────────────
-    // KaiAgentLoopEngine references these via KaiActionExecutor.XYZ
     data class ScreenRefreshMeta(
         val fingerprint: String,
         val changedFromPrevious: Boolean,
@@ -46,51 +42,58 @@ class KaiActionExecutor(
         SEMANTIC_ACTION_SAFE
     }
 
-    private data class LauncherAppCandidate(
-        val label: String,
-        val normalizedLabel: String,
-        val packageHint: String,
-        val x: Float?,
-        val y: Float?,
-        val clickable: Boolean,
-        val source: String,
-        val confidence: Int,
-        val signature: String
-    )
-
-    // ── Delegated observation state (read-through to gate) ──────────
     internal var canonicalRuntimeState: KaiScreenState?
         get() = gate.canonical
-        set(value) { gate.canonical = value }
+        set(value) {
+            gate.canonical = value
+        }
+
     internal var lastGoodScreenState: KaiScreenState?
         get() = gate.canonical
-        set(value) { gate.canonical = value }
+        set(value) {
+            gate.canonical = value
+        }
+
     internal var lastAcceptedFingerprint: String
         get() = gate.lastAcceptedFingerprint
-        set(value) { gate.lastAcceptedFingerprint = value }
+        set(value) {
+            gate.lastAcceptedFingerprint = value
+        }
+
     internal var lastAcceptedObservationAt: Long
         get() = gate.lastAcceptedObservationAt
-        set(value) { gate.lastAcceptedObservationAt = value }
+        set(value) {
+            gate.lastAcceptedObservationAt = value
+        }
+
     internal var consecutiveWeakReads: Int
         get() = gate.consecutiveWeakReads
-        set(_) { /* managed by gate */ }
+        set(_) {}
+
     internal var consecutiveStaleReads: Int
         get() = gate.consecutiveStaleReads
-        set(_) { /* managed by gate */ }
+        set(_) {}
+
     internal var consecutiveNoProgressActions: Int
         get() = gate.consecutiveNoProgressActions
-        set(_) { /* managed by gate */ }
-
-    // ── Recovery state (stays in executor) ───────────────────────────
-    internal var lastRecoveryContextKey: String = ""
-    internal var repeatedRecoveryContextCount: Int = 0
+        set(_) {}
 
     internal var lastRefreshMeta: ScreenRefreshMeta
         get() = gate.lastMeta.let {
-            ScreenRefreshMeta(it.fingerprint, it.changedFromPrevious, it.usable,
-                it.fallback, it.weak, it.stale, it.reusedLastGood)
+            ScreenRefreshMeta(
+                fingerprint = it.fingerprint,
+                changedFromPrevious = it.changedFromPrevious,
+                usable = it.usable,
+                fallback = it.fallback,
+                weak = it.weak,
+                stale = it.stale,
+                reusedLastGood = it.reusedLastGood
+            )
         }
-        set(_) { /* managed by gate */ }
+        set(_) {}
+
+    private var lastRecoveryContextKey: String = ""
+    private var repeatedRecoveryContextCount: Int = 0
 
     fun resetRuntimeState(clearLastGoodScreen: Boolean = true) {
         if (clearLastGoodScreen) {
@@ -130,125 +133,70 @@ class KaiActionExecutor(
 
     fun getCanonicalRuntimeState(): KaiScreenState? = gate.canonical
 
-    internal fun resolveCanonicalRuntimeState(): KaiScreenState {
-        return gate.resolve()
+    internal fun resolveCanonicalRuntimeState(): KaiScreenState = gate.resolve()
+
+    fun getLastRefreshMeta(): ScreenRefreshMeta = lastRefreshMeta
+
+    suspend fun resetObservationTransitionStateForRun() {
+        sendKaiCmdSuppressed(
+            cmd = KaiAccessibilityService.CMD_RESET_TRANSITION_STATE,
+            preDelayMs = 20L,
+            postDelayMs = 20L
+        )
     }
 
-    private fun canonicalBeforePackage(): String {
-        return gate.canonical?.packageName.orEmpty()
+    suspend fun requestFreshScreen(
+        timeoutMs: Long = 2200L,
+        expectedPackage: String = ""
+    ): KaiScreenState {
+        return gate.requestFreshScreen(timeoutMs = timeoutMs, expectedPackage = expectedPackage)
     }
 
-    private fun canonicalBeforeFingerprint(): String {
-        return gate.canonical?.let { fingerprintFor(it.packageName, it.rawDump) }
-            ?: gate.lastAcceptedFingerprint
+    suspend fun ensureStrongObservationGate(
+        expectedPackage: String = "",
+        timeoutMs: Long = 2600L,
+        maxAttempts: Int = 2,
+        allowLauncherSurface: Boolean = false,
+        tier: ObservationGateTier = ObservationGateTier.SEMANTIC_ACTION_SAFE
+    ): ObservationGateResult {
+        val result = gate.ensureStrongGate(
+            expectedPackage = expectedPackage,
+            timeoutMs = timeoutMs,
+            maxAttempts = maxAttempts,
+            allowLauncherSurface = allowLauncherSurface,
+            tier = if (tier == ObservationGateTier.APP_LAUNCH_SAFE) {
+                KaiObservationGate.GateTier.APP_LAUNCH_SAFE
+            } else {
+                KaiObservationGate.GateTier.SEMANTIC_ACTION_SAFE
+            }
+        )
+        return ObservationGateResult(result.passed, result.state, result.reason)
     }
 
-    private fun recoveryContextKey(step: KaiActionStep, state: KaiScreenState): String {
-        return KaiRecoveryPolicy.recoveryContextSemanticKey(step, state)
+    suspend fun ensureAuthoritativeObservationReady(
+        timeoutMs: Long = 3200L,
+        allowLauncherSurface: Boolean = false,
+        tier: ObservationGateTier = ObservationGateTier.SEMANTIC_ACTION_SAFE,
+        maxAttempts: Int = 3
+    ): ObservationReadinessResult {
+        val result = gate.ensureAuthoritative(
+            timeoutMs = timeoutMs,
+            allowLauncherSurface = allowLauncherSurface,
+            tier = if (tier == ObservationGateTier.APP_LAUNCH_SAFE) {
+                KaiObservationGate.GateTier.APP_LAUNCH_SAFE
+            } else {
+                KaiObservationGate.GateTier.SEMANTIC_ACTION_SAFE
+            },
+            maxAttempts = maxAttempts
+        )
+        return ObservationReadinessResult(result.passed, result.state, result.reason, result.attempts)
     }
 
-    private suspend fun applyRecoveryDecision(
-        state: KaiScreenState,
+    suspend fun attemptRecoveryForStep(
         step: KaiActionStep,
-        decision: KaiRecoveryPolicy.RecoveryDecision
+        state: KaiScreenState
     ): KaiActionExecutionResult {
-        return when (decision.recommendedAction) {
-            KaiRecoveryAction.BACK, KaiRecoveryAction.DISMISS_SHEET -> {
-                sendKaiCmdSuppressed(cmd = KaiAccessibilityService.CMD_BACK, preDelayMs = 70L)
-                KaiActionExecutionResult(
-                    success = true,
-                    message = "recovery_back:${decision.reason}",
-                    screenState = requestFreshScreen(2600L)
-                )
-            }
-
-            KaiRecoveryAction.RETURN_TO_LIST -> {
-                val fallback = if (state.packageName.contains("whatsapp", true)) "chats" else "messages"
-                val issued = clickSemanticTarget(
-                    step = KaiActionStep(
-                        cmd = "click_best_match",
-                        selectorRole = "tab",
-                        selectorText = fallback,
-                        text = fallback
-                    ),
-                    state = state,
-                    fallbackText = fallback
-                )
-                KaiActionExecutionResult(
-                    success = issued,
-                    message = "recovery_return_to_list:${decision.reason}",
-                    screenState = requestFreshScreen(2400L)
-                )
-            }
-
-            KaiRecoveryAction.RETURN_HOME_TAB -> {
-                val issued = clickSemanticTarget(
-                    step = KaiActionStep(
-                        cmd = "click_best_match",
-                        selectorRole = "tab",
-                        selectorText = "home",
-                        text = "home"
-                    ),
-                    state = state,
-                    fallbackText = "home"
-                )
-                val refreshed = requestFreshScreen(2600L)
-                KaiActionExecutionResult(
-                    success = issued,
-                    message = "recovery_home_tab:${decision.reason}",
-                    screenState = refreshed
-                )
-            }
-
-            KaiRecoveryAction.OPEN_SEARCH -> {
-                val issued = clickSemanticTarget(
-                    step = KaiActionStep(
-                        cmd = "click_best_match",
-                        selectorRole = "search_field",
-                        selectorText = step.selectorText.ifBlank { "search" },
-                        text = step.text.ifBlank { "search" }
-                    ),
-                    state = state,
-                    fallbackText = "search"
-                )
-                KaiActionExecutionResult(
-                    success = issued,
-                    message = "recovery_open_search:${decision.reason}",
-                    screenState = requestFreshScreen(2600L)
-                )
-            }
-
-            KaiRecoveryAction.NORMALIZE_APP_SURFACE -> recoverWrongSurfaceForStep(state, step)
-
-            KaiRecoveryAction.REQUEST_FRESH_SCREEN, KaiRecoveryAction.NONE -> {
-                KaiActionExecutionResult(
-                    success = false,
-                    message = "replan_required:no_clear_recovery:${decision.reason}",
-                    screenState = state
-                )
-            }
-
-            KaiRecoveryAction.BREAK_FOR_REPLAN -> {
-                KaiActionExecutionResult(
-                    success = false,
-                    message = "replan_required:${decision.reason}",
-                    screenState = state
-                )
-            }
-        }
-    }
-
-    suspend fun attemptRecoveryForStep(step: KaiActionStep, state: KaiScreenState): KaiActionExecutionResult {
-        val decision = KaiRecoveryPolicy.shouldRecoverForStep(state, step)
-        if (!decision.needsRecovery) {
-            return KaiActionExecutionResult(
-                success = false,
-                message = "replan_required:no_recovery_needed",
-                screenState = state
-            )
-        }
-
-        val key = recoveryContextKey(step, state)
+        val key = "${step.cmd}|${step.selectorRole}|${step.selectorText}|${state.packageName}|${state.surfaceFamily()}"
         repeatedRecoveryContextCount = if (key == lastRecoveryContextKey) {
             repeatedRecoveryContextCount + 1
         } else {
@@ -264,7 +212,739 @@ class KaiActionExecutor(
             )
         }
 
-        return applyRecoveryDecision(state, step, decision)
+        val backRecovery = when {
+            state.isOverlayPolluted() -> true
+            state.isCameraOrMediaOverlaySurface() -> true
+            state.isSheetOrDialogSurface() -> true
+            else -> false
+        }
+
+        return if (backRecovery) {
+            sendKaiCmdSuppressed(
+                cmd = KaiAccessibilityService.CMD_BACK,
+                preDelayMs = 70L,
+                postDelayMs = 100L
+            )
+            KaiActionExecutionResult(
+                success = true,
+                message = "recovery_back_once",
+                screenState = requestFreshScreen(
+                    timeoutMs = 2400L,
+                    expectedPackage = step.expectedPackage.ifBlank { state.packageName }
+                )
+            )
+        } else {
+            KaiActionExecutionResult(
+                success = false,
+                message = "replan_required:no_recovery_needed",
+                screenState = state
+            )
+        }
+    }
+
+    suspend fun executeStep(step: KaiActionStep): KaiActionExecutionResult {
+        val current = resolveCanonicalRuntimeState()
+        return executeStep(step, current)
+    }
+
+    suspend fun executeStep(
+        step: KaiActionStep,
+        currentState: KaiScreenState
+    ): KaiActionExecutionResult {
+        val cmd = step.cmd.trim().lowercase(Locale.ROOT)
+        val expectedPackage = step.expectedPackage.ifBlank { currentState.packageName }
+
+        val policyGateCommands = setOf(
+            "click_best_match",
+            "focus_best_input",
+            "input_into_best_field",
+            "press_primary_action",
+            "open_best_list_item",
+            "verify_state"
+        )
+
+        if (cmd in policyGateCommands) {
+            val gateResult = ensureStrongObservationGate(
+                expectedPackage = expectedPackage,
+                timeoutMs = 2200L,
+                maxAttempts = 2,
+                allowLauncherSurface = false,
+                tier = ObservationGateTier.SEMANTIC_ACTION_SAFE
+            )
+            if (!gateResult.passed) {
+                return KaiActionExecutionResult(
+                    success = false,
+                    message = gateResult.reason,
+                    screenState = gateResult.state
+                )
+            }
+        }
+
+        return when (cmd) {
+            "open_app" -> executeOpenApp(step, currentState)
+            "click_text" -> executeClickText(step, currentState)
+            "long_press_text" -> executeLongPressText(step, currentState)
+            "click_best_match", "open_best_list_item" -> executeClickBestMatch(step, currentState)
+            "focus_best_input" -> executeFocusBestInput(step, currentState)
+            "input_into_best_field" -> executeInputIntoBestField(step, currentState)
+            "input_text", "type_text" -> executeInputText(step, currentState)
+            "press_primary_action" -> executePressPrimaryAction(step, currentState)
+            "scroll" -> executeScroll(step, currentState)
+            "back" -> executeSystemNav(KaiAccessibilityService.CMD_BACK, step, currentState)
+            "home" -> executeSystemNav(KaiAccessibilityService.CMD_HOME, step, currentState)
+            "recents" -> executeSystemNav(KaiAccessibilityService.CMD_RECENTS, step, currentState)
+            "read_screen", "verify_state", "wait_for_text" -> executeVerify(step, currentState)
+            "tap_xy" -> executeTap(step, currentState)
+            "long_press_xy" -> executeLongPress(step, currentState)
+            "swipe_xy" -> executeSwipe(step, currentState)
+            "wait" -> executeWait(step, currentState)
+            else -> KaiActionExecutionResult(
+                success = false,
+                message = "unsupported_command:$cmd",
+                screenState = currentState
+            )
+        }
+    }
+
+    private suspend fun executeOpenApp(
+        step: KaiActionStep,
+        currentState: KaiScreenState
+    ): KaiActionExecutionResult {
+        val target = step.text.ifBlank { step.selectorText }.trim()
+        val resolved = KaiCommandParser.resolveAppAlias(target).ifBlank { target }
+        val inferredKey = KaiScreenStateParser.inferAppHint(target)
+        val expectedPackage = step.expectedPackage.ifBlank {
+            KaiAppIdentityRegistry.packageCandidatesForKey(inferredKey).firstOrNull().orEmpty()
+        }
+
+        sendKaiCmdSuppressed(
+            cmd = KaiAccessibilityService.CMD_OPEN_APP,
+            text = resolved,
+            expectedPackage = expectedPackage,
+            preDelayMs = 80L
+        )
+
+        var after = requestFreshScreen(
+            timeoutMs = step.timeoutMs.coerceIn(1200L, 3200L),
+            expectedPackage = expectedPackage
+        )
+
+        if (after.packageName.isBlank() && expectedPackage.isNotBlank()) {
+            after = requestFreshScreen(1600L, expectedPackage)
+        }
+
+        val arrived = after.packageName.isNotBlank() && (
+            expectedPackage.isBlank() ||
+                KaiAppIdentityRegistry.packageMatchesFamily(expectedPackage, after.packageName) ||
+                after.matchesExpectedPackage(expectedPackage)
+            )
+
+        return KaiActionExecutionResult(
+            success = arrived,
+            message = if (arrived) "open_app_arrived" else "open_app_failed",
+            screenState = after
+        )
+    }
+
+    private suspend fun executeClickText(
+        step: KaiActionStep,
+        currentState: KaiScreenState
+    ): KaiActionExecutionResult {
+        val target = step.text.ifBlank { step.selectorText }.trim()
+        if (target.isBlank()) {
+            return KaiActionExecutionResult(false, "click_text_missing_target", currentState)
+        }
+
+        sendKaiCmdSuppressed(
+            cmd = KaiAccessibilityService.CMD_CLICK_TEXT,
+            text = target,
+            expectedPackage = step.expectedPackage.ifBlank { currentState.packageName },
+            preDelayMs = 60L,
+            postDelayMs = 80L
+        )
+
+        var after = requestFreshScreen(
+            timeoutMs = step.timeoutMs.coerceIn(1200L, 2600L),
+            expectedPackage = step.expectedPackage.ifBlank { currentState.packageName }
+        )
+
+        if (!KaiExecutionDecisionAuthority.hasMeaningfulProgress(currentState, after) &&
+            !KaiExecutionDecisionAuthority.expectedEvidenceSatisfied(step, after)
+        ) {
+            val candidate = findTapCandidate(currentState, target, step)
+            if (candidate != null) {
+                onLog("click_text fallback attempt (click_text + gesture) for '$target'")
+                sendKaiCmdSuppressed(
+                    cmd = KaiAccessibilityService.CMD_TAP_XY,
+                    x = candidate.first,
+                    y = candidate.second,
+                    expectedPackage = step.expectedPackage.ifBlank { currentState.packageName },
+                    preDelayMs = 70L,
+                    postDelayMs = 120L
+                )
+                after = requestFreshScreen(
+                    timeoutMs = 2200L,
+                    expectedPackage = step.expectedPackage.ifBlank { currentState.packageName }
+                )
+            } else {
+                onLog("click_text gesture fallback skipped: no safe coordinates")
+            }
+        }
+
+        val success = KaiExecutionDecisionAuthority.hasMeaningfulProgress(currentState, after) ||
+            KaiExecutionDecisionAuthority.expectedEvidenceSatisfied(step, after)
+
+        return KaiActionExecutionResult(
+            success = success,
+            message = if (success) "click_text_ok" else "click_text_failed",
+            screenState = after
+        )
+    }
+
+    private suspend fun executeLongPressText(
+        step: KaiActionStep,
+        currentState: KaiScreenState
+    ): KaiActionExecutionResult {
+        val target = step.text.ifBlank { step.selectorText }.trim()
+        if (target.isBlank()) {
+            return KaiActionExecutionResult(false, "long_press_text_missing_target", currentState)
+        }
+
+        sendKaiCmdSuppressed(
+            cmd = KaiAccessibilityService.CMD_LONG_PRESS_TEXT,
+            text = target,
+            expectedPackage = step.expectedPackage.ifBlank { currentState.packageName },
+            holdMs = step.holdMs,
+            preDelayMs = 60L,
+            postDelayMs = 120L
+        )
+
+        val after = requestFreshScreen(
+            timeoutMs = step.timeoutMs.coerceIn(1400L, 2800L),
+            expectedPackage = step.expectedPackage.ifBlank { currentState.packageName }
+        )
+
+        val success = KaiExecutionDecisionAuthority.hasMeaningfulProgress(currentState, after) ||
+            KaiExecutionDecisionAuthority.expectedEvidenceSatisfied(step, after)
+
+        return KaiActionExecutionResult(
+            success = success,
+            message = if (success) "long_press_text_ok" else "long_press_text_failed",
+            screenState = after
+        )
+    }
+
+    private suspend fun executeClickBestMatch(
+        step: KaiActionStep,
+        currentState: KaiScreenState
+    ): KaiActionExecutionResult {
+        val candidate = findTapCandidate(
+            state = currentState,
+            fallbackText = step.selectorText.ifBlank { step.text },
+            step = step
+        )
+        if (candidate == null) {
+            return KaiActionExecutionResult(false, "click_best_match_no_candidate", currentState)
+        }
+
+        sendKaiCmdSuppressed(
+            cmd = KaiAccessibilityService.CMD_TAP_XY,
+            x = candidate.first,
+            y = candidate.second,
+            expectedPackage = step.expectedPackage.ifBlank { currentState.packageName },
+            preDelayMs = 60L,
+            postDelayMs = 100L
+        )
+
+        val after = requestFreshScreen(
+            timeoutMs = step.timeoutMs.coerceIn(1400L, 2600L),
+            expectedPackage = step.expectedPackage.ifBlank { currentState.packageName }
+        )
+
+        val success = KaiExecutionDecisionAuthority.hasMeaningfulProgress(currentState, after) ||
+            KaiExecutionDecisionAuthority.expectedEvidenceSatisfied(step, after)
+
+        return KaiActionExecutionResult(
+            success = success,
+            message = if (success) "click_best_match_ok" else "click_best_match_failed",
+            screenState = after
+        )
+    }
+
+    private suspend fun executeFocusBestInput(
+        step: KaiActionStep,
+        currentState: KaiScreenState
+    ): KaiActionExecutionResult {
+        val candidate = findBestInputCandidate(currentState, step)
+        if (candidate == null) {
+            return KaiActionExecutionResult(false, "focus_best_input_no_candidate", currentState)
+        }
+
+        sendKaiCmdSuppressed(
+            cmd = KaiAccessibilityService.CMD_TAP_XY,
+            x = candidate.first,
+            y = candidate.second,
+            expectedPackage = step.expectedPackage.ifBlank { currentState.packageName },
+            preDelayMs = 70L,
+            postDelayMs = 100L
+        )
+
+        val after = requestFreshScreen(
+            timeoutMs = step.timeoutMs.coerceIn(1200L, 2400L),
+            expectedPackage = step.expectedPackage.ifBlank { currentState.packageName }
+        )
+
+        val success = KaiExecutionDecisionAuthority.hasMeaningfulProgress(currentState, after) ||
+            KaiExecutionDecisionAuthority.expectedEvidenceSatisfied(step, after)
+
+        return KaiActionExecutionResult(
+            success = success,
+            message = if (success) "focus_best_input_ok" else "focus_best_input_failed",
+            screenState = after
+        )
+    }
+
+    private suspend fun executeInputIntoBestField(
+        step: KaiActionStep,
+        currentState: KaiScreenState
+    ): KaiActionExecutionResult {
+        val focused = executeFocusBestInput(step, currentState)
+        if (!focused.success) return focused
+        return executeInputText(step, focused.screenState)
+    }
+
+    private suspend fun executeInputText(
+        step: KaiActionStep,
+        currentState: KaiScreenState
+    ): KaiActionExecutionResult {
+        val text = step.text.trim()
+        if (text.isBlank()) {
+            return KaiActionExecutionResult(false, "input_text_missing_text", currentState)
+        }
+
+        sendKaiCmdSuppressed(
+            cmd = KaiAccessibilityService.CMD_INPUT_TEXT,
+            text = text,
+            expectedPackage = step.expectedPackage.ifBlank { currentState.packageName },
+            preDelayMs = 70L,
+            postDelayMs = 140L
+        )
+
+        val after = requestFreshScreen(
+            timeoutMs = step.timeoutMs.coerceIn(1500L, 3200L),
+            expectedPackage = step.expectedPackage.ifBlank { currentState.packageName }
+        )
+
+        val success = KaiExecutionDecisionAuthority.hasMeaningfulProgress(currentState, after) ||
+            KaiExecutionDecisionAuthority.expectedEvidenceSatisfied(step, after) ||
+            after.containsText(text)
+
+        return KaiActionExecutionResult(
+            success = success,
+            message = if (success) "input_text_ok" else "input_text_failed",
+            screenState = after
+        )
+    }
+
+    private suspend fun executePressPrimaryAction(
+        step: KaiActionStep,
+        currentState: KaiScreenState
+    ): KaiActionExecutionResult {
+        val candidate = findPrimaryActionCandidate(currentState, step)
+        if (candidate == null) {
+            return KaiActionExecutionResult(false, "press_primary_action_no_candidate", currentState)
+        }
+
+        sendKaiCmdSuppressed(
+            cmd = KaiAccessibilityService.CMD_TAP_XY,
+            x = candidate.first,
+            y = candidate.second,
+            expectedPackage = step.expectedPackage.ifBlank { currentState.packageName },
+            preDelayMs = 60L,
+            postDelayMs = 120L
+        )
+
+        val after = requestFreshScreen(
+            timeoutMs = step.timeoutMs.coerceIn(1500L, 2800L),
+            expectedPackage = step.expectedPackage.ifBlank { currentState.packageName }
+        )
+
+        val success = KaiExecutionDecisionAuthority.hasMeaningfulProgress(currentState, after) ||
+            KaiExecutionDecisionAuthority.expectedEvidenceSatisfied(step, after)
+
+        return KaiActionExecutionResult(
+            success = success,
+            message = if (success) "press_primary_action_ok" else "press_primary_action_failed",
+            screenState = after
+        )
+    }
+
+    private suspend fun executeScroll(
+        step: KaiActionStep,
+        currentState: KaiScreenState
+    ): KaiActionExecutionResult {
+        sendKaiCmdSuppressed(
+            cmd = KaiAccessibilityService.CMD_SCROLL,
+            dir = step.dir.ifBlank { "down" },
+            times = step.times.coerceIn(1, 10),
+            expectedPackage = step.expectedPackage.ifBlank { currentState.packageName },
+            preDelayMs = 50L,
+            postDelayMs = 180L
+        )
+
+        val after = requestFreshScreen(
+            timeoutMs = step.timeoutMs.coerceIn(1200L, 2400L),
+            expectedPackage = step.expectedPackage.ifBlank { currentState.packageName }
+        )
+
+        val success = KaiExecutionDecisionAuthority.hasMeaningfulProgress(currentState, after)
+        return KaiActionExecutionResult(
+            success = success,
+            message = if (success) "scroll_ok" else "scroll_no_progress",
+            screenState = after
+        )
+    }
+
+    private suspend fun executeSystemNav(
+        cmd: String,
+        step: KaiActionStep,
+        currentState: KaiScreenState
+    ): KaiActionExecutionResult {
+        sendKaiCmdSuppressed(cmd = cmd, preDelayMs = 50L, postDelayMs = 120L)
+        val after = requestFreshScreen(
+            timeoutMs = step.timeoutMs.coerceIn(1200L, 2200L),
+            expectedPackage = step.expectedPackage
+        )
+        val success = KaiExecutionDecisionAuthority.hasMeaningfulProgress(currentState, after)
+        return KaiActionExecutionResult(
+            success = success,
+            message = if (success) "${cmd}_ok" else "${cmd}_no_progress",
+            screenState = after
+        )
+    }
+
+    private suspend fun executeVerify(
+        step: KaiActionStep,
+        currentState: KaiScreenState
+    ): KaiActionExecutionResult {
+        val after = requestFreshScreen(
+            timeoutMs = step.timeoutMs.coerceIn(1000L, 2400L),
+            expectedPackage = step.expectedPackage.ifBlank { currentState.packageName }
+        )
+        val success = KaiExecutionDecisionAuthority.expectedEvidenceSatisfied(step, after) ||
+            KaiExecutionDecisionAuthority.hasMeaningfulProgress(currentState, after)
+        return KaiActionExecutionResult(
+            success = success,
+            message = if (success) "verify_state_ok" else "verify_state_failed",
+            screenState = after
+        )
+    }
+
+    private suspend fun executeTap(
+        step: KaiActionStep,
+        currentState: KaiScreenState
+    ): KaiActionExecutionResult {
+        sendKaiCmdSuppressed(
+            cmd = KaiAccessibilityService.CMD_TAP_XY,
+            x = step.x,
+            y = step.y,
+            expectedPackage = step.expectedPackage.ifBlank { currentState.packageName },
+            preDelayMs = 40L,
+            postDelayMs = 100L
+        )
+        val after = requestFreshScreen(
+            timeoutMs = step.timeoutMs.coerceIn(1000L, 2200L),
+            expectedPackage = step.expectedPackage.ifBlank { currentState.packageName }
+        )
+        val success = KaiExecutionDecisionAuthority.hasMeaningfulProgress(currentState, after)
+        return KaiActionExecutionResult(
+            success = success,
+            message = if (success) "tap_xy_ok" else "tap_xy_no_progress",
+            screenState = after
+        )
+    }
+
+    private suspend fun executeLongPress(
+        step: KaiActionStep,
+        currentState: KaiScreenState
+    ): KaiActionExecutionResult {
+        sendKaiCmdSuppressed(
+            cmd = KaiAccessibilityService.CMD_LONG_PRESS_XY,
+            x = step.x,
+            y = step.y,
+            holdMs = step.holdMs,
+            expectedPackage = step.expectedPackage.ifBlank { currentState.packageName },
+            preDelayMs = 40L,
+            postDelayMs = 120L
+        )
+        val after = requestFreshScreen(
+            timeoutMs = step.timeoutMs.coerceIn(1200L, 2400L),
+            expectedPackage = step.expectedPackage.ifBlank { currentState.packageName }
+        )
+        val success = KaiExecutionDecisionAuthority.hasMeaningfulProgress(currentState, after)
+        return KaiActionExecutionResult(
+            success = success,
+            message = if (success) "long_press_xy_ok" else "long_press_xy_no_progress",
+            screenState = after
+        )
+    }
+
+    private suspend fun executeSwipe(
+        step: KaiActionStep,
+        currentState: KaiScreenState
+    ): KaiActionExecutionResult {
+        sendKaiCmdSuppressed(
+            cmd = KaiAccessibilityService.CMD_SWIPE_XY,
+            x = step.x,
+            y = step.y,
+            endX = step.endX,
+            endY = step.endY,
+            holdMs = step.holdMs,
+            expectedPackage = step.expectedPackage.ifBlank { currentState.packageName },
+            preDelayMs = 40L,
+            postDelayMs = 150L
+        )
+        val after = requestFreshScreen(
+            timeoutMs = step.timeoutMs.coerceIn(1200L, 2400L),
+            expectedPackage = step.expectedPackage.ifBlank { currentState.packageName }
+        )
+        val success = KaiExecutionDecisionAuthority.hasMeaningfulProgress(currentState, after)
+        return KaiActionExecutionResult(
+            success = success,
+            message = if (success) "swipe_xy_ok" else "swipe_xy_no_progress",
+            screenState = after
+        )
+    }
+
+    private suspend fun executeWait(
+        step: KaiActionStep,
+        currentState: KaiScreenState
+    ): KaiActionExecutionResult {
+        delay(step.waitMs.coerceIn(80L, 12000L))
+        val after = requestFreshScreen(
+            timeoutMs = 1400L,
+            expectedPackage = step.expectedPackage.ifBlank { currentState.packageName }
+        )
+        val success = KaiExecutionDecisionAuthority.hasMeaningfulProgress(currentState, after) ||
+            KaiExecutionDecisionAuthority.expectedEvidenceSatisfied(step, after)
+        return KaiActionExecutionResult(
+            success = true,
+            message = if (success) "wait_observed_progress" else "wait_complete",
+            screenState = after
+        )
+    }
+
+    private fun findTapCandidate(
+        state: KaiScreenState,
+        fallbackText: String,
+        step: KaiActionStep
+    ): Pair<Float, Float>? {
+        val queryTexts = buildList {
+            val primary = step.selectorText.ifBlank { fallbackText }.trim()
+            if (primary.isNotBlank()) add(primary)
+            if (step.text.isNotBlank() && step.text != primary) add(step.text.trim())
+            if (step.selectorHint.isNotBlank()) add(step.selectorHint.trim())
+        }.distinct()
+
+        val pool = buildList {
+            addAll(state.elements)
+            addAll(state.likelyNavigationTargets)
+            addAll(state.likelyPrimaryActions)
+            addAll(state.likelyInputFields)
+        }.distinctBy {
+            "${it.text}|${it.contentDescription}|${it.hint}|${it.viewId}|${it.bounds}|${it.roleGuess}"
+        }
+
+        val best = pool
+            .mapNotNull { element ->
+                val score = scoreElementForStep(element, queryTexts, step)
+                if (score <= 0) null else element to score
+            }
+            .maxByOrNull { it.second }
+            ?.first
+
+        return best?.bounds?.let { KaiGestureUtils.safeTapFromBounds(it) }
+    }
+
+    private fun findBestInputCandidate(
+        state: KaiScreenState,
+        step: KaiActionStep
+    ): Pair<Float, Float>? {
+        val pool = buildList {
+            addAll(state.likelyInputFields)
+            addAll(state.elements.filter { it.editable })
+        }.distinctBy {
+            "${it.text}|${it.contentDescription}|${it.hint}|${it.viewId}|${it.bounds}|${it.roleGuess}"
+        }
+
+        val queryTexts = listOf(
+            step.selectorHint.trim(),
+            step.selectorText.trim(),
+            step.text.trim()
+        ).filter { it.isNotBlank() }
+
+        val best = pool
+            .mapNotNull { element ->
+                val score = scoreElementForInput(element, queryTexts)
+                if (score <= 0) null else element to score
+            }
+            .maxByOrNull { it.second }
+            ?.first
+
+        return best?.bounds?.let { KaiGestureUtils.safeTapFromBounds(it) }
+    }
+
+    private fun findPrimaryActionCandidate(
+        state: KaiScreenState,
+        step: KaiActionStep
+    ): Pair<Float, Float>? {
+        val pool = buildList {
+            addAll(state.likelyPrimaryActions)
+            addAll(state.elements.filter { it.clickable })
+        }.distinctBy {
+            "${it.text}|${it.contentDescription}|${it.hint}|${it.viewId}|${it.bounds}|${it.roleGuess}"
+        }
+
+        val queryTexts = listOf(
+            step.selectorText.trim(),
+            step.text.trim(),
+            "send",
+            "ارسال",
+            "إرسال",
+            "save",
+            "done",
+            "تم"
+        ).filter { it.isNotBlank() }
+
+        val best = pool
+            .mapNotNull { element ->
+                val score = scoreElementForPrimaryAction(element, queryTexts)
+                if (score <= 0) null else element to score
+            }
+            .maxByOrNull { it.second }
+            ?.first
+
+        return best?.bounds?.let { KaiGestureUtils.safeTapFromBounds(it) }
+    }
+
+    private fun scoreElementForStep(
+        element: KaiUiElement,
+        queries: List<String>,
+        step: KaiActionStep
+    ): Int {
+        val joined = semanticJoined(element)
+        var score = 0
+
+        queries.forEach { query ->
+            val normQuery = KaiScreenStateParser.normalize(query)
+            if (normQuery.isBlank()) return@forEach
+            if (joined == normQuery) score += 90
+            if (joined.contains(normQuery)) score += 50
+            if (KaiScreenStateParser.isLooseTextMatch(joined, normQuery)) score += 24
+        }
+
+        val role = step.selectorRole.trim().lowercase(Locale.ROOT)
+        if (role.isNotBlank()) {
+            val r = element.roleGuess.trim().lowercase(Locale.ROOT)
+            if (r == role) score += 26
+            if (r.contains(role) || role.contains(r)) score += 12
+        }
+
+        if (element.clickable) score += 10
+        if (element.bounds.isNotBlank()) score += 6
+        return score
+    }
+
+    private fun scoreElementForInput(
+        element: KaiUiElement,
+        queries: List<String>
+    ): Int {
+        val joined = semanticJoined(element)
+        var score = 0
+        if (element.editable) score += 60
+        if (element.roleGuess.contains("input", true) || element.roleGuess.contains("composer", true)) score += 25
+
+        queries.forEach { query ->
+            val normQuery = KaiScreenStateParser.normalize(query)
+            if (normQuery.isBlank()) return@forEach
+            if (joined == normQuery) score += 50
+            if (joined.contains(normQuery)) score += 32
+            if (KaiScreenStateParser.isLooseTextMatch(joined, normQuery)) score += 18
+        }
+
+        if (element.bounds.isNotBlank()) score += 6
+        return score
+    }
+
+    private fun scoreElementForPrimaryAction(
+        element: KaiUiElement,
+        queries: List<String>
+    ): Int {
+        val joined = semanticJoined(element)
+        var score = 0
+        if (element.clickable) score += 18
+        if (element.roleGuess.contains("send", true) || element.roleGuess.contains("primary", true)) score += 32
+
+        queries.forEach { query ->
+            val normQuery = KaiScreenStateParser.normalize(query)
+            if (normQuery.isBlank()) return@forEach
+            if (joined == normQuery) score += 50
+            if (joined.contains(normQuery)) score += 30
+            if (KaiScreenStateParser.isLooseTextMatch(joined, normQuery)) score += 16
+        }
+
+        if (element.bounds.isNotBlank()) score += 6
+        return score
+    }
+
+    private fun semanticJoined(element: KaiUiElement): String {
+        return KaiScreenStateParser.normalize(
+            listOf(
+                element.text,
+                element.contentDescription,
+                element.hint,
+                element.viewId,
+                element.roleGuess
+            ).joinToString(" ")
+        )
+    }
+
+    private suspend fun sendKaiCmdSuppressed(
+        cmd: String,
+        text: String = "",
+        expectedPackage: String = "",
+        dir: String = "",
+        times: Int = 1,
+        x: Float? = null,
+        y: Float? = null,
+        endX: Float? = null,
+        endY: Float? = null,
+        holdMs: Long? = null,
+        timeoutMs: Long? = null,
+        preDelayMs: Long = 60L,
+        postDelayMs: Long = 0L,
+        strongObservationMode: Boolean = false
+    ) {
+        KaiBubbleManager.beginActionUiSuppression(strongObservationMode)
+        try {
+            if (preDelayMs > 0L) delay(preDelayMs)
+            sendKaiCmd(
+                cmd = cmd,
+                text = text,
+                expectedPackage = expectedPackage,
+                dir = dir,
+                times = times,
+                x = x,
+                y = y,
+                endX = endX,
+                endY = endY,
+                holdMs = holdMs,
+                timeoutMs = timeoutMs
+            )
+            if (postDelayMs > 0L) delay(postDelayMs)
+        } finally {
+            KaiBubbleManager.endActionUiSuppression(strongObservationMode)
+        }
     }
 
     private fun sendKaiCmd(
@@ -288,7 +968,6 @@ class KaiActionExecutor(
                 putExtra(KaiAccessibilityService.EXTRA_EXPECTED_PACKAGE, expectedPackage)
             }
             putExtra(KaiAccessibilityService.EXTRA_TIMES, times.coerceIn(1, 10))
-
             if (dir.isNotBlank()) putExtra(KaiAccessibilityService.EXTRA_DIR, dir)
             if (x != null) putExtra(KaiAccessibilityService.EXTRA_X, x)
             if (y != null) putExtra(KaiAccessibilityService.EXTRA_Y, y)
@@ -298,2862 +977,5 @@ class KaiActionExecutor(
             if (timeoutMs != null) putExtra(KaiAccessibilityService.EXTRA_TIMEOUT_MS, timeoutMs)
         }
         context.sendBroadcast(intent)
-    }
-
-    suspend fun resetObservationTransitionStateForRun() {
-        sendKaiCmdSuppressed(
-            cmd = KaiAccessibilityService.CMD_RESET_TRANSITION_STATE,
-            preDelayMs = 20L,
-            postDelayMs = 20L
-        )
-    }
-
-    internal suspend fun sendKaiCmdSuppressed(
-        cmd: String,
-        text: String = "",
-        expectedPackage: String = "",
-        dir: String = "",
-        times: Int = 1,
-        x: Float? = null,
-        y: Float? = null,
-        endX: Float? = null,
-        endY: Float? = null,
-        holdMs: Long? = null,
-        timeoutMs: Long? = null,
-        preDelayMs: Long = 70L,
-        postDelayMs: Long = 0L,
-        strongObservationMode: Boolean = false
-    ) {
-        KaiBubbleManager.beginActionUiSuppression(strongObservationMode)
-        try {
-            delay(preDelayMs)
-            sendKaiCmd(
-                cmd = cmd,
-                text = text,
-                expectedPackage = expectedPackage,
-                dir = dir,
-                times = times,
-                x = x,
-                y = y,
-                endX = endX,
-                endY = endY,
-                holdMs = holdMs,
-                timeoutMs = timeoutMs
-            )
-            if (postDelayMs > 0L) delay(postDelayMs)
-        } finally {
-            KaiBubbleManager.endActionUiSuppression(strongObservationMode)
-        }
-    }
-
-    private fun isOverlayPolluted(raw: String): Boolean = gate.isOverlayPolluted(raw)
-    private fun isUsableDump(raw: String, packageName: String = ""): Boolean = gate.isUsableDump(raw, packageName)
-
-    internal fun fingerprintFor(packageName: String, rawDump: String): String = gate.fingerprintFor(packageName, rawDump)
-    internal fun sameFingerprint(a: String, b: String): Boolean = gate.sameFingerprint(a, b)
-
-    internal fun shouldAllowFinalCommitForStep(step: KaiActionStep): Boolean {
-        if (step.allowsFinalCommit) return true
-        val stageHint = step.stageHint.trim().uppercase(Locale.ROOT)
-        return step.completionBoundary == KaiGoalBoundary.FINAL_GOAL ||
-            stageHint == "SUCCESS"
-    }
-
-    private fun inferAppHintFromText(text: String): String {
-        return KaiScreenStateParser.inferAppHint(text)
-    }
-
-    internal fun isExternalPackageChange(before: String, after: String): Boolean = gate.isExternalPackageChange(before, after)
-
-    private fun normalizeQueryText(text: String): String {
-        return text
-            .trim()
-            .lowercase(Locale.getDefault())
-            .replace("أ", "ا")
-            .replace("إ", "ا")
-            .replace("آ", "ا")
-            .replace("ى", "ي")
-            .replace("ة", "ه")
-            .replace("ؤ", "و")
-            .replace("ئ", "ي")
-            .replace("ـ", "")
-            .replace(Regex("""[\p{Punct}&&[^@._-]]+"""), " ")
-            .replace(Regex("\\s+"), " ")
-    }
-
-    private fun clickTextVariants(text: String): List<String> {
-        val normalized = normalizeQueryText(text)
-        val tokens = normalized.split(" ").map { it.trim() }.filter { it.isNotBlank() }
-
-        val broadCandidates = mutableSetOf<String>()
-        if (normalized.isNotBlank()) broadCandidates.add(normalized)
-        if (text.isNotBlank()) broadCandidates.add(text.trim())
-
-        tokens.forEach { token ->
-            if (token.length >= 2) broadCandidates.add(token)
-        }
-
-        if (tokens.size > 1) {
-            broadCandidates.add(tokens.first())
-            broadCandidates.add(tokens.last())
-            broadCandidates.add(tokens.joinToString(" "))
-        }
-
-        return broadCandidates
-            .filter { it.isNotBlank() }
-            .distinct()
-    }
-
-    private fun isLauncherPackage(packageName: String): Boolean {
-        val p = packageName.lowercase(Locale.getDefault())
-        return p.contains("launcher") || p.contains("home") || p.contains("pixel") || p.contains("trebuchet")
-    }
-
-    private fun hasLauncherIconForTarget(state: KaiScreenState, target: String): Boolean {
-        if (target.isBlank()) return false
-        if (!isLauncherPackage(state.packageName)) return false
-        return state.containsText(target) || state.containsText(inferAppHintFromText(target))
-    }
-
-    private fun launcherAliasVariants(rawTarget: String, inferredHint: String = ""): List<String> {
-        val normalizedTarget = KaiScreenStateParser.normalize(rawTarget)
-        val hint = KaiScreenStateParser.normalize(if (inferredHint.isNotBlank()) inferredHint else inferAppHintFromText(rawTarget))
-        val canonical = KaiScreenStateParser.normalize(KaiCommandParser.resolveAppAlias(rawTarget))
-
-        val aliases = linkedSetOf<String>()
-        if (normalizedTarget.isNotBlank()) aliases += normalizedTarget
-        if (canonical.isNotBlank()) aliases += canonical
-        if (hint.isNotBlank()) aliases += hint
-        aliases += KaiScreenStateParser.appAliasesForHint(hint)
-        KaiAppIdentityRegistry.launcherLabelsForKey(hint).forEach { aliases += KaiScreenStateParser.normalize(it) }
-        KaiAppIdentityRegistry.launcherLabelsForKey(canonical).forEach { aliases += KaiScreenStateParser.normalize(it) }
-
-        if (normalizedTarget.isNotBlank()) {
-            normalizedTarget.split(" ")
-                .map { it.trim() }
-                .filter { it.length >= 3 }
-                .forEach { aliases += it }
-        }
-
-        return aliases.filter { it.isNotBlank() }
-    }
-
-    private fun launcherPackageHint(element: KaiUiElement): String {
-        val joined = listOf(element.packageName, element.viewId, element.text, element.contentDescription)
-            .joinToString(" ")
-        return KaiScreenStateParser.normalize(joined)
-    }
-
-    private fun isLauncherSurfaceCoherent(state: KaiScreenState): Boolean {
-        val family = KaiSurfaceModel.normalizeLegacyFamily(KaiSurfaceModel.familyOf(state))
-        if (!state.isLauncher() && family != KaiSurfaceFamily.LAUNCHER_SURFACE) return false
-        return state.elements.size >= 2 || state.lines.size >= 3
-    }
-
-    private fun extractVisibleLauncherCandidates(
-        state: KaiScreenState,
-        rawTarget: String,
-        inferredHint: String,
-        targetPackage: String
-    ): List<LauncherAppCandidate> {
-        if (!isLauncherSurfaceCoherent(state)) return emptyList()
-
-        val variants = launcherAliasVariants(rawTarget, inferredHint)
-        val normalizedPkgTarget = KaiScreenStateParser.normalize(targetPackage)
-
-        val fromElements = state.elements.mapNotNull { element ->
-            val label = semanticLabel(element)
-            val normalizedLabel = KaiScreenStateParser.normalize(label)
-            val pkgHint = launcherPackageHint(element)
-            if (normalizedLabel.isBlank() && pkgHint.isBlank()) return@mapNotNull null
-
-            val labelExact = variants.any { alias -> normalizedLabel == alias }
-            val labelContains = variants.any { alias ->
-                normalizedLabel.contains(alias) || alias.contains(normalizedLabel)
-            }
-            val labelLoose = variants.any { alias ->
-                KaiScreenStateParser.isLooseTextMatch(normalizedLabel, alias)
-            }
-            val packageHintMatch =
-                normalizedPkgTarget.isNotBlank() &&
-                    (pkgHint.contains(normalizedPkgTarget) || normalizedPkgTarget.contains(pkgHint))
-
-            var confidence = 0
-            if (labelExact) confidence += 90
-            if (labelContains) confidence += 56
-            if (labelLoose) confidence += 26
-            if (packageHintMatch) confidence += 72
-            if (element.clickable) confidence += 12
-            if (element.roleGuess in setOf("button", "image_button", "list_item", "chat_item")) confidence += 8
-            if (element.bounds.isNotBlank()) confidence += 6
-
-            val (cx, cy) = parseCenterFromBounds(element.bounds)
-            val signature = KaiScreenStateParser.normalize("$normalizedLabel|$pkgHint|${element.bounds}")
-
-            LauncherAppCandidate(
-                label = label,
-                normalizedLabel = normalizedLabel,
-                packageHint = pkgHint,
-                x = cx,
-                y = cy,
-                clickable = element.clickable,
-                source = "element",
-                confidence = confidence,
-                signature = signature
-            )
-        }
-
-        val fromLines = state.lines
-            .asSequence()
-            .map { it.trim() }
-            .filter { it.isNotBlank() }
-            .map { line ->
-                val normalizedLine = KaiScreenStateParser.normalize(line)
-                var confidence = 0
-                if (variants.any { alias -> normalizedLine == alias }) confidence += 70
-                if (variants.any { alias -> normalizedLine.contains(alias) || alias.contains(normalizedLine) }) confidence += 42
-                if (variants.any { alias -> KaiScreenStateParser.isLooseTextMatch(normalizedLine, alias) }) confidence += 18
-                LauncherAppCandidate(
-                    label = line,
-                    normalizedLabel = normalizedLine,
-                    packageHint = "",
-                    x = null,
-                    y = null,
-                    clickable = false,
-                    source = "line",
-                    confidence = confidence,
-                    signature = normalizedLine
-                )
-            }
-            .filter { it.confidence >= 52 }
-            .toList()
-
-        return (fromElements + fromLines)
-            .filter { it.confidence > 0 }
-            .sortedByDescending { it.confidence }
-            .distinctBy { it.signature }
-    }
-
-    private suspend fun launchViaVisibleLauncherCandidate(
-        launcherState: KaiScreenState,
-        rawTarget: String,
-        inferredHint: String,
-        targetPackage: String,
-        reason: String
-    ): Pair<Boolean, String> {
-        val candidates = extractVisibleLauncherCandidates(
-            state = launcherState,
-            rawTarget = rawTarget,
-            inferredHint = inferredHint,
-            targetPackage = targetPackage
-        )
-        val best = candidates.firstOrNull() ?: return false to "no_launcher_candidate"
-        if (best.confidence < 62) return false to "low_confidence_launcher_candidate:${best.confidence}"
-
-        onLog(
-            "launcher_target[$reason]: label='${best.label.ifBlank { best.normalizedLabel }}' conf=${best.confidence} src=${best.source}"
-        )
-
-        if (best.x != null && best.y != null) {
-            sendKaiCmdSuppressed(
-                cmd = KaiAccessibilityService.CMD_TAP_XY,
-                x = best.x,
-                y = best.y,
-                preDelayMs = 70L
-            )
-            return true to "tap_xy"
-        }
-
-        val labelsToTry = linkedSetOf<String>()
-        if (best.label.isNotBlank()) labelsToTry += best.label
-        labelsToTry += launcherAliasVariants(rawTarget, inferredHint).take(4)
-
-        labelsToTry.forEach { label ->
-            if (label.isBlank()) return@forEach
-            sendKaiCmdSuppressed(
-                cmd = KaiAccessibilityService.CMD_CLICK_TEXT,
-                text = label,
-                preDelayMs = 65L
-            )
-        }
-
-        return true to "click_text"
-    }
-
-    internal fun semanticLabel(element: KaiUiElement): String {
-        return element.text.ifBlank {
-            element.contentDescription.ifBlank {
-                element.hint.ifBlank {
-                    element.viewId
-                }
-            }
-        }.trim()
-    }
-
-    internal fun parseCenterFromBounds(bounds: String): Pair<Float?, Float?> {
-        val match = Regex("""\[(\d+),(\d+)]\[(\d+),(\d+)]""").find(bounds.trim()) ?: return Pair(null, null)
-        val left = match.groupValues.getOrNull(1)?.toFloatOrNull() ?: return Pair(null, null)
-        val top = match.groupValues.getOrNull(2)?.toFloatOrNull() ?: return Pair(null, null)
-        val right = match.groupValues.getOrNull(3)?.toFloatOrNull() ?: return Pair(null, null)
-        val bottom = match.groupValues.getOrNull(4)?.toFloatOrNull() ?: return Pair(null, null)
-        return Pair((left + right) / 2f, (top + bottom) / 2f)
-    }
-
-    private fun roleMatches(element: KaiUiElement, selectorRole: String): Boolean {
-        val role = KaiScreenStateParser.normalize(selectorRole)
-        if (role.isBlank()) return true
-        return KaiScreenStateParser.normalize(element.roleGuess) == role ||
-            KaiScreenStateParser.normalize(element.roleGuess).contains(role)
-    }
-
-    private fun scoreElementForStep(element: KaiUiElement, step: KaiActionStep): Int {
-        var score = 0
-        val queryText = KaiScreenStateParser.normalize(step.selectorText.ifBlank { step.text })
-        val selectorHint = KaiScreenStateParser.normalize(step.selectorHint)
-        val selectorId = KaiScreenStateParser.normalize(step.selectorId)
-
-        fun fieldScore(value: String, query: String, exact: Int, contains: Int): Int {
-            val normalized = KaiScreenStateParser.normalize(value)
-            if (query.isBlank() || normalized.isBlank()) return 0
-            return when {
-                normalized == query -> exact
-                normalized.contains(query) || query.contains(normalized) -> contains
-                KaiScreenStateParser.isLooseTextMatch(normalized, query) -> contains / 2
-                else -> 0
-            }
-        }
-
-        val textFields = listOf(element.text, element.contentDescription, element.hint, element.viewId)
-        textFields.forEach { field ->
-            score += fieldScore(field, queryText, exact = 80, contains = 40)
-            score += fieldScore(field, selectorHint, exact = 40, contains = 20)
-        }
-
-        if (selectorId.isNotBlank()) {
-            score += fieldScore(element.viewId, selectorId, exact = 90, contains = 45)
-        }
-
-        if (element.clickable) score += 20
-        if (element.editable) score += 16
-        if (element.roleGuess == "send_button") score += 18
-        if (element.roleGuess == "create_button") score += 15
-        if (roleMatches(element, step.selectorRole)) score += 24
-
-        return score
-    }
-
-    internal fun selectSemanticElement(state: KaiScreenState, step: KaiActionStep): KaiUiElement? {
-        val expectedPkg = KaiScreenStateParser.normalize(step.expectedPackage)
-        if (expectedPkg.isNotBlank() && !KaiScreenStateParser.normalize(state.packageName).contains(expectedPkg)) {
-            return null
-        }
-
-        val explicit = state.elements
-            .filter { roleMatches(it, step.selectorRole) }
-            .maxByOrNull { scoreElementForStep(it, step) }
-
-        if (explicit != null && scoreElementForStep(explicit, step) >= 30) {
-            return explicit
-        }
-
-        val query = step.selectorText.ifBlank { step.text }
-        return when {
-            step.selectorRole.equals("input", true) ||
-                step.selectorRole.equals("editor", true) ||
-                step.selectorRole.equals("search_field", true) -> state.findBestInputField(step.selectorHint.ifBlank { query })
-            step.selectorRole.equals("send_button", true) -> state.findSendAction()
-            step.selectorRole.equals("create_button", true) -> state.findCreateAction()
-            step.selectorRole.equals("chat_item", true) -> state.findConversationCandidate(query)
-            query.isNotBlank() -> state.findBestClickableTarget(query)
-            else -> null
-        }
-    }
-
-    internal fun expectedStateSatisfied(step: KaiActionStep, state: KaiScreenState): Boolean {
-        val expectedPkg = KaiScreenStateParser.normalize(step.expectedPackage)
-        if (expectedPkg.isNotBlank() && !KaiScreenStateParser.normalize(state.packageName).contains(expectedPkg)) {
-            return false
-        }
-
-        val expectedKind = KaiScreenStateParser.normalize(step.expectedScreenKind)
-        if (expectedKind.isNotBlank()) {
-            val kindSatisfied = when (expectedKind) {
-                "instagram_dm_list" -> KaiSurfaceModel.isVerifiedInstagramDmListSurface(state)
-                "instagram_dm_thread", "chat_thread" -> KaiSurfaceModel.isVerifiedInstagramThreadTextSurface(state) || state.isChatThreadScreen()
-                "instagram_camera_overlay" -> KaiSurfaceModel.isVerifiedInstagramCameraOverlay(state)
-                "youtube_working_surface" -> KaiSurfaceModel.isVerifiedYouTubeWorkingSurface(state)
-                "notes_list" -> KaiSurfaceModel.isVerifiedNotesListSurface(state)
-                "notes_editor", "notes_title_input", "notes_body_input" -> KaiSurfaceModel.isVerifiedNotesEditorSurface(state)
-                "chat_list" -> state.isChatListScreen() && !state.isSearchLikeSurface() && !state.isCameraOrMediaOverlaySurface()
-                "search" -> state.isSearchLikeSurface()
-                "detail" -> state.isDetailSurface() || state.isPlayerSurface()
-                else -> KaiScreenStateParser.normalize(state.screenKind) == expectedKind
-            }
-            if (!kindSatisfied) return false
-        }
-
-        if (step.expectedTexts.isNotEmpty()) {
-            val allHit = step.expectedTexts.all { state.containsText(it) }
-            if (!allHit) return false
-        }
-
-        return true
-    }
-
-    fun getLastRefreshMeta(): ScreenRefreshMeta = lastRefreshMeta
-    fun getConsecutiveWeakReads(): Int = gate.consecutiveWeakReads
-    fun getConsecutiveStaleReads(): Int = gate.consecutiveStaleReads
-
-    private fun isExpectedPackageMatch(observedPackage: String, expectedPackage: String): Boolean =
-        gate.isExpectedPackageMatch(observedPackage, expectedPackage)
-
-    fun bestRuntimeObservation(): KaiObservation = KaiObservationRuntime.getBestAvailable()
-
-
-    // ── Observation gating (delegated to KaiObservationGate) ───────────
-
-    private fun toGateTier(tier: ObservationGateTier): KaiObservationGate.GateTier = when (tier) {
-        ObservationGateTier.APP_LAUNCH_SAFE -> KaiObservationGate.GateTier.APP_LAUNCH_SAFE
-        ObservationGateTier.SEMANTIC_ACTION_SAFE -> KaiObservationGate.GateTier.SEMANTIC_ACTION_SAFE
-    }
-
-    suspend fun ensureStrongObservationGate(
-        expectedPackage: String = "",
-        timeoutMs: Long = 2600L,
-        maxAttempts: Int = 2,
-        allowLauncherSurface: Boolean = false,
-        tier: ObservationGateTier = ObservationGateTier.SEMANTIC_ACTION_SAFE,
-        staleRetryAttempts: Int = 2,
-        missingPackageRetryAttempts: Int = 2
-    ): ObservationGateResult {
-        val r = gate.ensureStrongGate(expectedPackage, timeoutMs, maxAttempts,
-            allowLauncherSurface, toGateTier(tier), staleRetryAttempts, missingPackageRetryAttempts)
-        return ObservationGateResult(r.passed, r.state, r.reason)
-    }
-
-    suspend fun ensureAuthoritativeObservationReady(
-        timeoutMs: Long = 2600L,
-        maxAttempts: Int = 3,
-        allowLauncherSurface: Boolean = true,
-        tier: ObservationGateTier = ObservationGateTier.APP_LAUNCH_SAFE
-    ): ObservationReadinessResult {
-        val r = gate.ensureAuthoritative(timeoutMs, maxAttempts, allowLauncherSurface, toGateTier(tier))
-        return ObservationReadinessResult(r.passed, r.state, r.reason, r.attempts)
-    }
-
-    suspend fun requestFreshScreen(timeoutMs: Long = 2500L, expectedPackage: String = ""): KaiScreenState {
-        return gate.requestFreshScreen(timeoutMs, expectedPackage)
-    }
-
-    internal fun markActionProgress(
-        beforePackage: String,
-        afterPackage: String,
-        beforeFingerprint: String,
-        afterFingerprint: String,
-        message: String
-    ) {
-        gate.markActionProgress(beforePackage, afterPackage, beforeFingerprint, afterFingerprint, message)
-    }
-
-    private fun mapAppNameToPackage(appName: String): String? {
-        val canonical = KaiCommandParser.resolveAppAlias(appName).lowercase(Locale.ROOT)
-        KaiAppIdentityRegistry.primaryPackageForKey(canonical)
-            .takeIf { it.isNotBlank() }
-            ?.let { return it }
-
-        return try {
-            val pm = context.packageManager ?: return null
-            val normalized = KaiScreenStateParser.normalize(canonical)
-
-            pm.getInstalledApplications(PackageManager.GET_META_DATA)
-                .asSequence()
-                .mapNotNull { appInfo ->
-                    val label = pm.getApplicationLabel(appInfo)?.toString().orEmpty()
-                    Pair(appInfo.packageName.orEmpty(), KaiScreenStateParser.normalize(label))
-                }
-                .firstOrNull { (_, labelNorm) ->
-                    labelNorm == normalized || labelNorm.contains(normalized) || normalized.contains(labelNorm)
-                }
-                ?.first
-        } catch (_: Exception) {
-            null
-        }
-    }
-
-    private fun resolveTargetAppPackage(appName: String, launcherState: KaiScreenState?): String? {
-        mapAppNameToPackage(appName)?.let { return it }
-
-        if (launcherState != null && hasLauncherIconForTarget(launcherState, appName)) {
-            val hint = KaiCommandParser.resolveAppAlias(appName).lowercase(Locale.ROOT)
-            return mapAppNameToPackage(hint)
-        }
-
-        return null
-    }
-
-    private fun launchAppByPackage(packageName: String): Boolean {
-        val pm = context.packageManager ?: return false
-        return try {
-            val launchIntent = pm.getLaunchIntentForPackage(packageName) ?: return false
-            launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            context.startActivity(launchIntent)
-            true
-        } catch (e: Exception) {
-            onLog("Direct launch intent failed for $packageName: ${e.message}")
-            false
-        }
-    }
-
-    /**
-     * Shared execution pattern for simple gesture commands (back, home, recents,
-     * scroll, tap_xy, long_press_text, long_press_xy, swipe_xy).
-     * Captures before-state, sends the command, waits, refreshes, and checks progress.
-     */
-    private suspend fun executeSimpleGesture(
-        cmd: String,
-        label: String,
-        step: KaiActionStep,
-        message: String
-    ): KaiActionExecutionResult {
-        val beforeFingerprint = canonicalBeforeFingerprint()
-        val beforePackage = canonicalBeforePackage()
-        sendKaiCmdSuppressed(
-            cmd = cmd,
-            text = step.text,
-            dir = step.dir.ifBlank { "" },
-            times = step.times,
-            x = step.x,
-            y = step.y,
-            endX = step.endX,
-            endY = step.endY,
-            holdMs = step.holdMs,
-            preDelayMs = 60L
-        )
-        delay(step.waitMs.coerceAtLeast(420L))
-        val state = requestFreshScreen(2800L)
-        val meta = getLastRefreshMeta()
-        val afterFingerprint = fingerprintFor(state.packageName, state.rawDump)
-        val afterPackage = state.packageName
-        markActionProgress(beforePackage, afterPackage, beforeFingerprint, afterFingerprint, "$label verification")
-
-        val hasMeaningfulChange = !sameFingerprint(beforeFingerprint, afterFingerprint) ||
-            isExternalPackageChange(beforePackage, afterPackage) ||
-            (meta.changedFromPrevious && !meta.reusedLastGood)
-
-        return if (!hasMeaningfulChange && meta.weak) {
-            weakNoProgressFailure(state, label)
-        } else {
-            KaiActionExecutionResult(success = true, message = message, screenState = state)
-        }
-    }
-
-    private fun weakNoProgressFailure(
-        state: KaiScreenState,
-        actionName: String
-    ): KaiActionExecutionResult {
-        return KaiActionExecutionResult(
-            success = false,
-            message = "$actionName produced weak/no verified progress",
-            screenState = state
-        )
-    }
-
-    private suspend fun verifyOpenAppInternal(
-        rawTargetText: String,
-        targetHint: String,
-        targetPackage: String,
-        beforeObservation: KaiObservation,
-        beforeFingerprint: String,
-        beforePackage: String
-    ): KaiActionExecutionResult {
-        var mostRecentState: KaiScreenState? = null
-        var transitionObserved = false
-        var wrongPackageSignals = 0
-        var lastCredibleWrongPackage = ""
-        var launcherStableCandidateStreak = 0
-        var previousLauncherCandidateSignature = ""
-
-        repeat(3) { attemptIdx ->
-            if (attemptIdx > 0) delay(320L)
-
-            // For open-app confirmation we must observe reality, not pre-filter by expected package.
-            val state = requestFreshScreen(2200L + (attemptIdx * 280L), expectedPackage = "")
-            mostRecentState = state
-
-            if (isLauncherSurfaceCoherent(state)) {
-                val launcherCandidates = extractVisibleLauncherCandidates(
-                    state = state,
-                    rawTarget = rawTargetText,
-                    inferredHint = targetHint,
-                    targetPackage = targetPackage
-                )
-                val bestLauncher = launcherCandidates.firstOrNull()
-                if (bestLauncher != null && bestLauncher.confidence >= 62) {
-                    if (bestLauncher.signature == previousLauncherCandidateSignature) {
-                        launcherStableCandidateStreak += 1
-                    } else {
-                        previousLauncherCandidateSignature = bestLauncher.signature
-                        launcherStableCandidateStreak = 1
-                    }
-
-                    val (issued, mode) = launchViaVisibleLauncherCandidate(
-                        launcherState = state,
-                        rawTarget = rawTargetText,
-                        inferredHint = targetHint,
-                        targetPackage = targetPackage,
-                        reason = "verify_attempt_${attemptIdx + 1}"
-                    )
-                    if (issued) {
-                        transitionObserved = true
-                        onLog("open_app launcher retry dispatched via $mode (stable=$launcherStableCandidateStreak)")
-                        delay(220L)
-                    }
-                }
-            }
-
-            val normalizedObserved = KaiScreenStateParser.normalize(state.packageName)
-            val normalizedTarget = KaiScreenStateParser.normalize(targetPackage)
-            val observedKnown = normalizedObserved.isNotBlank()
-            val hintMatchesTarget = targetHint.isBlank() || state.likelyMatchesAppHint(targetHint)
-            val packageMatchesTarget =
-                normalizedTarget.isNotBlank() &&
-                    (normalizedObserved == normalizedTarget ||
-                        normalizedObserved.startsWith("$normalizedTarget.") ||
-                        KaiAppIdentityRegistry.packageMatchesFamily(targetPackage, state.packageName))
-
-            val inTargetApp =
-                if (normalizedTarget.isNotBlank()) {
-                    packageMatchesTarget && hintMatchesTarget
-                } else {
-                    hintMatchesTarget && observedKnown && !isLauncherPackage(state.packageName)
-                }
-
-            val assessment = if (inTargetApp) {
-                KaiSurfaceTransitionPolicy.assessCurrentSurface(
-                    step = KaiActionStep(cmd = "open_app"),
-                    state = state
-                )
-            } else {
-                null
-            }
-
-            val afterFingerprint = fingerprintFor(state.packageName, state.rawDump)
-            val movedOffLauncher =
-                isLauncherPackage(beforePackage) && !isLauncherPackage(state.packageName) && state.packageName.isNotBlank()
-            val fingerprintChanged = !sameFingerprint(beforeFingerprint, afterFingerprint)
-
-            if (inTargetApp && assessment != null) {
-                val outcome = when (assessment.status) {
-                    KaiSurfaceStatus.TARGET_READY -> KaiOpenAppOutcome.TARGET_READY
-                    KaiSurfaceStatus.USABLE_INTERMEDIATE,
-                    KaiSurfaceStatus.WRONG_BUT_RECOVERABLE -> KaiOpenAppOutcome.USABLE_INTERMEDIATE_IN_TARGET_APP
-                    KaiSurfaceStatus.DEAD_END -> null
-                }
-
-                if (outcome != null) {
-                    markActionProgress(
-                        beforePackage,
-                        state.packageName,
-                        beforeFingerprint,
-                        afterFingerprint,
-                        "open_app verification"
-                    )
-                    return KaiActionExecutionResult(
-                        success = true,
-                        message = "open_app_classified:$outcome",
-                        screenState = state,
-                        openAppOutcome = outcome
-                    )
-                }
-            }
-
-            val credibleWrongPackage =
-                normalizedTarget.isNotBlank() &&
-                    observedKnown &&
-                    !isLauncherPackage(state.packageName) &&
-                    normalizedObserved != normalizedTarget &&
-                    !normalizedObserved.startsWith("$normalizedTarget.") &&
-                    !KaiAppIdentityRegistry.packageMatchesFamily(targetPackage, state.packageName)
-
-            if (credibleWrongPackage) {
-                if (normalizedObserved == lastCredibleWrongPackage) {
-                    wrongPackageSignals += 1
-                } else {
-                    lastCredibleWrongPackage = normalizedObserved
-                    wrongPackageSignals = 1
-                }
-
-                if (wrongPackageSignals >= 2) {
-                    markActionProgress(
-                        beforePackage,
-                        state.packageName,
-                        beforeFingerprint,
-                        afterFingerprint,
-                        "open_app verification"
-                    )
-                    return KaiActionExecutionResult(
-                        success = false,
-                        message = "open_app_classified:${KaiOpenAppOutcome.WRONG_PACKAGE_CONFIRMED}:observed=${state.packageName}",
-                        screenState = state,
-                        openAppOutcome = KaiOpenAppOutcome.WRONG_PACKAGE_CONFIRMED
-                    )
-                }
-            }
-
-            // Unknown package is unconfirmed, not wrong. Keep it in transition if we saw motion or hint evidence.
-            val unknownButHinted = !observedKnown && hintMatchesTarget
-            if (movedOffLauncher || fingerprintChanged || unknownButHinted) {
-                transitionObserved = true
-            }
-        }
-
-        val terminalState = mostRecentState ?: resolveCanonicalRuntimeState()
-        val terminalOutcome = if (transitionObserved) {
-            KaiOpenAppOutcome.OPEN_TRANSITION_IN_PROGRESS
-        } else {
-            KaiOpenAppOutcome.OPEN_FAILED
-        }
-
-        markActionProgress(
-            beforePackage,
-            beforeObservation.packageName,
-            beforeFingerprint,
-            beforeFingerprint,
-            "open_app verification"
-        )
-
-        return KaiActionExecutionResult(
-            success = false,
-            message = "open_app_classified:$terminalOutcome",
-            screenState = terminalState,
-            openAppOutcome = terminalOutcome
-        )
-    }
-
-    private suspend fun clickSemanticTarget(
-        step: KaiActionStep,
-        state: KaiScreenState,
-        fallbackText: String = step.text
-    ): Boolean {
-        return clickSemanticTargetImpl(step, state, fallbackText)
-    }
-
-    private suspend fun semanticPostVerify(
-        actionName: String,
-        beforePackage: String,
-        beforeFingerprint: String,
-        waitMs: Long,
-        timeoutMs: Long,
-        commandIssued: Boolean,
-        verifyStep: KaiActionStep? = null,
-        allowWeakSuccess: Boolean = true
-    ): KaiActionExecutionResult {
-        val result = semanticPostVerifyImpl(
-            actionName = actionName,
-            beforePackage = beforePackage,
-            beforeFingerprint = beforeFingerprint,
-            waitMs = waitMs,
-            timeoutMs = timeoutMs,
-            commandIssued = commandIssued,
-            verifyStep = verifyStep,
-            allowWeakSuccess = allowWeakSuccess
-        )
-
-        val meta = getLastRefreshMeta()
-        val semanticContinuationActions = setOf(
-            "click_best_match",
-            "open_best_list_item",
-            "focus_best_input",
-            "input_into_best_field",
-            "press_primary_action",
-            "verify_state",
-            "navigate_messages_surface",
-            "navigate_conversation",
-            "open_or_create_note",
-            "focus_note_editor",
-            "open_first_youtube_media"
-        )
-        if (actionName in semanticContinuationActions && (meta.weak || meta.fallback || meta.reusedLastGood)) {
-            if (!result.success) {
-                return result.copy(message = "$actionName failed_under_weak_observation")
-            }
-            return result.copy(message = "$actionName executed_with_guarded_weak_observation")
-        }
-        if (actionName in semanticContinuationActions && result.success) {
-            return result.copy(message = "$actionName executed_on_strong_semantic_evidence")
-        }
-        return result
-    }
-
-    internal fun isMessagingAppPackage(packageName: String): Boolean {
-        val p = packageName.lowercase(Locale.ROOT)
-        return p.contains("instagram") || p.contains("whatsapp") || p.contains("telegram") || p.contains("messag")
-    }
-
-    internal fun expectedThreadKindFor(state: KaiScreenState): String {
-        return if (state.packageName.contains("instagram", true)) "instagram_dm_thread" else "chat_thread"
-    }
-
-    internal fun expectedListKindFor(state: KaiScreenState): String {
-        return if (state.packageName.contains("instagram", true)) "instagram_dm_list" else "chat_list"
-    }
-
-    private suspend fun navigateToMessagesSurface(state: KaiScreenState): KaiActionExecutionResult {
-        return navigateToMessagesSurfaceImpl(state)
-    }
-
-    private suspend fun navigateToConversation(state: KaiScreenState, query: String): KaiActionExecutionResult {
-        return navigateToConversationImpl(state, query)
-    }
-
-    private suspend fun navigateToWritableComposer(state: KaiScreenState): KaiActionExecutionResult {
-        return navigateToWritableComposerImpl(state)
-    }
-
-    private suspend fun normalizeInstagramSurface(state: KaiScreenState, preferThread: Boolean = false): KaiActionExecutionResult {
-        return normalizeInstagramSurfaceImpl(state, preferThread)
-    }
-
-    private suspend fun normalizeNotesSurface(state: KaiScreenState): KaiActionExecutionResult {
-        return normalizeNotesSurfaceImpl(state)
-    }
-
-    private suspend fun normalizeGeneralWorkingSurface(state: KaiScreenState): KaiActionExecutionResult {
-        return normalizeGeneralWorkingSurfaceImpl(state)
-    }
-
-    private suspend fun openFirstYouTubeMedia(state: KaiScreenState): KaiActionExecutionResult {
-        return openFirstYouTubeMediaImpl(state)
-    }
-
-    private suspend fun recoverWrongSurfaceForStep(state: KaiScreenState, step: KaiActionStep): KaiActionExecutionResult {
-        val pkg = state.packageName.lowercase(Locale.ROOT)
-        return when {
-            pkg.contains("instagram") -> {
-                val preferThread = step.cmd in setOf("focus_best_input", "input_into_best_field", "press_primary_action", "open_best_list_item")
-                normalizeInstagramSurface(state, preferThread = preferThread)
-            }
-            pkg.contains("notes") || pkg.contains("keep") -> normalizeNotesSurface(state)
-            else -> {
-                sendKaiCmdSuppressed(
-                    cmd = KaiAccessibilityService.CMD_BACK,
-                    preDelayMs = 70L
-                )
-                val refreshed = requestFreshScreen(2600L)
-                KaiActionExecutionResult(
-                    success = true,
-                    message = "generic_surface_recovery_back",
-                    screenState = refreshed
-                )
-            }
-        }
-    }
-
-    private suspend fun writeIntoBestComposer(text: String): KaiActionExecutionResult {
-        return writeIntoBestComposerImpl(text)
-    }
-
-    private suspend fun pressSendIfPossible(): KaiActionExecutionResult {
-        return pressSendIfPossibleImpl()
-    }
-
-    private suspend fun openOrCreateNoteIfNeeded(state: KaiScreenState): KaiActionExecutionResult {
-        return openOrCreateNoteIfNeededImpl(state)
-    }
-
-    private suspend fun focusNoteEditorIfNeeded(state: KaiScreenState): KaiActionExecutionResult {
-        return focusNoteEditorIfNeededImpl(state)
-    }
-
-    private suspend fun writeIntoBestNoteEditor(text: String): KaiActionExecutionResult {
-        return writeIntoBestNoteEditorImpl(text)
-    }
-
-    suspend fun executeStep(step: KaiActionStep): KaiActionExecutionResult {
-        val cmd = step.cmd.trim().lowercase(Locale.ROOT)
-
-        val policyGuardedCommands = setOf(
-            "click_best_match",
-            "focus_best_input",
-            "input_into_best_field",
-            "press_primary_action",
-            "open_best_list_item",
-            "verify_state"
-        )
-        if (cmd in policyGuardedCommands) {
-            val expectedPkgHint = step.expectedPackage.ifBlank { canonicalBeforePackage() }
-            val gate = ensureStrongObservationGate(
-                expectedPackage = expectedPkgHint,
-                timeoutMs = 2200L,
-                maxAttempts = 2,
-                allowLauncherSurface = false
-            )
-            if (!gate.passed) {
-                val gateState = gate.state
-                val canProceedPragmatically =
-                    gateState.packageName.isNotBlank() &&
-                        !isLauncherPackage(gateState.packageName) &&
-                        (expectedPkgHint.isBlank() || isExpectedPackageMatch(gateState.packageName, expectedPkgHint)) &&
-                        getLastRefreshMeta().changedFromPrevious
-                if (canProceedPragmatically) {
-                    onLog("observation_gate_soft_allow_in_app_continuation: ${gate.reason}")
-                } else {
-                    return KaiActionExecutionResult(
-                        success = false,
-                        message = gate.reason,
-                        screenState = gate.state
-                    )
-                }
-            }
-
-            var current = gate.state
-            var policy = KaiSurfaceActionPolicy.evaluate(step, current)
-            val conservativeSemanticGate = cmd in setOf(
-                "click_best_match",
-                "focus_best_input",
-                "input_into_best_field",
-                "press_primary_action",
-                "open_best_list_item"
-            )
-            val weakForSemanticContinuation =
-                current.isWeakObservation() &&
-                    (current.isOverlayPolluted() || getLastRefreshMeta().fallback || getLastRefreshMeta().reusedLastGood)
-            if (conservativeSemanticGate && weakForSemanticContinuation) {
-                current = requestFreshScreen(1400L, expectedPackage = expectedPkgHint.ifBlank { current.packageName })
-                policy = KaiSurfaceActionPolicy.evaluate(step, current)
-            }
-            if (
-                conservativeSemanticGate &&
-                current.isWeakObservation() &&
-                (getLastRefreshMeta().fallback || getLastRefreshMeta().reusedLastGood) &&
-                !KaiExecutionDecisionAuthority.expectedEvidenceSatisfied(step, current)
-            ) {
-                onLog("semantic_action_guarded_continue_under_weak_observation: runtime_authority_verification_required")
-            }
-            if (!policy.allowed) {
-                val reason = if (policy.reason.isNotBlank()) policy.reason else "surface_transition_required"
-                onLog("surface_action_policy_blocked: $reason -> ${policy.preferredTransition}")
-
-                val softAllow =
-                    current.packageName.isNotBlank() &&
-                        !isLauncherPackage(current.packageName) &&
-                        (expectedPkgHint.isBlank() || isExpectedPackageMatch(current.packageName, expectedPkgHint)) &&
-                        !current.isOverlayPolluted() &&
-                        !current.isWeakObservation() &&
-                        reason.contains("transition", ignoreCase = true)
-
-                if (softAllow) {
-                    onLog("surface_action_policy_soft_allow_in_app_continuation")
-                } else {
-                    if (cmd == "verify_state" && isLauncherPackage(current.packageName)) {
-                        return KaiActionExecutionResult(
-                            success = false,
-                            message = "open_app_needed_from_launcher",
-                            screenState = current
-                        )
-                    }
-
-                    val messagePrefix = when (cmd) {
-                        "focus_best_input", "input_into_best_field" -> "wrong_surface_for_composer"
-                        "open_best_list_item" -> "wrong_surface_for_conversation_open"
-                        "press_primary_action" -> "wrong_surface_for_send"
-                        "verify_state" -> "verify_requires_transition"
-                        else -> "weak_surface_evidence"
-                    }
-
-                    return KaiActionExecutionResult(
-                        success = false,
-                        message = "$messagePrefix:$reason",
-                        screenState = current
-                    )
-                }
-            }
-        }
-
-        return when (cmd) {
-            "wait" -> {
-                val ms = step.waitMs.coerceIn(80L, 12000L)
-                onLog("Waiting ${ms}ms")
-                delay(ms)
-                KaiActionExecutionResult(
-                    success = true,
-                    message = "Waited ${ms}ms"
-                )
-            }
-
-            "read_screen" -> {
-                onLog("Refreshing screen understanding")
-                val state = requestFreshScreen(step.timeoutMs)
-                val meta = getLastRefreshMeta()
-
-                val hardStalledWeakRead =
-                    meta.weak &&
-                        meta.stale &&
-                        consecutiveWeakReads >= 8 &&
-                        consecutiveStaleReads >= 8 &&
-                        meta.reusedLastGood
-
-                if (hardStalledWeakRead) {
-                    onLog("Screen observation appears stalled/weak; returning strict failure")
-                    KaiActionExecutionResult(
-                        success = false,
-                        message = "Screen observation is weak/stalled, cannot verify progress",
-                        screenState = state
-                    )
-                } else {
-                    KaiActionExecutionResult(
-                        success = true,
-                        message = when {
-                            meta.usable -> "Screen observation refreshed"
-                            meta.fallback -> "Screen observation refreshed using fallback"
-                            meta.weak && meta.changedFromPrevious -> "Screen observation refreshed weakly"
-                            meta.reusedLastGood -> "Reused last known good screen dump"
-                            else -> "Screen observation appears stable"
-                        },
-                        screenState = state
-                    )
-                }
-            }
-
-            "wait_for_text" -> {
-                waitForText(
-                    target = step.text.ifBlank { step.note },
-                    timeoutMs = step.timeoutMs
-                )
-            }
-
-            "open_app" -> {
-                val canonicalBefore = resolveCanonicalRuntimeState()
-                val beforeObservation = KaiObservation(
-                    packageName = canonicalBefore.packageName,
-                    screenPreview = canonicalBefore.rawDump,
-                    elements = canonicalBefore.elements,
-                    screenKind = canonicalBefore.screenKind,
-                    semanticConfidence = canonicalBefore.semanticConfidence,
-                    updatedAt = canonicalBefore.updatedAt
-                )
-                val beforeFingerprint = fingerprintFor(
-                    beforeObservation.packageName,
-                    beforeObservation.screenPreview
-                )
-                val beforePackage = beforeObservation.packageName
-
-                val launchScreenState = canonicalRuntimeState ?: requestFreshScreen(1800L)
-                val targetHint = inferAppHintFromText(step.text)
-
-                var actionMode = "none"
-                var workingLauncherState = launchScreenState
-
-                val candidatePackage = resolveTargetAppPackage(step.text, launchScreenState)
-                val targetPackage = candidatePackage ?: ""
-                if (candidatePackage != null) {
-                    onLog("open_app: resolved package '$candidatePackage' from '${step.text}', attempting direct launch.")
-                    if (launchAppByPackage(candidatePackage)) {
-                        onLog("open_app: direct launch intent attempted for $candidatePackage")
-                        actionMode = "direct_intent"
-                    } else {
-                        onLog("open_app: direct launch intent failed for $candidatePackage")
-                    }
-                } else {
-                    onLog("open_app: could not resolve package for '${step.text}'")
-                }
-
-                if (actionMode != "direct_intent" && !isLauncherSurfaceCoherent(workingLauncherState)) {
-                    val refreshed = requestFreshScreen(1600L)
-                    if (isLauncherSurfaceCoherent(refreshed)) {
-                        workingLauncherState = refreshed
-                    }
-                }
-
-                if (actionMode != "direct_intent" && isLauncherSurfaceCoherent(workingLauncherState)) {
-                    val (openedViaLauncher, launcherMode) = launchViaVisibleLauncherCandidate(
-                        launcherState = workingLauncherState,
-                        rawTarget = step.text,
-                        inferredHint = targetHint,
-                        targetPackage = targetPackage,
-                        reason = "primary_recovery_after_direct_launch"
-                    )
-                    if (openedViaLauncher) {
-                        actionMode = "launcher_visible_target_$launcherMode"
-                    } else {
-                        onLog("open_app: no strong visible launcher candidate for '${step.text}'")
-                    }
-                }
-
-                if (actionMode != "direct_intent" && actionMode == "none" && hasLauncherIconForTarget(workingLauncherState, step.text)) {
-                    onLog("open_app: launcher text variants visible for '${step.text}', attempting click_text.")
-                    clickTextVariants(step.text).forEach { variant ->
-                        sendKaiCmdSuppressed(
-                            cmd = KaiAccessibilityService.CMD_CLICK_TEXT,
-                            text = variant,
-                            preDelayMs = 60L
-                        )
-                    }
-                    actionMode = "click_text"
-                }
-
-                if (actionMode != "direct_intent" && actionMode != "click_text") {
-                    if (step.x != null && step.y != null) {
-                        onLog("open_app: coordinate fallback for '${step.text}' at x=${step.x}, y=${step.y}")
-                        sendKaiCmdSuppressed(
-                            cmd = KaiAccessibilityService.CMD_TAP_XY,
-                            x = step.x,
-                            y = step.y,
-                            preDelayMs = 80L
-                        )
-                        actionMode = "coordinate_fallback"
-                    } else {
-                        onLog("open_app: no valid coordinates available for '${step.text}'; trying CMD_OPEN_APP fallback.")
-                        sendKaiCmdSuppressed(
-                            cmd = KaiAccessibilityService.CMD_OPEN_APP,
-                            text = step.text,
-                            preDelayMs = 90L
-                        )
-                        actionMode = "open_app_cmd"
-                    }
-                }
-
-                delay(step.waitMs.coerceAtLeast(700L))
-
-                val verifyResult = verifyOpenAppInternal(
-                    rawTargetText = step.text,
-                    targetHint = targetHint,
-                    targetPackage = targetPackage,
-                    beforeObservation = beforeObservation,
-                    beforeFingerprint = beforeFingerprint,
-                    beforePackage = beforePackage
-                )
-
-                onLog("open_app verification result: ${verifyResult.message}")
-
-                val finalState = verifyResult.screenState ?: resolveCanonicalRuntimeState()
-                val afterFingerprint = fingerprintFor(finalState.packageName, finalState.rawDump)
-                val afterPackage = finalState.packageName
-                val runtimePrompt = KaiAgentController.getSnapshot().customPrompt
-                    .ifBlank { KaiAgentController.getSnapshot().currentGoal }
-                    .ifBlank { step.text }
-                val stageSnapshot = KaiTaskStageEngine.evaluate(
-                    userPrompt = runtimePrompt,
-                    currentState = finalState,
-                    openAppOutcome = verifyResult.openAppOutcome
-                )
-
-                markActionProgress(
-                    beforePackage,
-                    afterPackage,
-                    beforeFingerprint,
-                    afterFingerprint,
-                    "open_app"
-                )
-
-                return KaiActionExecutionResult(
-                    success = verifyResult.success,
-                    message = buildString {
-                        append("Requested app open: ${step.text} (strategy=$actionMode)")
-                        append(" | ${verifyResult.message}")
-                        if (stageSnapshot.appEntryComplete && !stageSnapshot.finalGoalComplete) {
-                            append(" | stage_continue=${stageSnapshot.nextSemanticAction}")
-                        }
-                    },
-                    screenState = finalState,
-                    openAppOutcome = verifyResult.openAppOutcome
-                )
-            }
-
-            "click_text" -> {
-                val beforeFingerprint = canonicalBeforeFingerprint()
-                val beforePackage = canonicalBeforePackage()
-
-                var clickDispatched = false
-
-                suspend fun executeClickTextTargets() {
-                    clickTextVariants(step.text).forEach { variant ->
-                        sendKaiCmdSuppressed(
-                            cmd = KaiAccessibilityService.CMD_CLICK_TEXT,
-                            text = variant,
-                            preDelayMs = 70L
-                        )
-                        clickDispatched = true
-                    }
-                }
-
-                suspend fun applyGestureClickFallback() {
-                    onLog("click_text gesture fallback skipped: no safe coordinates")
-                }
-
-                suspend fun performClickAttempt(): KaiScreenState {
-                    executeClickTextTargets()
-                    delay(step.waitMs.coerceAtLeast(300L))
-                    return requestFreshScreen(3000L)
-                }
-
-                var state = performClickAttempt()
-                var meta = getLastRefreshMeta()
-                var afterFingerprint = fingerprintFor(state.packageName, state.rawDump)
-                var afterPackage = state.packageName
-                var fingerprintChanged = !sameFingerprint(beforeFingerprint, afterFingerprint)
-                var packageChanged = isExternalPackageChange(beforePackage, afterPackage)
-                var hasMeaningfulChange = fingerprintChanged || packageChanged || (meta.changedFromPrevious && !meta.reusedLastGood)
-
-                if (!hasMeaningfulChange && state.containsText(step.text)) {
-                    onLog("click_text fallback attempt (click_text + gesture) for '${step.text}'")
-                    executeClickTextTargets()
-                    delay(120L)
-                    applyGestureClickFallback()
-                    delay(180L)
-
-                    state = requestFreshScreen(3000L)
-                    meta = getLastRefreshMeta()
-                    afterFingerprint = fingerprintFor(state.packageName, state.rawDump)
-                    afterPackage = state.packageName
-                    fingerprintChanged = !sameFingerprint(beforeFingerprint, afterFingerprint)
-                    packageChanged = isExternalPackageChange(beforePackage, afterPackage)
-                    hasMeaningfulChange = fingerprintChanged || packageChanged || (meta.changedFromPrevious && !meta.reusedLastGood)
-                }
-
-                if (!hasMeaningfulChange && state.containsText(step.text)) {
-                    onLog("click_text second fallback (gesture center) for '${step.text}'")
-                    applyGestureClickFallback()
-                    delay(180L)
-
-                    state = requestFreshScreen(3000L)
-                    meta = getLastRefreshMeta()
-                    afterFingerprint = fingerprintFor(state.packageName, state.rawDump)
-                    afterPackage = state.packageName
-                    fingerprintChanged = !sameFingerprint(beforeFingerprint, afterFingerprint)
-                    packageChanged = isExternalPackageChange(beforePackage, afterPackage)
-                    hasMeaningfulChange = fingerprintChanged || packageChanged || (meta.changedFromPrevious && !meta.reusedLastGood)
-                }
-
-                markActionProgress(beforePackage, afterPackage, beforeFingerprint, afterFingerprint, "click_text verification")
-
-                if (hasMeaningfulChange) {
-                    KaiActionExecutionResult(
-                        success = true,
-                        message = "Requested click: ${step.text}",
-                        screenState = state
-                    )
-                } else {
-                    KaiActionExecutionResult(
-                        success = false,
-                        message = if (clickDispatched || meta.weak) {
-                            "click_text expected evidence not satisfied"
-                        } else {
-                            "click_text had no visible effect: ${step.text}"
-                        },
-                        screenState = state
-                    )
-                }
-            }
-
-            "click_best_match" -> {
-                val beforeFingerprint = canonicalBeforeFingerprint()
-                val beforePackage = canonicalBeforePackage()
-                val state = requestFreshScreen(2400L)
-
-                if (
-                    step.strategy.contains("messages", true) ||
-                    step.selectorRole.equals("tab", true) &&
-                    KaiScreenStateParser.normalize(step.selectorText.ifBlank { step.text }).contains("message")
-                ) {
-                    return navigateToMessagesSurface(state)
-                }
-
-                // Semantic execution fallback: attempt structured target first, then primitive click_text/tap.
-                val issued = clickSemanticTarget(step = step, state = state, fallbackText = step.text)
-
-                val expectedKind = when {
-                    step.selectorRole.equals("tab", true) &&
-                        KaiScreenStateParser.normalize(step.selectorText.ifBlank { step.text }).contains("message") -> expectedListKindFor(state)
-                    state.packageName.contains("youtube", true) -> "youtube_working_surface"
-                    state.packageName.contains("instagram", true) && step.selectorRole.equals("chat_item", true) -> "instagram_dm_thread"
-                    state.packageName.contains("notes", true) || state.packageName.contains("keep", true) -> "notes_list"
-                    else -> step.expectedScreenKind.ifBlank { "detail" }
-                }
-
-                semanticPostVerify(
-                    actionName = "click_best_match",
-                    beforePackage = beforePackage,
-                    beforeFingerprint = beforeFingerprint,
-                    waitMs = step.waitMs,
-                    timeoutMs = step.timeoutMs,
-                    commandIssued = issued,
-                    verifyStep = step.copy(
-                        expectedPackage = step.expectedPackage.ifBlank { state.packageName },
-                        expectedScreenKind = expectedKind
-                    ),
-                    allowWeakSuccess = true
-                )
-            }
-
-            "focus_best_input" -> {
-                val beforeFingerprint = canonicalBeforeFingerprint()
-                val beforePackage = canonicalBeforePackage()
-                val state = requestFreshScreen(2400L)
-
-                if (state.packageName.contains("notes", true)) {
-                    if (state.isSearchLikeSurface()) {
-                        return KaiActionExecutionResult(
-                            success = false,
-                            message = "wrong_surface_for_create_note",
-                            screenState = state
-                        )
-                    }
-                    if (!(state.isStrictVerifiedNotesEditorSurface() || state.isNotesListSurface())) {
-                        return KaiActionExecutionResult(
-                            success = false,
-                            message = "wrong_surface_for_create_note",
-                            screenState = state
-                        )
-                    }
-                    val open = openOrCreateNoteIfNeeded(state)
-                    val focus = focusNoteEditorIfNeeded(open.screenState ?: state)
-                    return if (focus.success) focus else open
-                }
-
-                if (isMessagingAppPackage(state.packageName)) {
-                    if (state.isCameraOrMediaOverlaySurface() || state.isInstagramSearchSurface() || state.isSearchLikeSurface()) {
-                        return KaiActionExecutionResult(
-                            success = false,
-                            message = "wrong_surface_for_composer",
-                            screenState = state
-                        )
-                    }
-                    if (!(state.isStrictVerifiedDmThreadSurface() || state.isChatComposerSurface())) {
-                        return KaiActionExecutionResult(
-                            success = false,
-                            message = "wrong_surface_for_composer",
-                            screenState = state
-                        )
-                    }
-                    val navComposer = navigateToWritableComposer(state)
-                    if (navComposer.success) return navComposer
-                }
-
-                val inputCandidate = state.findBestInputField(
-                    step.selectorHint.ifBlank { step.selectorText.ifBlank { step.text } }
-                )
-
-                val issued = if (inputCandidate != null) {
-                    val label = semanticLabel(inputCandidate)
-                    if (label.isNotBlank()) {
-                        sendKaiCmdSuppressed(
-                            cmd = KaiAccessibilityService.CMD_CLICK_TEXT,
-                            text = label,
-                            preDelayMs = 70L
-                        )
-                        true
-                    } else {
-                        val (cx, cy) = parseCenterFromBounds(inputCandidate.bounds)
-                        if (cx != null && cy != null) {
-                            sendKaiCmdSuppressed(
-                                cmd = KaiAccessibilityService.CMD_TAP_XY,
-                                x = cx,
-                                y = cy,
-                                preDelayMs = 70L
-                            )
-                            true
-                        } else {
-                            false
-                        }
-                    }
-                } else {
-                    clickSemanticTarget(step = step.copy(selectorRole = "input"), state = state, fallbackText = step.selectorText)
-                }
-
-                val expectedKind = when {
-                    state.packageName.contains("notes", true) || state.packageName.contains("keep", true) -> "notes_editor"
-                    state.packageName.contains("instagram", true) -> "instagram_dm_thread"
-                    isMessagingAppPackage(state.packageName) -> "chat_thread"
-                    else -> step.expectedScreenKind
-                }
-
-                semanticPostVerify(
-                    actionName = "focus_best_input",
-                    beforePackage = beforePackage,
-                    beforeFingerprint = beforeFingerprint,
-                    waitMs = step.waitMs,
-                    timeoutMs = step.timeoutMs,
-                    commandIssued = issued,
-                    verifyStep = step.copy(
-                        expectedPackage = step.expectedPackage.ifBlank { state.packageName },
-                        expectedScreenKind = expectedKind
-                    ),
-                    allowWeakSuccess = true
-                )
-            }
-
-            "input_into_best_field" -> {
-                val state = requestFreshScreen(2500L)
-
-                if (state.packageName.contains("notes", true)) {
-                    if (state.isSearchLikeSurface()) {
-                        return KaiActionExecutionResult(
-                            success = false,
-                            message = "wrong_surface_for_create_note",
-                            screenState = state
-                        )
-                    }
-                    if (!(state.isStrictVerifiedNotesEditorSurface() || state.isNotesTitleInputSurface() || state.isNotesBodyInputSurface())) {
-                        return KaiActionExecutionResult(
-                            success = false,
-                            message = "wrong_surface_for_create_note",
-                            screenState = state
-                        )
-                    }
-                    if (step.text.isNotBlank()) return writeIntoBestNoteEditor(step.text)
-                }
-
-                if (isMessagingAppPackage(state.packageName) && step.text.isNotBlank()) {
-                    if (state.isCameraOrMediaOverlaySurface() || state.isInstagramSearchSurface() || state.isSearchLikeSurface()) {
-                        return KaiActionExecutionResult(
-                            success = false,
-                            message = "wrong_surface_for_composer",
-                            screenState = state
-                        )
-                    }
-                    if (!(state.isStrictVerifiedDmThreadSurface() || state.isChatComposerSurface())) {
-                        return KaiActionExecutionResult(
-                            success = false,
-                            message = "wrong_surface_for_composer",
-                            screenState = state
-                        )
-                    }
-                    return writeIntoBestComposer(step.text)
-                }
-
-                val beforeFingerprint = canonicalBeforeFingerprint()
-                val beforePackage = canonicalBeforePackage()
-
-                val inputCandidate = state.findBestInputField(step.selectorHint.ifBlank { step.selectorText })
-                val focusIssued = if (inputCandidate != null) {
-                    val label = semanticLabel(inputCandidate)
-                    if (label.isNotBlank()) {
-                        sendKaiCmdSuppressed(
-                            cmd = KaiAccessibilityService.CMD_CLICK_TEXT,
-                            text = label,
-                            preDelayMs = 60L,
-                            postDelayMs = 90L
-                        )
-                        true
-                    } else {
-                        val (cx, cy) = parseCenterFromBounds(inputCandidate.bounds)
-                        if (cx != null && cy != null) {
-                            sendKaiCmdSuppressed(
-                                cmd = KaiAccessibilityService.CMD_TAP_XY,
-                                x = cx,
-                                y = cy,
-                                preDelayMs = 60L,
-                                postDelayMs = 90L
-                            )
-                            true
-                        } else {
-                            false
-                        }
-                    }
-                } else {
-                    false
-                }
-
-                val textToType = step.text.ifBlank { step.selectorText }
-                val typeIssued = if (textToType.isNotBlank()) {
-                    sendKaiCmdSuppressed(
-                        cmd = KaiAccessibilityService.CMD_TYPE,
-                        text = textToType,
-                        preDelayMs = 60L
-                    )
-                    true
-                } else {
-                    false
-                }
-
-                val expectedKind = when {
-                    state.packageName.contains("notes", true) || state.packageName.contains("keep", true) -> "notes_editor"
-                    state.packageName.contains("instagram", true) -> "instagram_dm_thread"
-                    isMessagingAppPackage(state.packageName) -> "chat_thread"
-                    else -> step.expectedScreenKind
-                }
-
-                semanticPostVerify(
-                    actionName = "input_into_best_field",
-                    beforePackage = beforePackage,
-                    beforeFingerprint = beforeFingerprint,
-                    waitMs = step.waitMs.coerceAtLeast(620L),
-                    timeoutMs = step.timeoutMs,
-                    commandIssued = focusIssued || typeIssued,
-                    verifyStep = step.copy(
-                        expectedPackage = step.expectedPackage.ifBlank { state.packageName },
-                        expectedScreenKind = expectedKind
-                    ),
-                    allowWeakSuccess = true
-                )
-            }
-
-            "press_primary_action" -> {
-                if (
-                    step.selectorRole.equals("send_button", true) ||
-                    KaiScreenStateParser.normalize(step.selectorText.ifBlank { step.text }).let {
-                        it.contains("send") || it.contains("ارسال") || it.contains("reply")
-                    }
-                ) {
-                    return pressSendIfPossible()
-                }
-
-                if (step.selectorRole.equals("create_button", true) || step.strategy.contains("create", true)) {
-                    val now = requestFreshScreen(2200L)
-                    if (now.isSearchLikeSurface()) {
-                        return KaiActionExecutionResult(
-                            success = false,
-                            message = "wrong_surface_for_create_note",
-                            screenState = now
-                        )
-                    }
-                    if (!(now.isNotesListSurface() || now.isNotesEditorSurface() || now.isNotesTitleInputSurface() || now.isNotesBodyInputSurface())) {
-                        return KaiActionExecutionResult(
-                            success = false,
-                            message = "wrong_surface_for_create_note",
-                            screenState = now
-                        )
-                    }
-                }
-
-                val beforeFingerprint = canonicalBeforeFingerprint()
-                val beforePackage = canonicalBeforePackage()
-                val state = requestFreshScreen(2400L)
-
-                val primary = state.findPrimaryAction()
-                val issued = if (primary != null) {
-                    val primaryLabel = semanticLabel(primary)
-                    if (primaryLabel.isNotBlank()) {
-                        sendKaiCmdSuppressed(
-                            cmd = KaiAccessibilityService.CMD_CLICK_TEXT,
-                            text = primaryLabel,
-                            preDelayMs = 70L
-                        )
-                        true
-                    } else {
-                        val (cx, cy) = parseCenterFromBounds(primary.bounds)
-                        if (cx != null && cy != null) {
-                            sendKaiCmdSuppressed(
-                                cmd = KaiAccessibilityService.CMD_TAP_XY,
-                                x = cx,
-                                y = cy,
-                                preDelayMs = 70L
-                            )
-                            true
-                        } else {
-                            false
-                        }
-                    }
-                } else false
-
-                semanticPostVerify(
-                    actionName = "press_primary_action",
-                    beforePackage = beforePackage,
-                    beforeFingerprint = beforeFingerprint,
-                    waitMs = step.waitMs,
-                    timeoutMs = step.timeoutMs,
-                    commandIssued = issued,
-                    verifyStep = step.copy(
-                        expectedPackage = step.expectedPackage.ifBlank { state.packageName },
-                        expectedScreenKind = step.expectedScreenKind.ifBlank {
-                            if (state.packageName.contains("notes", true) || state.packageName.contains("keep", true)) {
-                                "notes_editor"
-                            } else {
-                                "detail"
-                            }
-                        }
-                    ),
-                    allowWeakSuccess = true
-                )
-            }
-
-            "open_best_list_item" -> {
-                val state = requestFreshScreen(2500L)
-
-                if (state.isWeakObservation() || state.isOverlayPolluted()) {
-                    return KaiActionExecutionResult(
-                        success = false,
-                        message = "semantic_continuation_requires_stronger_observation",
-                        screenState = state
-                    )
-                }
-
-                if (state.packageName.contains("youtube", true)) {
-                    return openFirstYouTubeMedia(state)
-                }
-
-                if ((state.packageName.contains("notes", true) || state.packageName.contains("keep", true)) &&
-                    (state.isSheetOrDialogSurface() || state.isSearchLikeSurface())
-                ) {
-                    return KaiActionExecutionResult(
-                        success = false,
-                        message = "wrong_surface_for_create_note",
-                        screenState = state
-                    )
-                }
-
-                if (step.selectorRole.equals("chat_item", true) || step.strategy.contains("conversation", true)) {
-                    return navigateToConversation(state, step.selectorText.ifBlank { step.text })
-                }
-
-                val genericQuery = step.selectorText.ifBlank { step.text }.trim()
-                if (genericQuery.isBlank()) {
-                    return KaiActionExecutionResult(
-                        success = false,
-                        message = "ambiguous_list_target_requires_specific_selector",
-                        screenState = state
-                    )
-                }
-
-                if (isMessagingAppPackage(state.packageName) && !(state.isInstagramDmListSurface() || state.isChatListScreen())) {
-                    if (state.isCameraOrMediaOverlaySurface() || state.isInstagramSearchSurface() || state.isSearchLikeSurface()) {
-                        return KaiActionExecutionResult(
-                            success = false,
-                            message = "wrong_surface_for_conversation_open",
-                            screenState = state
-                        )
-                    }
-                    return KaiActionExecutionResult(
-                        success = false,
-                        message = "wrong_surface_for_conversation_open",
-                        screenState = state
-                    )
-                }
-
-                val beforeFingerprint = canonicalBeforeFingerprint()
-                val beforePackage = canonicalBeforePackage()
-
-                val target = state.findBestClickableTarget(genericQuery)
-                val issued = if (target != null) {
-                    val label = semanticLabel(target)
-                    if (label.isNotBlank()) {
-                        sendKaiCmdSuppressed(
-                            cmd = KaiAccessibilityService.CMD_CLICK_TEXT,
-                            text = label,
-                            preDelayMs = 70L
-                        )
-                        true
-                    } else {
-                        val (cx, cy) = parseCenterFromBounds(target.bounds)
-                        if (cx != null && cy != null) {
-                            sendKaiCmdSuppressed(
-                                cmd = KaiAccessibilityService.CMD_TAP_XY,
-                                x = cx,
-                                y = cy,
-                                preDelayMs = 70L
-                            )
-                            true
-                        } else {
-                            false
-                        }
-                    }
-                } else false
-
-                val expectedKind = when {
-                    state.packageName.contains("instagram", true) -> "instagram_dm_thread"
-                    isMessagingAppPackage(state.packageName) -> "chat_thread"
-                    state.packageName.contains("notes", true) || state.packageName.contains("keep", true) -> "notes_editor"
-                    state.packageName.contains("youtube", true) -> "detail"
-                    else -> step.expectedScreenKind.ifBlank { "detail" }
-                }
-
-                semanticPostVerify(
-                    actionName = "open_best_list_item",
-                    beforePackage = beforePackage,
-                    beforeFingerprint = beforeFingerprint,
-                    waitMs = step.waitMs,
-                    timeoutMs = step.timeoutMs,
-                    commandIssued = issued,
-                    verifyStep = step.copy(
-                        expectedPackage = step.expectedPackage.ifBlank { state.packageName },
-                        expectedScreenKind = expectedKind
-                    ),
-                    allowWeakSuccess = true
-                )
-            }
-
-            "verify_state" -> {
-                val state = requestFreshScreen(step.timeoutMs)
-                if (isLauncherPackage(state.packageName)) {
-                    val kind = KaiScreenStateParser.normalize(step.expectedScreenKind)
-                    val appTargetedKind = kind in setOf(
-                        "instagram_dm_list",
-                        "chat_list",
-                        "list",
-                        "instagram_dm_thread",
-                        "chat_thread",
-                        "notes_editor",
-                        "notes_title_input",
-                        "notes_body_input",
-                        "editor"
-                    )
-                    if (appTargetedKind || step.expectedPackage.isNotBlank()) {
-                        return KaiActionExecutionResult(
-                            success = false,
-                            message = "open_app_needed_from_launcher",
-                            screenState = state
-                        )
-                    }
-                }
-                val satisfied = expectedStateSatisfied(step, state)
-                if (satisfied) {
-                    KaiActionExecutionResult(
-                        success = true,
-                        message = "verify_state matched expected evidence",
-                        screenState = state
-                    )
-                } else {
-                    val kind = KaiScreenStateParser.normalize(step.expectedScreenKind)
-                    if (kind in setOf("instagram_dm_list", "chat_list")) {
-                        val nav = navigateToMessagesSurface(state)
-                        val finalState = nav.screenState ?: state
-                        val finalSatisfied = expectedStateSatisfied(step, finalState)
-                        return KaiActionExecutionResult(
-                            success = finalSatisfied,
-                            message = if (finalSatisfied) {
-                                "verify_state matched after semantic navigation"
-                            } else {
-                                "verify_state still not matched after navigation"
-                            },
-                            screenState = finalState
-                        )
-                    }
-
-                    if (kind in setOf("instagram_dm_thread", "chat_thread")) {
-                        val nav = navigateToConversation(state, step.selectorText.ifBlank { step.text })
-                        val finalState = nav.screenState ?: state
-                        val finalSatisfied = expectedStateSatisfied(step, finalState)
-                        return KaiActionExecutionResult(
-                            success = finalSatisfied,
-                            message = if (finalSatisfied) {
-                                "verify_state matched after conversation navigation"
-                            } else {
-                                "verify_state still not matched after conversation navigation"
-                            },
-                            screenState = finalState
-                        )
-                    }
-
-                    if (kind in setOf("notes_editor", "notes_title_input", "notes_body_input")) {
-                        val open = openOrCreateNoteIfNeeded(state)
-                        val focus = focusNoteEditorIfNeeded(open.screenState ?: state)
-                        val finalState = focus.screenState ?: open.screenState ?: state
-                        val finalSatisfied = expectedStateSatisfied(step, finalState)
-                        return KaiActionExecutionResult(
-                            success = finalSatisfied,
-                            message = if (finalSatisfied) {
-                                "verify_state matched after notes semantic recovery"
-                            } else {
-                                "verify_state did not match expected evidence"
-                            },
-                            screenState = finalState
-                        )
-                    }
-
-                    KaiActionExecutionResult(
-                        success = !state.isLauncher() && !state.isOverlayPolluted() &&
-                            step.expectedPackage.isNotBlank() &&
-                            isExpectedPackageMatch(state.packageName, step.expectedPackage),
-                        message = if (!state.isLauncher() && !state.isOverlayPolluted() &&
-                            step.expectedPackage.isNotBlank() &&
-                            isExpectedPackageMatch(state.packageName, step.expectedPackage)
-                        ) {
-                            "verify_state practical progress accepted in target app"
-                        } else {
-                            "verify_state did not match expected evidence"
-                        },
-                        screenState = state
-                    )
-                }
-            }
-
-            "long_press_text" -> executeSimpleGesture(KaiAccessibilityService.CMD_LONG_PRESS_TEXT, "long_press_text", step, "Requested long press: ${step.text}")
-
-            "input_text" -> {
-                val beforeState = requestFreshScreen(2300L)
-                val beforeFingerprint = fingerprintFor(beforeState.packageName, beforeState.rawDump)
-                val beforePackage = beforeState.packageName
-                sendKaiCmdSuppressed(
-                    cmd = KaiAccessibilityService.CMD_TYPE,
-                    text = step.text,
-                    preDelayMs = 60L
-                )
-
-                val derivedExpectedKind = when {
-                    beforeState.packageName.contains("notes", true) || beforeState.packageName.contains("keep", true) -> "notes_editor"
-                    beforeState.packageName.contains("instagram", true) -> "instagram_dm_thread"
-                    isMessagingAppPackage(beforeState.packageName) -> "chat_thread"
-                    else -> ""
-                }
-                val verifyStep = step.copy(
-                    expectedPackage = step.expectedPackage.ifBlank { beforeState.packageName },
-                    expectedScreenKind = step.expectedScreenKind.ifBlank { derivedExpectedKind },
-                    expectedTexts = if (step.expectedTexts.isNotEmpty()) step.expectedTexts else emptyList()
-                )
-
-                if (verifyStep.expectedScreenKind.isBlank() && verifyStep.expectedTexts.isEmpty()) {
-                    return KaiActionExecutionResult(
-                        success = false,
-                        message = "input_text_missing_expected_evidence",
-                        screenState = beforeState
-                    )
-                }
-
-                semanticPostVerify(
-                    actionName = "input_text",
-                    beforePackage = beforePackage,
-                    beforeFingerprint = beforeFingerprint,
-                    waitMs = step.waitMs.coerceAtLeast(650L),
-                    timeoutMs = step.timeoutMs,
-                    commandIssued = true,
-                    verifyStep = verifyStep,
-                    allowWeakSuccess = false
-                )
-            }
-
-            "scroll" -> executeSimpleGesture(KaiAccessibilityService.CMD_SCROLL, "scroll", step, "Requested scroll ${step.dir} x${step.times}")
-
-            "back" -> executeSimpleGesture(KaiAccessibilityService.CMD_BACK, "back", step, "Requested back")
-
-            "home" -> executeSimpleGesture(KaiAccessibilityService.CMD_HOME, "home", step, "Requested home")
-
-            "recents" -> executeSimpleGesture(KaiAccessibilityService.CMD_RECENTS, "recents", step, "Requested recents")
-
-            "tap_xy" -> executeSimpleGesture(KaiAccessibilityService.CMD_TAP_XY, "tap_xy", step, "Requested tap_xy")
-
-            "long_press_xy" -> executeSimpleGesture(KaiAccessibilityService.CMD_LONG_PRESS_XY, "long_press_xy", step, "Requested long_press_xy")
-
-            "swipe_xy" -> executeSimpleGesture(KaiAccessibilityService.CMD_SWIPE_XY, "swipe_xy", step, "Requested swipe_xy")
-
-            else -> {
-                KaiActionExecutionResult(
-                    success = false,
-                    message = "Unknown step command: $cmd",
-                    hardStop = true
-                )
-            }
-        }
-    }
-
-    private suspend fun waitForText(
-        target: String,
-        timeoutMs: Long
-    ): KaiActionExecutionResult {
-        val cleanTarget = target.trim()
-        if (cleanTarget.isBlank()) {
-            return KaiActionExecutionResult(
-                success = false,
-                message = "wait_for_text needs a target text"
-            )
-        }
-
-        val start = System.currentTimeMillis()
-        while (System.currentTimeMillis() - start < timeoutMs.coerceIn(800L, 18000L)) {
-            val state = requestFreshScreen(2200L)
-            if (state.containsText(cleanTarget)) {
-                lastGoodScreenState = state
-                lastAcceptedFingerprint = fingerprintFor(state.packageName, state.rawDump)
-                consecutiveWeakReads = 0
-                consecutiveStaleReads = 0
-                consecutiveNoProgressActions = 0
-                return KaiActionExecutionResult(
-                    success = true,
-                    message = "Text appeared: $cleanTarget",
-                    screenState = state
-                )
-            }
-            delay(320L)
-        }
-
-        val latest = canonicalRuntimeState ?: lastGoodScreenState ?: KaiAgentController.getLatestScreenState()
-        return KaiActionExecutionResult(
-            success = false,
-            message = "Timed out waiting for text: $cleanTarget",
-            screenState = latest
-        )
-    }
-}
-// ── KaiExecutorSemanticActions ──────────────────────────────────────────────
-
-
-private fun isWeakFallbackSelector(text: String): Boolean {
-    val n = KaiScreenStateParser.normalize(text)
-    if (n.length < 3) return true
-    val weakTokens = setOf("open", "go", "next", "ok", "click", "press", "tap", "item", "chat", "message", "note", "new")
-    return n in weakTokens
-}
-
-private fun KaiActionExecutor.isStrongComposerSurface(state: KaiScreenState): Boolean {
-    return (state.isStrictVerifiedDmThreadSurface() || state.isChatComposerSurface()) &&
-        state.findBestInputField("message") != null &&
-        state.findSendAction() != null
-}
-
-private fun KaiActionExecutor.isStrongNotesEditorSurface(state: KaiScreenState): Boolean {
-    return (state.isStrictVerifiedNotesEditorSurface() || state.isNotesTitleInputSurface() || state.isNotesBodyInputSurface()) &&
-        state.findBestInputField("body") != null
-}
-
-private fun KaiActionExecutor.hasTypedEvidence(state: KaiScreenState, typedText: String): Boolean {
-    val nText = KaiScreenStateParser.normalize(typedText)
-    if (nText.isBlank()) return false
-    val fields = state.elements.filter { it.editable || it.roleGuess in setOf("input", "editor") }
-    return fields.any {
-        val joined = KaiScreenStateParser.normalize(
-            listOf(it.text, it.contentDescription, it.hint, it.viewId).joinToString(" ")
-        )
-        joined.contains(nText) || nText.contains(joined)
-    }
-}
-
-private fun isCriticalSemanticAction(actionName: String): Boolean {
-    return actionName.trim().lowercase() in setOf(
-        "open_app",
-        "open_best_list_item",
-        "click_best_match",
-        "focus_best_input",
-        "input_into_best_field",
-        "input_text",
-        "press_primary_action",
-        "press_send_if_possible",
-        "write_into_composer",
-        "write_into_note_editor",
-        "verify_state"
-    )
-}
-
-internal suspend fun KaiActionExecutor.clickSemanticTargetImpl(
-    step: KaiActionStep,
-    state: KaiScreenState,
-    fallbackText: String = step.text
-): Boolean {
-    val element = selectSemanticElement(state, step)
-    val label = element?.let { semanticLabel(it) }.orEmpty()
-
-    if (label.isNotBlank()) {
-        sendKaiCmdSuppressed(
-            cmd = KaiAccessibilityService.CMD_CLICK_TEXT,
-            text = label,
-            preDelayMs = 70L
-        )
-        return true
-    }
-
-    if (fallbackText.isNotBlank() && !isWeakFallbackSelector(fallbackText)) {
-        sendKaiCmdSuppressed(
-            cmd = KaiAccessibilityService.CMD_CLICK_TEXT,
-            text = fallbackText,
-            preDelayMs = 70L
-        )
-        return true
-    }
-
-    val (cx, cy) = element?.let { parseCenterFromBounds(it.bounds) } ?: Pair(null, null)
-    if (cx != null && cy != null) {
-        sendKaiCmdSuppressed(
-            cmd = KaiAccessibilityService.CMD_TAP_XY,
-            x = cx,
-            y = cy,
-            preDelayMs = 70L
-        )
-        return true
-    }
-
-    if (step.x != null || step.y != null) {
-        sendKaiCmdSuppressed(
-            cmd = KaiAccessibilityService.CMD_TAP_XY,
-            x = step.x,
-            y = step.y,
-            preDelayMs = 70L
-        )
-        return true
-    }
-
-    return false
-}
-
-internal suspend fun KaiActionExecutor.semanticPostVerifyImpl(
-    actionName: String,
-    beforePackage: String,
-    beforeFingerprint: String,
-    waitMs: Long,
-    timeoutMs: Long,
-    commandIssued: Boolean,
-    verifyStep: KaiActionStep? = null,
-    allowWeakSuccess: Boolean = true
-): KaiActionExecutionResult {
-    delay(waitMs.coerceAtLeast(420L))
-    val state = requestFreshScreen(timeoutMs.coerceIn(1800L, 9000L))
-    val meta = getLastRefreshMeta()
-    val afterFingerprint = fingerprintFor(state.packageName, state.rawDump)
-    val afterPackage = state.packageName
-    markActionProgress(beforePackage, afterPackage, beforeFingerprint, afterFingerprint, "$actionName verification")
-
-    val fingerprintChanged = !sameFingerprint(beforeFingerprint, afterFingerprint)
-    val packageChanged = isExternalPackageChange(beforePackage, afterPackage)
-    val meaningfulChange = fingerprintChanged || packageChanged || (meta.changedFromPrevious && !meta.reusedLastGood)
-    val expectationHit = verifyStep?.let { expectedStateSatisfied(it, state) } ?: false
-    val strongExpectationHit = expectationHit && !meta.reusedLastGood && !(meta.weak && meta.stale)
-    val expectedPkg = verifyStep?.expectedPackage.orEmpty().trim()
-    val wrongExpectedPackage = expectedPkg.isNotBlank() &&
-        !KaiScreenStateParser.normalize(state.packageName).contains(KaiScreenStateParser.normalize(expectedPkg))
-
-    onLog(
-        "$actionName verify: surface=${state.screenKind}, pkg=${state.packageName}, changed=$meaningfulChange, weak=${meta.weak}, fallback=${meta.fallback}, reusedLastGood=${meta.reusedLastGood}"
-    )
-
-    return when {
-        wrongExpectedPackage -> KaiActionExecutionResult(
-            success = false,
-            message = "$actionName wrong_context_package",
-            screenState = state
-        )
-
-        strongExpectationHit -> KaiActionExecutionResult(
-            success = true,
-            message = "$actionName verified expected state",
-            screenState = state
-        )
-
-        verifyStep != null && meaningfulChange && !meta.weak && !meta.fallback -> KaiActionExecutionResult(
-            success = true,
-            message = "$actionName made semantic progress before full expected evidence",
-            screenState = state
-        )
-
-        verifyStep != null && meaningfulChange &&
-            !meta.reusedLastGood &&
-            !state.isOverlayPolluted() &&
-            !state.isLauncher() -> KaiActionExecutionResult(
-            success = true,
-            message = "$actionName practical progress accepted",
-            screenState = state
-        )
-
-        verifyStep != null -> KaiActionExecutionResult(
-            success = false,
-            message = "$actionName expected evidence not satisfied",
-            screenState = state
-        )
-
-        meaningfulChange -> KaiActionExecutionResult(
-            success = true,
-            message = "$actionName produced visible progress",
-            screenState = state
-        )
-
-        allowWeakSuccess &&
-            !isCriticalSemanticAction(actionName) &&
-            !meta.fallback &&
-            !meta.reusedLastGood &&
-            (commandIssued || meta.weak) -> KaiActionExecutionResult(
-            success = true,
-            message = "$actionName produced weak/no verified progress, continuing",
-            screenState = state
-        )
-
-        else -> KaiActionExecutionResult(
-            success = false,
-            message = "$actionName failed to produce progress | weak_surface_evidence",
-            screenState = state
-        )
-    }
-}
-
-internal suspend fun KaiActionExecutor.writeIntoBestComposerImpl(text: String): KaiActionExecutionResult {
-    val clean = text.trim()
-    val baseState = requestFreshScreen(2600L)
-    if (clean.isBlank()) {
-        return KaiActionExecutionResult(
-            success = false,
-            message = "writeIntoBestComposer: empty payload",
-            screenState = baseState
-        )
-    }
-
-    val nav = navigateToWritableComposerImpl(baseState)
-    val state = nav.screenState ?: baseState
-    if (!isStrongComposerSurface(state)) {
-        return KaiActionExecutionResult(
-            success = false,
-            message = "wrong_surface_for_composer",
-            screenState = state
-        )
-    }
-    val beforeFingerprint = fingerprintFor(state.packageName, state.rawDump)
-    val beforePackage = state.packageName
-
-    onLog("writeIntoBestComposer: typing payload length=${clean.length}")
-    sendKaiCmdSuppressed(
-        cmd = KaiAccessibilityService.CMD_TYPE,
-        text = clean,
-        preDelayMs = 60L
-    )
-
-    val typed = semanticPostVerifyImpl(
-        actionName = "write_into_composer",
-        beforePackage = beforePackage,
-        beforeFingerprint = beforeFingerprint,
-        waitMs = 640L,
-        timeoutMs = 3200L,
-        commandIssued = true,
-        verifyStep = KaiActionStep(
-            cmd = "verify_state",
-            expectedScreenKind = expectedThreadKindFor(state),
-            selectorRole = "input"
-        )
-    )
-
-    val typedState = typed.screenState ?: state
-    if (!typed.success || !hasTypedEvidence(typedState, clean)) {
-        return KaiActionExecutionResult(
-            success = false,
-            message = "composer_text_not_verified",
-            screenState = typedState
-        )
-    }
-    return if (typed.success && typedState.findSendAction() != null) {
-        onLog("writeIntoBestComposer: send action visible after typing, pressing send directly")
-        val sent = pressSendIfPossibleImpl()
-        if (sent.success) sent else typed
-    } else {
-        typed
-    }
-}
-
-internal suspend fun KaiActionExecutor.pressSendIfPossibleImpl(): KaiActionExecutionResult {
-    val state = requestFreshScreen(2500L)
-    if (!isStrongComposerSurface(state)) {
-        return KaiActionExecutionResult(
-            success = false,
-            message = "wrong_surface_for_send",
-            screenState = state
-        )
-    }
-    val beforeFingerprint = fingerprintFor(state.packageName, state.rawDump)
-    val beforePackage = state.packageName
-
-    val send = state.findSendAction()
-    val issued = if (send != null) {
-        val label = semanticLabel(send)
-        if (label.isNotBlank()) {
-            onLog("pressSendIfPossible: clicking send candidate='$label' role=${send.roleGuess}")
-            sendKaiCmdSuppressed(
-                cmd = KaiAccessibilityService.CMD_CLICK_TEXT,
-                text = label,
-                preDelayMs = 70L
-            )
-            true
-        } else {
-            val (cx, cy) = parseCenterFromBounds(send.bounds)
-            if (cx != null && cy != null) {
-                onLog("pressSendIfPossible: using bounds fallback tap")
-                sendKaiCmdSuppressed(
-                    cmd = KaiAccessibilityService.CMD_TAP_XY,
-                    x = cx,
-                    y = cy,
-                    preDelayMs = 70L
-                )
-                true
-            } else {
-                false
-            }
-        }
-    } else false
-
-    val verify = semanticPostVerifyImpl(
-        actionName = "press_send_if_possible",
-        beforePackage = beforePackage,
-        beforeFingerprint = beforeFingerprint,
-        waitMs = 680L,
-        timeoutMs = 3400L,
-        commandIssued = issued,
-        verifyStep = KaiActionStep(cmd = "verify_state", selectorRole = "send_button"),
-        allowWeakSuccess = false
-    )
-    val after = verify.screenState ?: state
-    return if (verify.success && !after.findSendAction().let { it != null && fingerprintFor(after.packageName, after.rawDump) == beforeFingerprint }) {
-        verify.copy(message = "press_send_if_possible verified post-send change")
-    } else if (verify.success) {
-        verify.copy(success = false, message = "send_post_state_not_confirmed", screenState = after)
-    } else {
-        verify
-    }
-}
-
-internal suspend fun KaiActionExecutor.writeIntoBestNoteEditorImpl(text: String): KaiActionExecutionResult {
-    val clean = text.trim()
-    val baseState = requestFreshScreen(2600L)
-    if (clean.isBlank()) {
-        return KaiActionExecutionResult(
-            success = false,
-            message = "writeIntoBestNoteEditor: empty payload",
-            screenState = baseState
-        )
-    }
-
-    val open = openOrCreateNoteIfNeededImpl(baseState)
-    val focused = focusNoteEditorIfNeededImpl(open.screenState ?: baseState)
-    val state = focused.screenState ?: open.screenState ?: baseState
-    if (!isStrongNotesEditorSurface(state)) {
-        return KaiActionExecutionResult(
-            success = false,
-            message = "wrong_surface_for_create_note",
-            screenState = state
-        )
-    }
-
-    val beforeFingerprint = fingerprintFor(state.packageName, state.rawDump)
-    val beforePackage = state.packageName
-
-    onLog("writeIntoBestNoteEditor: typing payload length=${clean.length}")
-    sendKaiCmdSuppressed(
-        cmd = KaiAccessibilityService.CMD_TYPE,
-        text = clean,
-        preDelayMs = 60L
-    )
-
-    val verified = semanticPostVerifyImpl(
-        actionName = "write_into_note_editor",
-        beforePackage = beforePackage,
-        beforeFingerprint = beforeFingerprint,
-        waitMs = 650L,
-        timeoutMs = 3200L,
-        commandIssued = true,
-        verifyStep = KaiActionStep(
-            cmd = "verify_state",
-            expectedScreenKind = "notes_editor",
-            selectorRole = "input"
-        )
-    )
-    val after = verified.screenState ?: state
-    return if (verified.success && hasTypedEvidence(after, clean)) {
-        verified
-    } else if (verified.success) {
-        verified.copy(success = false, message = "note_text_not_verified", screenState = after)
-    } else {
-        verified
-    }
-}
-
-// ── KaiExecutorSemanticNav ──────────────────────────────────────────────
-
-
-private suspend fun KaiActionExecutor.tapSemanticElement(element: KaiUiElement?, actionLabel: String): Boolean {
-    if (element == null) return false
-    val label = semanticLabel(element)
-    if (label.isNotBlank()) {
-        onLog("$actionLabel: click_text('$label')")
-        sendKaiCmdSuppressed(
-            cmd = KaiAccessibilityService.CMD_CLICK_TEXT,
-            text = label,
-            preDelayMs = 70L
-        )
-        return true
-    }
-    val (cx, cy) = parseCenterFromBounds(element.bounds)
-    if (cx != null && cy != null) {
-        onLog("$actionLabel: tap_xy($cx,$cy)")
-        sendKaiCmdSuppressed(
-            cmd = KaiAccessibilityService.CMD_TAP_XY,
-            x = cx,
-            y = cy,
-            preDelayMs = 70L
-        )
-        return true
-    }
-    return false
-}
-
-private fun isUncertainForSemanticContinuation(state: KaiScreenState): Boolean {
-    return state.isWeakObservation() ||
-        state.isOverlayPolluted() ||
-        state.isSearchLikeSurface() ||
-        state.isSheetOrDialogSurface() ||
-        (state.packageName.contains("instagram", true) && state.isInstagramCameraOverlaySurface())
-}
-
-internal suspend fun KaiActionExecutor.normalizeInstagramSurfaceImpl(
-    state: KaiScreenState,
-    preferThread: Boolean = false
-): KaiActionExecutionResult {
-    val current = state
-    onLog("normalizeInstagramSurface: current=${current.screenKind}")
-
-    if (!current.packageName.contains("instagram", true)) {
-        return KaiActionExecutionResult(false, "normalization_failed_instagram_not_in_target_app", current)
-    }
-
-    if (current.isStrictVerifiedDmThreadSurface()) {
-        return KaiActionExecutionResult(true, "normalized_instagram_dm_thread", current)
-    }
-
-    if (current.isInstagramDmListSurface()) {
-        return KaiActionExecutionResult(true, "normalized_instagram_dm_list", current)
-    }
-
-    val beforeFingerprint = fingerprintFor(current.packageName, current.rawDump)
-    val beforePackage = current.packageName
-    val needsBackRecovery =
-        current.isCameraOrMediaOverlaySurface() ||
-            current.isInstagramSearchSurface() ||
-            current.isSearchLikeSurface()
-
-    if (needsBackRecovery) {
-        onLog("normalizeInstagramSurface: action=single_back_from_overlay_or_search")
-        sendKaiCmdSuppressed(cmd = KaiAccessibilityService.CMD_BACK, preDelayMs = 70L)
-        return semanticPostVerifyImpl(
-            actionName = "normalize_instagram_back",
-            beforePackage = beforePackage,
-            beforeFingerprint = beforeFingerprint,
-            waitMs = 320L,
-            timeoutMs = 2200L,
-            commandIssued = true,
-            verifyStep = KaiActionStep(cmd = "verify_state", expectedPackage = "com.instagram.android"),
-            allowWeakSuccess = true
-        )
-    }
-
-    val target = current.findMessagesEntry()
-    if (current.isInstagramMessagesEntrySurface() || current.isInstagramFeedSurface() || target != null) {
-        val issued = tapSemanticElement(target, "normalizeInstagramSurface")
-        val verified = semanticPostVerifyImpl(
-            actionName = "normalize_instagram_messages",
-            beforePackage = beforePackage,
-            beforeFingerprint = beforeFingerprint,
-            waitMs = 380L,
-            timeoutMs = 2400L,
-            commandIssued = issued,
-            verifyStep = KaiActionStep(cmd = "verify_state", expectedScreenKind = "instagram_dm_list"),
-            allowWeakSuccess = false
-        )
-        val next = verified.screenState ?: current
-        if (next.isInstagramDmListSurface() || (preferThread && next.isStrictVerifiedDmThreadSurface())) {
-            return verified.copy(success = true, message = "normalized_instagram_surface", screenState = next)
-        }
-        return verified.copy(success = false, message = "normalization_failed_instagram_single_attempt", screenState = next)
-    }
-
-    return KaiActionExecutionResult(false, "normalization_failed_instagram_requires_explicit_reobserve", current)
-}
-
-internal suspend fun KaiActionExecutor.normalizeNotesSurfaceImpl(state: KaiScreenState): KaiActionExecutionResult {
-    val current = state
-    onLog("normalizeNotesSurface: current=${current.screenKind}")
-
-    if (!current.packageName.contains("notes", true) && !current.packageName.contains("keep", true)) {
-        return KaiActionExecutionResult(false, "normalization_failed_notes_not_in_target_app", current)
-    }
-
-    if (current.isStrictVerifiedNotesEditorSurface() || current.isNotesTitleInputSurface() || current.isNotesBodyInputSurface()) {
-        return KaiActionExecutionResult(true, "normalized_notes_editor", current)
-    }
-
-    if (current.isNotesListSurface() || current.findCreateAction() != null) {
-        return KaiActionExecutionResult(true, "normalized_notes_list", current)
-    }
-
-    if (!current.isSearchLikeSurface()) {
-        return KaiActionExecutionResult(false, "normalization_failed_notes_requires_explicit_reobserve", current)
-    }
-
-    val beforeFingerprint = fingerprintFor(current.packageName, current.rawDump)
-    val beforePackage = current.packageName
-    onLog("normalizeNotesSurface: action=single_back_from_notes_search")
-    sendKaiCmdSuppressed(cmd = KaiAccessibilityService.CMD_BACK, preDelayMs = 70L)
-    return semanticPostVerifyImpl(
-        actionName = "normalize_notes_back",
-        beforePackage = beforePackage,
-        beforeFingerprint = beforeFingerprint,
-        waitMs = 320L,
-        timeoutMs = 2200L,
-        commandIssued = true,
-        verifyStep = KaiActionStep(cmd = "verify_state", expectedPackage = "notes"),
-        allowWeakSuccess = true
-    )
-}
-
-internal suspend fun KaiActionExecutor.navigateToMessagesSurfaceImpl(state: KaiScreenState): KaiActionExecutionResult {
-    onLog("Semantic navigation: navigateToMessagesSurface from surface=${state.screenKind}")
-
-    val normalizedState = when {
-        state.packageName.contains("instagram", true) -> {
-            val normalized = normalizeInstagramSurfaceImpl(state, preferThread = false)
-            val s = normalized.screenState ?: state
-            if (!normalized.success) return normalized
-            s
-        }
-        else -> {
-            val family = KaiSurfaceModel.normalizeLegacyFamily(state.surfaceFamily())
-            if (KaiSurfaceModel.isDeadEndFamily(family)) {
-                val recovered = normalizeGeneralWorkingSurfaceImpl(state)
-                recovered.screenState ?: state
-            } else {
-                state
-            }
-        }
-    }
-
-    if (normalizedState.isInstagramDmListSurface() || normalizedState.isChatListScreen()) {
-        return KaiActionExecutionResult(
-            success = true,
-            message = "Already on messages/chat list surface",
-            screenState = normalizedState
-        )
-    }
-
-    if (normalizedState.isStrictVerifiedDmThreadSurface() || normalizedState.isChatThreadScreen()) {
-        return KaiActionExecutionResult(
-            success = true,
-            message = "Already in conversation thread",
-            screenState = normalizedState
-        )
-    }
-
-    val current = normalizedState
-    if (isUncertainForSemanticContinuation(current)) {
-        return KaiActionExecutionResult(
-            success = false,
-            message = "observation_too_uncertain_for_messages_navigation",
-            screenState = current
-        )
-    }
-
-    val beforeFingerprint = fingerprintFor(current.packageName, current.rawDump)
-    val beforePackage = current.packageName
-    val isWhatsApp = current.packageName.contains("whatsapp", true)
-    val target = current.findMessagesEntry()
-    val issued = when {
-        target != null -> tapSemanticElement(target, "navigateToMessagesSurface")
-        current.isInstagramMessagesEntrySurface() || current.isContentFeedSurface() -> {
-            sendKaiCmdSuppressed(cmd = KaiAccessibilityService.CMD_CLICK_TEXT, text = "messages", preDelayMs = 70L)
-            true
-        }
-        isWhatsApp -> {
-            sendKaiCmdSuppressed(cmd = KaiAccessibilityService.CMD_CLICK_TEXT, text = "chats", preDelayMs = 70L)
-            true
-        }
-        else -> false
-    }
-
-    if (!issued) {
-        return KaiActionExecutionResult(
-            success = false,
-            message = "no_direct_messages_action_available",
-            screenState = current
-        )
-    }
-
-    val verify = semanticPostVerifyImpl(
-        actionName = "navigate_messages_surface",
-        beforePackage = beforePackage,
-        beforeFingerprint = beforeFingerprint,
-        waitMs = 380L,
-        timeoutMs = 2300L,
-        commandIssued = true,
-        verifyStep = KaiActionStep(
-            cmd = "verify_state",
-            expectedScreenKind = expectedListKindFor(current),
-            selectorRole = "tab",
-            selectorText = "messages"
-        ),
-        allowWeakSuccess = true
-    )
-
-    val candidate = verify.screenState ?: current
-    return if (candidate.isInstagramDmListSurface() || candidate.isChatListScreen()) {
-        verify.copy(success = true, message = "Reached messages/chat list surface", screenState = candidate)
-    } else {
-        verify.copy(success = false, message = "single_step_messages_navigation_failed", screenState = candidate)
-    }
-}
-
-internal suspend fun KaiActionExecutor.navigateToConversationImpl(
-    state: KaiScreenState,
-    query: String
-): KaiActionExecutionResult {
-    onLog("Semantic navigation: navigateToConversation query='${query.trim()}' surface=${state.screenKind}")
-
-    val normalizedState = when {
-        state.packageName.contains("instagram", true) -> {
-            val normalized = normalizeInstagramSurfaceImpl(state, preferThread = true)
-            val s = normalized.screenState ?: state
-            if (!normalized.success) return normalized
-            s
-        }
-        else -> {
-            val family = KaiSurfaceModel.normalizeLegacyFamily(state.surfaceFamily())
-            if (KaiSurfaceModel.isDeadEndFamily(family)) {
-                val recovered = normalizeGeneralWorkingSurfaceImpl(state)
-                recovered.screenState ?: state
-            } else {
-                state
-            }
-        }
-    }
-
-    if (normalizedState.isStrictVerifiedDmThreadSurface() || normalizedState.isChatComposerSurface()) {
-        return KaiActionExecutionResult(
-            success = true,
-            message = "Already on conversation thread",
-            screenState = normalizedState
-        )
-    }
-
-    val current = normalizedState
-    if (isUncertainForSemanticContinuation(current)) {
-        return KaiActionExecutionResult(
-            success = false,
-            message = "observation_too_uncertain_for_conversation_navigation",
-            screenState = current
-        )
-    }
-
-    if (!current.isInstagramDmListSurface() && !current.isChatListScreen()) {
-        return KaiActionExecutionResult(
-            success = false,
-            message = "wrong_surface_for_conversation_open",
-            screenState = current
-        )
-    }
-
-    if (current.packageName.contains("instagram", true) && !KaiSurfaceModel.isVerifiedInstagramDmListSurface(current)) {
-        return KaiActionExecutionResult(
-            success = false,
-            message = "wrong_surface_for_conversation_open",
-            screenState = current
-        )
-    }
-
-    val beforeFingerprint = fingerprintFor(current.packageName, current.rawDump)
-    val beforePackage = current.packageName
-    val target = current.findConversationCandidate(query)
-    val label = target?.let { semanticLabel(it) }.orEmpty()
-    val issued = when {
-        label.isNotBlank() -> {
-            sendKaiCmdSuppressed(cmd = KaiAccessibilityService.CMD_CLICK_TEXT, text = label, preDelayMs = 70L)
-            true
-        }
-        target != null -> tapSemanticElement(target, "navigateToConversation")
-        query.trim().isNotBlank() && current.findBestInputField("search") != null -> {
-            sendKaiCmdSuppressed(cmd = KaiAccessibilityService.CMD_CLICK_TEXT, text = "search", preDelayMs = 70L)
-            sendKaiCmdSuppressed(cmd = KaiAccessibilityService.CMD_TYPE, text = query.trim(), preDelayMs = 90L)
-            true
-        }
-        else -> false
-    }
-
-    if (!issued) {
-        return KaiActionExecutionResult(
-            success = false,
-            message = "ambiguous_conversation_target",
-            screenState = current
-        )
-    }
-
-    val verify = semanticPostVerifyImpl(
-        actionName = "navigate_conversation",
-        beforePackage = beforePackage,
-        beforeFingerprint = beforeFingerprint,
-        waitMs = 420L,
-        timeoutMs = 2500L,
-        commandIssued = true,
-        verifyStep = KaiActionStep(
-            cmd = "verify_state",
-            expectedScreenKind = expectedThreadKindFor(current),
-            selectorRole = "chat_item",
-            selectorText = query
-        ),
-        allowWeakSuccess = true
-    )
-
-    val candidate = verify.screenState ?: current
-    return if (candidate.isInstagramDmThreadSurface() || candidate.isChatThreadScreen() || candidate.isChatComposerSurface()) {
-        verify.copy(success = true, message = "Reached conversation thread", screenState = candidate)
-    } else {
-        verify.copy(success = false, message = "single_step_conversation_navigation_failed", screenState = candidate)
-    }
-}
-
-internal suspend fun KaiActionExecutor.navigateToWritableComposerImpl(state: KaiScreenState): KaiActionExecutionResult {
-    onLog("Semantic navigation: navigateToWritableComposer from surface=${state.screenKind}")
-    val normalizedState = when {
-        state.packageName.contains("instagram", true) -> {
-            val normalized = normalizeInstagramSurfaceImpl(state, preferThread = true)
-            val s = normalized.screenState ?: state
-            if (!normalized.success) {
-                return KaiActionExecutionResult(
-                    success = false,
-                    message = "wrong_surface_for_composer",
-                    screenState = s
-                )
-            }
-            s
-        }
-        else -> {
-            normalizeGeneralWorkingSurfaceImpl(state).screenState ?: state
-        }
-    }
-    if (!normalizedState.isStrictVerifiedDmThreadSurface() && !normalizedState.isChatComposerSurface()) {
-        return KaiActionExecutionResult(
-            success = false,
-            message = "wrong_surface_for_composer",
-            screenState = normalizedState
-        )
-    }
-    if (normalizedState.findBestInputField("message") != null && normalizedState.isChatComposerSurface()) {
-        return KaiActionExecutionResult(
-            success = true,
-            message = "Composer already detected",
-            screenState = normalizedState
-        )
-    }
-
-    val beforeFingerprint = fingerprintFor(normalizedState.packageName, normalizedState.rawDump)
-    val beforePackage = normalizedState.packageName
-    val field = normalizedState.findBestInputField("message")
-
-    val issued = if (field != null) {
-        val label = semanticLabel(field)
-        if (label.isNotBlank()) {
-            onLog("navigateToWritableComposer: focus by label='$label'")
-            sendKaiCmdSuppressed(
-                cmd = KaiAccessibilityService.CMD_CLICK_TEXT,
-                text = label,
-                preDelayMs = 70L
-            )
-            true
-        } else {
-            val (cx, cy) = parseCenterFromBounds(field.bounds)
-            if (cx != null && cy != null) {
-                onLog("navigateToWritableComposer: focus by bounds tap")
-                sendKaiCmdSuppressed(
-                    cmd = KaiAccessibilityService.CMD_TAP_XY,
-                    x = cx,
-                    y = cy,
-                    preDelayMs = 70L
-                )
-                true
-            } else {
-                false
-            }
-        }
-    } else {
-        false
-    }
-
-    return semanticPostVerifyImpl(
-        actionName = "navigate_writable_composer",
-        beforePackage = beforePackage,
-        beforeFingerprint = beforeFingerprint,
-        waitMs = 560L,
-        timeoutMs = 3200L,
-        commandIssued = issued,
-        verifyStep = KaiActionStep(
-            cmd = "verify_state",
-            expectedScreenKind = expectedThreadKindFor(normalizedState),
-            selectorRole = "input",
-            selectorHint = "message"
-        ),
-        allowWeakSuccess = true
-    )
-}
-
-internal suspend fun KaiActionExecutor.openOrCreateNoteIfNeededImpl(state: KaiScreenState): KaiActionExecutionResult {
-    onLog("Semantic navigation: openOrCreateNoteIfNeeded surface=${state.screenKind}")
-    val normalized = normalizeNotesSurfaceImpl(state)
-    val normalizedState = normalized.screenState ?: state
-    if (!normalized.success) return normalized
-
-    if (normalizedState.isStrictVerifiedNotesEditorSurface() || normalizedState.isNotesTitleInputSurface() || normalizedState.isNotesBodyInputSurface()) {
-        return KaiActionExecutionResult(success = true, message = "Notes editor already open", screenState = normalizedState)
-    }
-
-    val beforeFingerprint = fingerprintFor(normalizedState.packageName, normalizedState.rawDump)
-    val beforePackage = normalizedState.packageName
-    val create = normalizedState.findCreateAction()
-
-    val issued = if (create != null) {
-        val label = semanticLabel(create)
-        if (label.isNotBlank()) {
-            onLog("openOrCreateNoteIfNeeded: winner='$label'")
-            sendKaiCmdSuppressed(
-                cmd = KaiAccessibilityService.CMD_CLICK_TEXT,
-                text = label,
-                preDelayMs = 70L
-            )
-            true
-        } else {
-            val (cx, cy) = parseCenterFromBounds(create.bounds)
-            if (cx != null && cy != null) {
-                sendKaiCmdSuppressed(
-                    cmd = KaiAccessibilityService.CMD_TAP_XY,
-                    x = cx,
-                    y = cy,
-                    preDelayMs = 70L
-                )
-                true
-            } else {
-                false
-            }
-        }
-    } else false
-
-    return semanticPostVerifyImpl(
-        actionName = "open_or_create_note",
-        beforePackage = beforePackage,
-        beforeFingerprint = beforeFingerprint,
-        waitMs = 640L,
-        timeoutMs = 3400L,
-        commandIssued = issued,
-        verifyStep = KaiActionStep(cmd = "verify_state", expectedScreenKind = "notes_editor"),
-        allowWeakSuccess = true
-    )
-}
-
-internal suspend fun KaiActionExecutor.focusNoteEditorIfNeededImpl(state: KaiScreenState): KaiActionExecutionResult {
-    val normalized = normalizeNotesSurfaceImpl(state)
-    val normalizedState = normalized.screenState ?: state
-    if (!normalized.success) return normalized
-
-    if (normalizedState.isNotesBodyInputSurface() || normalizedState.isNotesTitleInputSurface()) {
-        return KaiActionExecutionResult(
-            success = true,
-            message = "Notes editor already focused",
-            screenState = normalizedState
-        )
-    }
-
-    val source = if (normalizedState.isNotesEditorSurface()) normalizedState else requestFreshScreen(2500L)
-    val beforeFingerprint = fingerprintFor(source.packageName, source.rawDump)
-    val beforePackage = source.packageName
-
-    val targetInput = source.findBestInputField("body") ?: source.findBestInputField("title")
-    val issued = if (targetInput != null) {
-        val label = semanticLabel(targetInput)
-        if (label.isNotBlank()) {
-            onLog("focusNoteEditorIfNeeded: focusing '$label'")
-            sendKaiCmdSuppressed(
-                cmd = KaiAccessibilityService.CMD_CLICK_TEXT,
-                text = label,
-                preDelayMs = 70L
-            )
-            true
-        } else {
-            val (cx, cy) = parseCenterFromBounds(targetInput.bounds)
-            if (cx != null && cy != null) {
-                sendKaiCmdSuppressed(
-                    cmd = KaiAccessibilityService.CMD_TAP_XY,
-                    x = cx,
-                    y = cy,
-                    preDelayMs = 70L
-                )
-                true
-            } else {
-                false
-            }
-        }
-    } else {
-        false
-    }
-
-    return semanticPostVerifyImpl(
-        actionName = "focus_note_editor",
-        beforePackage = beforePackage,
-        beforeFingerprint = beforeFingerprint,
-        waitMs = 560L,
-        timeoutMs = 3000L,
-        commandIssued = issued,
-        verifyStep = KaiActionStep(cmd = "verify_state", expectedScreenKind = "notes_editor", selectorRole = "input"),
-        allowWeakSuccess = true
-    )
-}
-
-internal suspend fun KaiActionExecutor.normalizeGeneralWorkingSurfaceImpl(state: KaiScreenState): KaiActionExecutionResult {
-    val current = state
-    val family = KaiSurfaceModel.familyOf(current)
-    val normalizedFamily = KaiSurfaceModel.normalizeLegacyFamily(family)
-    if (KaiSurfaceModel.isPostOpenReadyFamily(normalizedFamily)) {
-        return KaiActionExecutionResult(
-            success = true,
-            message = "normalized_general_surface:${KaiSurfaceModel.familyName(normalizedFamily)}",
-            screenState = current
-        )
-    }
-
-    if (normalizedFamily == KaiSurfaceFamily.SEARCH_SURFACE || normalizedFamily == KaiSurfaceFamily.BROWSER_LIKE_SURFACE) {
-        return KaiActionExecutionResult(
-            success = true,
-            message = "normalized_general_intermediate:${KaiSurfaceModel.familyName(normalizedFamily)}",
-            screenState = current
-        )
-    }
-
-    if (KaiSurfaceModel.isRecoverableFamily(normalizedFamily) || normalizedFamily == KaiSurfaceFamily.LAUNCHER_SURFACE) {
-        val beforeFingerprint = fingerprintFor(current.packageName, current.rawDump)
-        val beforePackage = current.packageName
-        sendKaiCmdSuppressed(cmd = KaiAccessibilityService.CMD_BACK, preDelayMs = 70L)
-        return semanticPostVerifyImpl(
-            actionName = "normalize_general_back",
-            beforePackage = beforePackage,
-            beforeFingerprint = beforeFingerprint,
-            waitMs = 360L,
-            timeoutMs = 2300L,
-            commandIssued = true,
-            verifyStep = KaiActionStep(cmd = "verify_state", expectedPackage = current.packageName),
-            allowWeakSuccess = true
-        )
-    }
-
-    return KaiActionExecutionResult(
-        success = false,
-        message = "normalization_failed_general_single_attempt",
-        screenState = current
-    )
-}
-
-internal suspend fun KaiActionExecutor.openFirstYouTubeMediaImpl(state: KaiScreenState): KaiActionExecutionResult {
-    var current = if (state.packageName.contains("youtube", true)) state else requestFreshScreen(2600L)
-    if (!current.packageName.contains("youtube", true)) {
-        return KaiActionExecutionResult(success = false, message = "wrong_surface_for_open_list_item", screenState = current)
-    }
-
-    if (isUncertainForSemanticContinuation(current)) {
-        current = requestFreshScreen(2800L, expectedPackage = current.packageName)
-    }
-    if (isUncertainForSemanticContinuation(current)) {
-        return KaiActionExecutionResult(success = false, message = "observation_requires_reobserve_before_open_media", screenState = current)
-    }
-    if (current.isYouTubeWatchSurface() || current.isPlayerSurface()) {
-        return KaiActionExecutionResult(success = true, message = "Already on YouTube watch/player surface", screenState = current)
-    }
-    if (!(current.isYouTubeBrowseSurface() || KaiSurfaceModel.isVerifiedYouTubeWorkingSurface(current) || current.isResultListSurface())) {
-        return KaiActionExecutionResult(success = false, message = "wrong_surface_for_open_list_item", screenState = current)
-    }
-
-    val beforeFingerprint = fingerprintFor(current.packageName, current.rawDump)
-    val beforePackage = current.packageName
-    val target = current.findYouTubePlayableCandidate()
-    if (target == null) {
-        return KaiActionExecutionResult(success = false, message = "ambiguous_media_target_requires_better_observation", screenState = current)
-    }
-
-    val issued = tapSemanticElement(target, "openFirstYouTubeMedia")
-    val verify = semanticPostVerifyImpl(
-        actionName = "open_first_youtube_media",
-        beforePackage = beforePackage,
-        beforeFingerprint = beforeFingerprint,
-        waitMs = 720L,
-        timeoutMs = 3800L,
-        commandIssued = issued,
-        verifyStep = KaiActionStep(cmd = "verify_state", expectedScreenKind = "detail", expectedPackage = "com.google.android.youtube"),
-        allowWeakSuccess = true
-    )
-    val candidate = verify.screenState ?: requestFreshScreen(3000L, expectedPackage = current.packageName)
-    return if (candidate.isYouTubeWatchSurface() || candidate.isPlayerSurface() || candidate.isDetailSurface()) {
-        verify.copy(success = true, message = "Opened first YouTube media intentionally", screenState = candidate)
-    } else {
-        verify.copy(success = false, message = "Failed to confirm YouTube watch/player surface", screenState = candidate)
     }
 }
