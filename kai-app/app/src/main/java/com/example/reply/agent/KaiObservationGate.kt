@@ -341,13 +341,21 @@ class KaiObservationGate(
             }
         }
 
-        if (state.isWeakObservation()) return false to "weak_observation"
-        if (meta.weak) return false to "weak_refresh_meta"
-        if (meta.fallback) return false to "fallback_observation"
+        val appLaunchLenient =
+            tier == GateTier.APP_LAUNCH_SAFE &&
+                isLauncher &&
+                state.packageName.isNotBlank() &&
+                !state.isOverlayPolluted() &&
+                state.rawDump.isNotBlank()
+
+        if (state.isWeakObservation() && !appLaunchLenient) return false to "weak_observation"
+        if (meta.weak && !appLaunchLenient) return false to "weak_refresh_meta"
+        if (meta.fallback && !appLaunchLenient) return false to "fallback_observation"
         if (meta.reusedLastGood) return false to "reused_last_good_observation"
 
-        // App-launch: tolerate stale on coherent launcher
-        if (tier == GateTier.APP_LAUNCH_SAFE && meta.stale && isLauncher) {
+        // App-launch: tolerate stale/fallback on coherent launcher because the first
+        // useful action is to open the target app, not to semantically act on the launcher.
+        if (tier == GateTier.APP_LAUNCH_SAFE && isLauncher && (meta.stale || meta.fallback || meta.weak)) {
             return true to "app_launch_safe_launcher_coherent"
         }
 
@@ -508,6 +516,36 @@ class KaiObservationGate(
                 }
             }
 
+            // If authoritative is blank but the best live observation already carries a
+            // real external package, accept it during startup instead of forcing a blind fail.
+            val bestLive = KaiObservationRuntime.getBestAvailable(authoritativeOnly = false)
+            if (bestLive.updatedAt > 0L &&
+                bestLive.packageName.isNotBlank() &&
+                !bestLive.packageName.startsWith("com.example.reply")
+            ) {
+                val liveState = KaiScreenStateParser.fromDump(bestLive.packageName, bestLive.screenPreview)
+                val liveWeak = liveState.rawDump.isBlank() ||
+                    liveState.isOverlayPolluted() ||
+                    !liveState.isMeaningful()
+
+                if (!liveWeak) {
+                    adopt(liveState)
+                    lastAcceptedFingerprint = fingerprintFor(liveState.packageName, liveState.rawDump)
+                    lastAcceptedObservationAt = bestLive.updatedAt
+                    lastMeta = RefreshMeta(
+                        fingerprint = lastAcceptedFingerprint,
+                        changedFromPrevious = true,
+                        usable = true
+                    )
+                    return ReadinessResult(
+                        passed = true,
+                        state = liveState,
+                        reason = "authoritative_observation_ready_via_live_runtime",
+                        attempts = attempt + 1
+                    )
+                }
+            }
+
             // Fall back to strong gate
             val gate = ensureStrongGate(
                 expectedPackage = "",
@@ -560,6 +598,31 @@ class KaiObservationGate(
                 state = fallbackState,
                 reason = "authoritative_observation_ready_via_cold_start_lenient_fallback",
                 attempts = maxAttempts.coerceAtLeast(1) + 1
+            )
+        }
+
+        val coldStartFallback = KaiObservationRuntime.getBestAvailable(authoritativeOnly = false)
+        if (coldStartFallback.updatedAt > 0L &&
+            coldStartFallback.packageName.isNotBlank() &&
+            !coldStartFallback.packageName.startsWith("com.example.reply")
+        ) {
+            val fallbackState = KaiScreenStateParser.fromDump(
+                coldStartFallback.packageName,
+                coldStartFallback.screenPreview
+            )
+            adopt(fallbackState)
+            lastAcceptedFingerprint = fingerprintFor(fallbackState.packageName, fallbackState.rawDump)
+            lastAcceptedObservationAt = coldStartFallback.updatedAt
+            lastMeta = RefreshMeta(
+                fingerprint = lastAcceptedFingerprint,
+                changedFromPrevious = true,
+                usable = true
+            )
+            return ReadinessResult(
+                passed = true,
+                state = fallbackState,
+                reason = "authoritative_observation_ready_via_cold_start_lenient_fallback",
+                attempts = maxAttempts.coerceAtLeast(1)
             )
         }
 

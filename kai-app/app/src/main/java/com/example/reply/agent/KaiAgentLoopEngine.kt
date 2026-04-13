@@ -459,10 +459,40 @@ class KaiAgentLoopEngine(
                     )
                     if (!cycleObservationGate.passed) {
                         currentState = cycleObservationGate.state
+
+                        val isPreAppEntryOpenIntent =
+                            startupOpenIntentGate && !prePlanStageSnapshot.appEntryComplete
+                        val canBypassGateForLaunch =
+                            isPreAppEntryOpenIntent &&
+                                (
+                                    cycleObservationGate.reason.contains("fallback_observation") ||
+                                        cycleObservationGate.reason.contains("weak_observation") ||
+                                        cycleObservationGate.reason.contains("weak_refresh_meta") ||
+                                        cycleObservationGate.reason.contains("missing_package") ||
+                                        cycleObservationGate.reason.contains("stale_observation")
+                                    )
+
                         val canDelayPlanning =
                             prePlanStageSnapshot.appEntryComplete &&
                                 cycleObservationGate.reason.contains("stale_observation")
-                        if (canDelayPlanning) {
+
+                        if (canBypassGateForLaunch) {
+                            withContext(Dispatchers.Main) {
+                                onLog(
+                                    "system",
+                                    "cycle_open_intent_gate_bypass: ${cycleObservationGate.reason}"
+                                )
+                            }
+                            val bestObs = KaiObservationRuntime.getBestAvailable()
+                            currentState = if (bestObs.packageName.isNotBlank() &&
+                                !bestObs.packageName.startsWith("com.example.reply")
+                            ) {
+                                KaiScreenStateParser.fromDump(bestObs.packageName, bestObs.screenPreview)
+                            } else {
+                                currentState
+                            }
+                            executor.adoptCanonicalRuntimeState(currentState)
+                        } else if (canDelayPlanning) {
                             withContext(Dispatchers.Main) {
                                 onLog(
                                     "system",
@@ -471,26 +501,27 @@ class KaiAgentLoopEngine(
                             }
                             noProgressCycles += 1
                             return@repeat
+                        } else {
+                            val finalMessage =
+                                "Observation gate failed before semantic planning: ${cycleObservationGate.reason}."
+                            pushAgentState(
+                                state = "warning",
+                                observation = cycleObservationGate.state.rawDump,
+                                decision = finalMessage,
+                                action = "observation_gate",
+                                notes = "cycle_observation_not_strong"
+                            )
+                            KaiAgentController.finishActionLoopSession(finalMessage)
+                            executor.resetRuntimeState(clearLastGoodScreen = false)
+                            return@withContext KaiLoopResult(
+                                success = false,
+                                finalMessage = finalMessage,
+                                executedSteps = totalSteps
+                            )
                         }
-
-                        val finalMessage =
-                            "Observation gate failed before semantic planning: ${cycleObservationGate.reason}."
-                        pushAgentState(
-                            state = "warning",
-                            observation = cycleObservationGate.state.rawDump,
-                            decision = finalMessage,
-                            action = "observation_gate",
-                            notes = "cycle_observation_not_strong"
-                        )
-                        KaiAgentController.finishActionLoopSession(finalMessage)
-                        executor.resetRuntimeState(clearLastGoodScreen = false)
-                        return@withContext KaiLoopResult(
-                            success = false,
-                            finalMessage = finalMessage,
-                            executedSteps = totalSteps
-                        )
+                    } else {
+                        currentState = cycleObservationGate.state
                     }
-                    currentState = cycleObservationGate.state
 
                     val (stabilizedState, planningAllowed) = stabilizeObservationBeforePlanning(
                         baseline = currentState,
