@@ -310,16 +310,15 @@ class KaiAccessibilityService : AccessibilityService() {
     }
 
     private fun resetTransitionMemory() {
-        lastKnownExternalPackage = null
-        previousExternalPackage = null
+        // Preserve the latest external package hint. Clearing it here was causing startup dumps
+        // to lose package recovery and fail with missing_package immediately after restart.
+        previousExternalPackage = lastKnownExternalPackage
         lastWindowEventAt = 0L
         lastPackageChangeAt = 0L
         expectedDumpPackage = ""
         lastDeliveredFingerprint = ""
         dumpGeneration++
         dumpInProgress = false
-        // Reset the dump debounce timestamp so the first CMD_DUMP of a new run is never
-        // silently dropped by the 180 ms guard that was left over from the previous run.
         lastDumpAt = 0L
     }
 
@@ -439,12 +438,14 @@ class KaiAccessibilityService : AccessibilityService() {
         val expected = expectedPackage.trim()
         val dumpIsSubstantive = isSubstantiveDump(dump)
 
-        if (expected.isNotBlank() && isExternalAppPackage(expected) && isRecentPackageTransition()) {
-            return expected
+        if (expected.isNotBlank() && isExternalAppPackage(expected)) {
+            if (isRecentPackageTransition() || dumpIsSubstantive) {
+                return expected
+            }
         }
 
         val recent = lastKnownExternalPackage.orEmpty()
-        if (dumpIsSubstantive && isExternalAppPackage(recent) && isRecentPackageTransition()) {
+        if (dumpIsSubstantive && isExternalAppPackage(recent)) {
             return recent
         }
 
@@ -467,12 +468,19 @@ class KaiAccessibilityService : AccessibilityService() {
         if (normalizedDump == norm("(empty dump)")) return ""
         if (isOverlayPolluted(dump)) return ""
 
-        return fallbackExternalPackage(expectedPackage, dump)
+        val fallback = fallbackExternalPackage(expectedPackage, dump)
+        if (fallback.isNotBlank()) return fallback
+
+        if (expectedPackage.isNotBlank() && isSubstantiveDump(dump) && isExternalAppPackage(expectedPackage)) {
+            return expectedPackage
+        }
+
+        return ""
     }
 
     private fun isWeakDumpCandidate(candidate: DumpCandidate): Boolean {
         val normalizedDump = norm(candidate.dump)
-        if (candidate.packageName.isBlank()) return true
+        if (candidate.packageName.isBlank() && expectedDumpPackage.isBlank()) return true
         if (normalizedDump.isBlank()) return true
         if (normalizedDump == norm("(no active window)")) return true
         if (normalizedDump == norm("(empty dump)")) return true

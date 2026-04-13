@@ -74,13 +74,15 @@ object KaiObservationRuntime {
     }
 
     fun softCleanupAfterRun() {
+        // Preserve the latest package hint between runs; wiping transition memory here
+        // was one of the main causes of startup missing_package failures.
         lastWatchExpectedPackage = ""
-        requestTransitionReset()
     }
 
-    fun requestWarmupObservation(expectedPackage: String = "", burstCount: Int = 4, gapMs: Long = 140L) {
+    fun requestWarmupObservation(expectedPackage: String = "", burstCount: Int = 5, gapMs: Long = 140L) {
         val safeBursts = burstCount.coerceIn(1, 8)
         lastWatchExpectedPackage = expectedPackage
+        requestTransitionReset()
         repeat(safeBursts) { index ->
             watchScope.launch {
                 if (index > 0) delay(index * gapMs)
@@ -147,13 +149,45 @@ object KaiObservationRuntime {
             updatedAt = now
         )
 
-        live = obs
-
-        if (isUsefulObservation(obs)) {
-            authoritative = obs
+        val recoveredPackage = when {
+            obs.packageName.isNotBlank() -> obs.packageName
+            isSubstantiveObservationDump(obs.screenPreview) &&
+                authoritative.packageName.isNotBlank() &&
+                System.currentTimeMillis() - authoritative.updatedAt <= 2200L -> authoritative.packageName
+            isSubstantiveObservationDump(obs.screenPreview) &&
+                live.packageName.isNotBlank() &&
+                System.currentTimeMillis() - live.updatedAt <= 2200L -> live.packageName
+            else -> ""
         }
 
-        KaiAgentController.onObservationArrived(pkg, dump, elements, screenKind, confidence)
+        val effectiveObs = if (recoveredPackage.isNotBlank() && obs.packageName.isBlank()) {
+            obs.copy(packageName = recoveredPackage)
+        } else {
+            obs
+        }
+
+        live = effectiveObs
+
+        if (isUsefulObservation(effectiveObs)) {
+            authoritative = effectiveObs
+        }
+
+        KaiAgentController.onObservationArrived(
+            effectiveObs.packageName,
+            effectiveObs.screenPreview,
+            effectiveObs.elements,
+            effectiveObs.screenKind,
+            effectiveObs.semanticConfidence
+        )
+    }
+
+    private fun isSubstantiveObservationDump(text: String): Boolean {
+        val normalized = KaiScreenStateParser.normalize(text)
+        if (normalized.isBlank()) return false
+        if (normalized == KaiScreenStateParser.normalize("(no active window)")) return false
+        if (normalized == KaiScreenStateParser.normalize("(empty dump)")) return false
+        if (isOverlayOnlyDump(normalized)) return false
+        return text.lines().count { it.trim().isNotBlank() } >= 2 || text.trim().length >= 18
     }
 
     private fun isOverlayOnlyDump(text: String): Boolean {
@@ -199,12 +233,12 @@ object KaiObservationRuntime {
             val best = getBestAvailable(expectedPackage = expected)
             if (best.updatedAt > afterTime && isUsefulObservation(best)) return best
 
-            if (System.currentTimeMillis() - nudgedAt >= 320L) {
+            if (System.currentTimeMillis() - nudgedAt >= 280L) {
                 nudgedAt = System.currentTimeMillis()
                 requestImmediateDump(expected)
             }
 
-            delay(80L)
+            delay(70L)
         }
         return null
     }
@@ -247,7 +281,12 @@ object KaiObservationRuntime {
 
         if (isWatching && watchJob?.isActive == true) {
             if (immediateDump) {
-                requestImmediateDump(lastWatchExpectedPackage)
+                repeat(WATCH_BOOTSTRAP_BURST) { index ->
+                    watchScope.launch {
+                        if (index > 0) delay(index * WATCH_BOOTSTRAP_GAP_MS)
+                        requestImmediateDump(lastWatchExpectedPackage)
+                    }
+                }
             }
             return
         }

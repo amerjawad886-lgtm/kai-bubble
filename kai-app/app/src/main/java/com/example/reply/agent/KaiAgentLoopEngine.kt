@@ -133,18 +133,23 @@ class KaiAgentLoopEngine(
                 KaiObservationRuntime.ensureBridge(appContext)
                 KaiObservationRuntime.softCleanupAfterRun()
                 executor.resetRuntimeState(clearLastGoodScreen = false)
-                executor.resetObservationTransitionStateForRun()
 
                 val startupObservationBaseline = System.currentTimeMillis()
-                if (!KaiObservationRuntime.isWatching) {
+                val watchingAlreadyActive = KaiObservationRuntime.isWatching
+
+                if (!watchingAlreadyActive) {
+                    executor.resetObservationTransitionStateForRun()
+                    KaiObservationRuntime.startWatching(immediateDump = true)
+                } else {
                     KaiObservationRuntime.startWatching(immediateDump = true)
                 }
-                if (!KaiObservationRuntime.hasRecentUsefulObservation(1600L)) {
-                    KaiObservationRuntime.requestWarmupObservation(burstCount = 4)
+
+                if (!KaiObservationRuntime.hasRecentUsefulObservation(1900L)) {
+                    KaiObservationRuntime.requestWarmupObservation(burstCount = 5)
                 }
                 KaiObservationRuntime.awaitFresh(
                     afterTime = startupObservationBaseline,
-                    timeoutMs = 2200L
+                    timeoutMs = 2600L
                 )
                 KaiBubbleManager.releaseAllSuppression()
                 KaiBubbleManager.softResetUiState()
@@ -214,10 +219,10 @@ class KaiAgentLoopEngine(
                     onLog("system", "startup_from_live_observation: pkg=${currentState.packageName}")
                 } else {
                     val readiness = executor.ensureAuthoritativeObservationReady(
-                        timeoutMs = 2600L,
+                        timeoutMs = 3200L,
                         allowLauncherSurface = true,
                         tier = startupGateTier,
-                        maxAttempts = 3
+                        maxAttempts = 4
                     )
                     if (!readiness.passed) {
                         val finalMessage =

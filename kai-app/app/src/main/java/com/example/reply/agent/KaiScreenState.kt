@@ -203,7 +203,7 @@ data class KaiScreenState(
     }
 
     fun isWeakObservation(): Boolean {
-        if (packageName.isBlank()) return true
+        if (packageName.isBlank() && !hasSemanticStructure()) return true
         if (rawDump.isBlank()) return true
 
         val normalizedDump = KaiScreenStateParser.normalize(rawDump)

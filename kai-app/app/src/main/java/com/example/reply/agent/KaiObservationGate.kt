@@ -169,7 +169,7 @@ class KaiObservationGate(
 
     private fun canReuseRecentRuntimeObservation(expectedPackage: String): Boolean {
         return KaiObservationRuntime.hasRecentAuthoritative(
-            maxAgeMs = 450L,
+            maxAgeMs = 650L,
             expectedPackage = expectedPackage,
             requireSemantic = expectedPackage.isNotBlank()
         )
@@ -177,8 +177,10 @@ class KaiObservationGate(
 
     private fun canSafelyReuseCanonical(expectedPackage: String): Boolean {
         val current = canonical ?: return false
+        if (current.packageName.isBlank()) return false
         if (current.isWeakObservation() || current.isOverlayPolluted()) return false
-        if (System.currentTimeMillis() - lastAcceptedObservationAt > 1400L) return false
+        if (!current.isMeaningful()) return false
+        if (System.currentTimeMillis() - lastAcceptedObservationAt > 2200L) return false
         return expectedPackage.isBlank() || isExpectedPackageMatch(current.packageName, expectedPackage)
     }
 
@@ -226,7 +228,13 @@ class KaiObservationGate(
                 ?: KaiObservationRuntime.getBestAvailable(expectedPackage = expectedPackage)
         }
 
-        val state = KaiScreenStateParser.fromDump(obs.packageName, obs.screenPreview)
+        val recoveredObs = if (obs.packageName.isBlank() && expectedPackage.isBlank()) {
+            KaiObservationRuntime.getBestAvailable(authoritativeOnly = false)
+        } else {
+            obs
+        }
+
+        val state = KaiScreenStateParser.fromDump(recoveredObs.packageName, recoveredObs.screenPreview)
         val fp = fingerprintFor(state.packageName, state.rawDump)
         val changed = fp.isNotBlank() && !sameFingerprint(fp, previousFingerprint)
         val weak = state.packageName.isBlank() ||
@@ -234,12 +242,12 @@ class KaiObservationGate(
             isOverlayPolluted(state.rawDump) ||
             state.isWeakObservation() ||
             !state.isMeaningful()
-        val stale = !changed && obs.updatedAt <= lastAcceptedObservationAt
+        val stale = !changed && recoveredObs.updatedAt <= lastAcceptedObservationAt
 
         if (!weak && !stale) {
             adopt(state)
             lastAcceptedFingerprint = fp
-            lastAcceptedObservationAt = obs.updatedAt
+            lastAcceptedObservationAt = recoveredObs.updatedAt
         }
 
         consecutiveWeakReads = if (weak) consecutiveWeakReads + 1 else 0
@@ -250,7 +258,7 @@ class KaiObservationGate(
             fingerprint = fp,
             changedFromPrevious = changed,
             usable = !weak && !stale,
-            fallback = !canReuseRecentRuntimeObs && obs.updatedAt <= beforeUpdatedAt,
+            fallback = !canReuseRecentRuntimeObs && recoveredObs.updatedAt <= beforeUpdatedAt,
             weak = weak,
             stale = stale,
             reusedLastGood = reusedCanonical
@@ -462,6 +470,35 @@ class KaiObservationGate(
                         passed = true,
                         state = authState,
                         reason = "authoritative_observation_ready",
+                        attempts = attempt + 1
+                    )
+                }
+            }
+
+            // If authoritative is blank but the live observation is already coherent and package-bearing,
+            // allow it as startup readiness instead of failing blind on missing_package.
+            val bestLive = KaiObservationRuntime.getBestAvailable(authoritativeOnly = false)
+            if (bestLive.updatedAt > 0L) {
+                val liveState = KaiScreenStateParser.fromDump(bestLive.packageName, bestLive.screenPreview)
+                val liveWeak = liveState.packageName.isBlank() ||
+                    liveState.rawDump.isBlank() ||
+                    liveState.isWeakObservation() ||
+                    liveState.isOverlayPolluted() ||
+                    !liveState.isMeaningful()
+
+                if (!liveWeak) {
+                    adopt(liveState)
+                    lastAcceptedFingerprint = fingerprintFor(liveState.packageName, liveState.rawDump)
+                    lastAcceptedObservationAt = bestLive.updatedAt
+                    lastMeta = RefreshMeta(
+                        fingerprint = lastAcceptedFingerprint,
+                        changedFromPrevious = true,
+                        usable = true
+                    )
+                    return ReadinessResult(
+                        passed = true,
+                        state = liveState,
+                        reason = "authoritative_observation_ready_via_live_runtime",
                         attempts = attempt + 1
                     )
                 }
