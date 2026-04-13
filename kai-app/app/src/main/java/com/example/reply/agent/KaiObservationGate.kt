@@ -198,179 +198,105 @@ class KaiObservationGate(
     suspend fun ensureStrongGate(
         expectedPackage: String = "",
         timeoutMs: Long = 2600L,
-        maxAttempts: Int = 2,
+        maxAttempts: Int = 1,
         allowLauncherSurface: Boolean = false,
         tier: GateTier = GateTier.SEMANTIC_ACTION_SAFE,
-        staleRetryAttempts: Int = 2,
-        missingPackageRetryAttempts: Int = 2
+        staleRetryAttempts: Int = 1,
+        missingPackageRetryAttempts: Int = 1
     ): GateResult {
-        var lastState = resolve()
-        var lastReason = "no_observation"
+        val state = requestFreshScreen(timeoutMs = timeoutMs, expectedPackage = expectedPackage)
 
-        repeat(maxAttempts.coerceAtLeast(1)) { attempt ->
-            val state = requestFreshScreen(timeoutMs = timeoutMs, expectedPackage = expectedPackage)
-            lastState = state
+        val overlay = state.isOverlayPolluted()
+        val packageMissing = state.packageName.isBlank()
+        val launcher = state.isLauncher()
+        val weak = state.isWeakObservation()
+        val packageMismatch = expectedPackage.isNotBlank() &&
+            !isExpectedPackageMatch(state.packageName, expectedPackage)
 
-            val packageMissing = state.packageName.isBlank()
-            val overlay = state.isOverlayPolluted()
-            val launcher = state.isLauncher()
-            val weak = state.isWeakObservation()
-            val packageMismatch = !isExpectedPackageMatch(state.packageName, expectedPackage)
-            val stale = !lastMeta.changedFromPrevious && lastAcceptedFingerprint.isNotBlank()
-
-            val passed = when (tier) {
-                GateTier.APP_LAUNCH_SAFE -> {
-                    !overlay &&
-                        !packageMissing &&
-                        (allowLauncherSurface || !launcher || expectedPackage.isNotBlank())
-                }
-                GateTier.SEMANTIC_ACTION_SAFE -> {
-                    !overlay &&
-                        !packageMissing &&
-                        !weak &&
-                        !packageMismatch &&
-                        (allowLauncherSurface || !launcher)
-                }
-            }
-
-            if (passed) {
-                return GateResult(true, state, "strong_observation_ready")
-            }
-
-            lastReason = when {
-                overlay -> "overlay_pollution"
-                packageMissing -> "missing_package"
-                packageMismatch -> "wrong_package"
-                stale -> "stale_observation"
-                weak -> "weak_observation"
-                launcher && !allowLauncherSurface -> "launcher_surface"
-                else -> "observation_not_strong"
-            }
-
-            val shouldRetry =
-                (lastReason == "stale_observation" && attempt < staleRetryAttempts) ||
-                    (lastReason == "missing_package" && attempt < missingPackageRetryAttempts) ||
-                    attempt < maxAttempts - 1
-
-            if (shouldRetry) delay(140L)
+        val passed = when (tier) {
+            GateTier.APP_LAUNCH_SAFE ->
+                !overlay && !packageMissing && (allowLauncherSurface || !launcher)
+            GateTier.SEMANTIC_ACTION_SAFE ->
+                !overlay && !packageMissing && !weak && !packageMismatch &&
+                    (allowLauncherSurface || !launcher)
         }
 
-        return GateResult(false, lastState, lastReason)
+        val reason = when {
+            passed -> "observation_ready"
+            overlay -> "overlay_pollution"
+            packageMissing -> "missing_package"
+            packageMismatch -> "wrong_package"
+            weak -> "weak_observation"
+            launcher && !allowLauncherSurface -> "launcher_surface"
+            else -> "observation_not_ready"
+        }
+
+        return GateResult(passed, state, reason)
     }
 
     suspend fun ensureAuthoritative(
         timeoutMs: Long = 3200L,
         allowLauncherSurface: Boolean = false,
         tier: GateTier = GateTier.SEMANTIC_ACTION_SAFE,
-        maxAttempts: Int = 3
+        maxAttempts: Int = 2
     ): ReadinessResult {
         var lastState = resolve()
-        var lastReason = "not_ready"
 
         repeat(maxAttempts.coerceAtLeast(1)) { attempt ->
-            val auth = KaiObservationRuntime.getBestAvailable(authoritativeOnly = true)
-            if (auth.updatedAt > 0L) {
+            // Try authoritative source first, then fall back to fresh screen
+            val obs = KaiObservationRuntime.getBestAvailable(authoritativeOnly = attempt == 0)
+            if (obs.updatedAt > 0L && obs.packageName.isNotBlank()) {
                 val state = KaiScreenStateParser.fromDump(
-                    packageName = auth.packageName,
-                    dump = auth.screenPreview,
-                    elements = auth.elements,
-                    screenKindHint = auth.screenKind,
-                    semanticConfidence = auth.semanticConfidence
+                    packageName = obs.packageName,
+                    dump = obs.screenPreview,
+                    elements = obs.elements,
+                    screenKindHint = obs.screenKind,
+                    semanticConfidence = obs.semanticConfidence
                 )
                 lastState = state
 
-                val authReady = when (tier) {
-                    GateTier.APP_LAUNCH_SAFE -> {
-                        state.packageName.isNotBlank() &&
-                            !state.isOverlayPolluted() &&
+                val ready = when (tier) {
+                    GateTier.APP_LAUNCH_SAFE ->
+                        !state.isOverlayPolluted() && (allowLauncherSurface || !state.isLauncher())
+                    GateTier.SEMANTIC_ACTION_SAFE ->
+                        !state.isOverlayPolluted() && !state.isWeakObservation() &&
                             (allowLauncherSurface || !state.isLauncher())
-                    }
-                    GateTier.SEMANTIC_ACTION_SAFE -> {
-                        state.packageName.isNotBlank() &&
-                            !state.isOverlayPolluted() &&
-                            !state.isWeakObservation() &&
-                            (allowLauncherSurface || !state.isLauncher())
-                    }
                 }
 
-                if (authReady) {
+                if (ready) {
                     adopt(state)
                     lastAcceptedFingerprint = fingerprintFor(state.packageName, state.rawDump)
-                    lastAcceptedObservationAt = auth.updatedAt
+                    lastAcceptedObservationAt = obs.updatedAt
                     lastMeta = RefreshMeta(
                         fingerprint = lastAcceptedFingerprint,
                         changedFromPrevious = true,
                         usable = true
                     )
-                    return ReadinessResult(true, state, "authoritative_observation_ready", attempt + 1)
-                }
-
-                lastReason = when {
-                    state.packageName.isBlank() -> "missing_package"
-                    state.isOverlayPolluted() -> "overlay_pollution"
-                    state.isWeakObservation() -> "weak_observation"
-                    state.isLauncher() && !allowLauncherSurface -> "launcher_surface"
-                    else -> "authoritative_not_strong"
+                    return ReadinessResult(true, state, "observation_ready", attempt + 1)
                 }
             }
 
-            val gate = ensureStrongGate(
-                expectedPackage = "",
-                timeoutMs = timeoutMs,
-                maxAttempts = 1,
-                allowLauncherSurface = allowLauncherSurface,
-                tier = tier,
-                staleRetryAttempts = 1,
-                missingPackageRetryAttempts = 1
-            )
-            lastState = gate.state
-            lastReason = gate.reason
-            if (gate.passed) {
-                return ReadinessResult(
-                    true,
-                    gate.state,
-                    "authoritative_observation_ready_via_strong_gate",
-                    attempt + 1
-                )
-            }
-
-            delay(150L)
-        }
-
-        val fallback = KaiObservationRuntime.getBestAvailable(authoritativeOnly = false)
-        if (fallback.updatedAt > 0L && fallback.packageName.isNotBlank()) {
-            val state = KaiScreenStateParser.fromDump(
-                packageName = fallback.packageName,
-                dump = fallback.screenPreview,
-                elements = fallback.elements,
-                screenKindHint = fallback.screenKind,
-                semanticConfidence = fallback.semanticConfidence
-            )
-            if (!state.isOverlayPolluted()) {
-                adopt(state)
-                lastAcceptedFingerprint = fingerprintFor(state.packageName, state.rawDump)
-                lastAcceptedObservationAt = fallback.updatedAt
+            // Fallback: request fresh screen
+            val fresh = requestFreshScreen(timeoutMs = timeoutMs, expectedPackage = "")
+            lastState = fresh
+            if (fresh.packageName.isNotBlank() && !fresh.isOverlayPolluted() &&
+                (allowLauncherSurface || !fresh.isLauncher())
+            ) {
+                adopt(fresh)
+                lastAcceptedFingerprint = fingerprintFor(fresh.packageName, fresh.rawDump)
+                lastAcceptedObservationAt = System.currentTimeMillis()
                 lastMeta = RefreshMeta(
                     fingerprint = lastAcceptedFingerprint,
                     changedFromPrevious = true,
-                    usable = true,
-                    fallback = true
+                    usable = true
                 )
-                return ReadinessResult(
-                    true,
-                    state,
-                    "authoritative_observation_ready_via_lenient_fallback",
-                    maxAttempts.coerceAtLeast(1) + 1
-                )
+                return ReadinessResult(true, fresh, "observation_ready_via_fresh", attempt + 1)
             }
+
+            if (attempt < maxAttempts - 1) delay(150L)
         }
 
-        return ReadinessResult(
-            false,
-            lastState,
-            "authoritative_observation_not_ready:$lastReason",
-            maxAttempts.coerceAtLeast(1)
-        )
+        return ReadinessResult(false, lastState, "observation_not_ready", maxAttempts)
     }
 
     fun markActionProgress(
