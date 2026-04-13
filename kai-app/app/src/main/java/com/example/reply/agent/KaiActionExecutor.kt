@@ -849,13 +849,13 @@ class KaiActionExecutor(
         preDelayMs: Long = 0L,
         postDelayMs: Long = 0L
     ) {
-        KaiBubbleManager.temporarilyHideForAction()
+        KaiBubbleManager.beginActionUiSuppression()
         try {
             if (preDelayMs > 0) delay(preDelayMs)
             sendKaiCmd(cmd, text, dir, times, x, y, endX, endY, holdMs, timeoutMs, expectedPackage)
             if (postDelayMs > 0) delay(postDelayMs)
         } finally {
-            KaiBubbleManager.releaseAllSuppression()
+            KaiBubbleManager.endActionUiSuppression()
         }
     }
 
