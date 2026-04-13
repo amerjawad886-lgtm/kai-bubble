@@ -352,6 +352,13 @@ class KaiActionExecutor(
     internal fun fingerprintFor(packageName: String, rawDump: String): String = gate.fingerprintFor(packageName, rawDump)
     internal fun sameFingerprint(a: String, b: String): Boolean = gate.sameFingerprint(a, b)
 
+    internal fun shouldAllowFinalCommitForStep(step: KaiActionStep): Boolean {
+        if (step.allowsFinalCommit) return true
+        val stageHint = step.stageHint.trim().uppercase(Locale.ROOT)
+        return step.completionBoundary == KaiGoalBoundary.FINAL_GOAL ||
+            stageHint == "SUCCESS"
+    }
+
     private fun inferAppHintFromText(text: String): String {
         return KaiScreenStateParser.inferAppHint(text)
     }
@@ -1221,7 +1228,7 @@ class KaiActionExecutor(
                 (getLastRefreshMeta().fallback || getLastRefreshMeta().reusedLastGood) &&
                 !KaiExecutionDecisionAuthority.expectedEvidenceSatisfied(step, current)
             ) {
-                onLog("semantic_action_guarded_continue_under_weak_observation")
+                onLog("semantic_action_guarded_continue_under_weak_observation: runtime_authority_verification_required")
             }
             if (!policy.allowed) {
                 val reason = if (policy.reason.isNotBlank()) policy.reason else "surface_transition_required"

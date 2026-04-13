@@ -166,6 +166,22 @@ class KaiObservationGate(
 
     // ── Screen Refresh ──────────────────────────────────────────────────
 
+
+    private fun canReuseRecentRuntimeObservation(expectedPackage: String): Boolean {
+        return KaiObservationRuntime.hasRecentAuthoritative(
+            maxAgeMs = 450L,
+            expectedPackage = expectedPackage,
+            requireSemantic = expectedPackage.isNotBlank()
+        )
+    }
+
+    private fun canSafelyReuseCanonical(expectedPackage: String): Boolean {
+        val current = canonical ?: return false
+        if (current.isWeakObservation() || current.isOverlayPolluted()) return false
+        if (System.currentTimeMillis() - lastAcceptedObservationAt > 1400L) return false
+        return expectedPackage.isBlank() || isExpectedPackageMatch(current.packageName, expectedPackage)
+    }
+
     /**
      * Requests a fresh screen observation via the accessibility service.
      *
@@ -185,15 +201,10 @@ class KaiObservationGate(
             canonical?.let { fingerprintFor(it.packageName, it.rawDump) }.orEmpty()
         }
 
-        val bestRecent = if (KaiObservationRuntime.hasRecentUsefulObservation(900L)) {
-            KaiObservationRuntime.getBestAvailable()
-        } else null
-
-        val canReuseRecentRuntimeObs = bestRecent != null &&
-            (expectedPackage.isBlank() || isExpectedPackageMatch(bestRecent.packageName, expectedPackage))
+        val canReuseRecentRuntimeObs = canReuseRecentRuntimeObservation(expectedPackage)
 
         val obs = if (canReuseRecentRuntimeObs) {
-            bestRecent
+            KaiObservationRuntime.getBestAvailable(expectedPackage = expectedPackage, authoritativeOnly = true)
         } else {
             KaiBubbleManager.beginActionUiSuppression(true)
             try {
@@ -212,7 +223,7 @@ class KaiObservationGate(
             }
 
             KaiObservationRuntime.awaitFresh(beforeUpdatedAt, timeoutMs)
-                ?: KaiObservationRuntime.getBestAvailable()
+                ?: KaiObservationRuntime.getBestAvailable(expectedPackage = expectedPackage)
         }
 
         val state = KaiScreenStateParser.fromDump(obs.packageName, obs.screenPreview)
@@ -221,7 +232,8 @@ class KaiObservationGate(
         val weak = state.packageName.isBlank() ||
             state.rawDump.isBlank() ||
             isOverlayPolluted(state.rawDump) ||
-            state.isWeakObservation()
+            state.isWeakObservation() ||
+            !state.isMeaningful()
         val stale = !changed && obs.updatedAt <= lastAcceptedObservationAt
 
         if (!weak && !stale) {
@@ -233,6 +245,7 @@ class KaiObservationGate(
         consecutiveWeakReads = if (weak) consecutiveWeakReads + 1 else 0
         consecutiveStaleReads = if (stale) consecutiveStaleReads + 1 else 0
 
+        val reusedCanonical = weak && canSafelyReuseCanonical(expectedPackage)
         lastMeta = RefreshMeta(
             fingerprint = fp,
             changedFromPrevious = changed,
@@ -240,14 +253,18 @@ class KaiObservationGate(
             fallback = !canReuseRecentRuntimeObs && obs.updatedAt <= beforeUpdatedAt,
             weak = weak,
             stale = stale,
-            reusedLastGood = !canReuseRecentRuntimeObs && canonical != null && weak
+            reusedLastGood = reusedCanonical
         )
 
         if (weak) {
             onLog("refresh_weak_observation_received")
         }
 
-        return if (!weak) state else canonical ?: state
+        return when {
+            !weak -> state
+            reusedCanonical -> canonical ?: state
+            else -> state
+        }
     }
 
     // ── Progress Tracking ───────────────────────────────────────────────
@@ -429,7 +446,8 @@ class KaiObservationGate(
                 val authWeak = authState.packageName.isBlank() ||
                     authState.rawDump.isBlank() ||
                     authState.isWeakObservation() ||
-                    authState.isOverlayPolluted()
+                    authState.isOverlayPolluted() ||
+                    !authState.isMeaningful()
 
                 if (!authWeak) {
                     adopt(authState)

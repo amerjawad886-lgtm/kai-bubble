@@ -332,10 +332,9 @@ fun KaiBubbleUI(
         KaiBubbleManager.softResetUiState()
         KaiAgentController.finishActionLoopSession()
         cancelPendingRestart()
-        rebuildRecognizerSoft()
+        needsBubbleRecognizerRestart = true
         resetAgentLoopUi()
-        requestFreshDump(120L)
-        requestFreshDump(360L)
+        requestFreshDump(140L)
     }
 
     fun cancelCurrentActionLoop(reason: String? = null) {
@@ -373,7 +372,7 @@ fun KaiBubbleUI(
         bubbleLoop = false
         stopBubbleListening()
         KaiVoice.stop()
-        rebuildRecognizerSoft()
+        needsBubbleRecognizerRestart = true
         statusText = computedIdleStatus()
     }
 
@@ -386,12 +385,12 @@ fun KaiBubbleUI(
             onDone = {
                 lastVoiceAt = System.currentTimeMillis()
                 statusText = computedIdleStatus()
-                if (bubbleLoop) restartBubbleListening(520L)
+                if (bubbleLoop) restartBubbleListening(480L)
             },
             onError = {
                 lastVoiceAt = System.currentTimeMillis()
                 statusText = computedIdleStatus()
-                if (bubbleLoop) restartBubbleListening(620L)
+                if (bubbleLoop) restartBubbleListening(560L)
             }
         )
     }

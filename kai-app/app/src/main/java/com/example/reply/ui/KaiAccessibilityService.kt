@@ -542,7 +542,14 @@ class KaiAccessibilityService : AccessibilityService() {
             }
         }
 
-        val prioritized = listOf(bestPackageBearing, bestChanged, best).firstOrNull { it != null } 
+        val expectedStrong = listOf(bestPackageBearing, bestChanged, best)
+            .filterNotNull()
+            .firstOrNull { shouldPreferCandidateForExpectedPackage(it, expectedPackage) }
+        if (expectedStrong != null) {
+            return expectedStrong
+        }
+
+        val prioritized = listOf(bestPackageBearing, bestChanged, best).firstOrNull { it != null }
         if (prioritized != null && !isWeakDumpCandidate(prioritized) &&
             (expectedPackage.isBlank() || packageMatchesExpected(prioritized.packageName, expectedPackage))) {
             return prioritized
@@ -617,6 +624,14 @@ class KaiAccessibilityService : AccessibilityService() {
         return best
     }
 
+
+
+    private fun shouldPreferCandidateForExpectedPackage(candidate: DumpCandidate, expectedPackage: String): Boolean {
+        if (expectedPackage.isBlank()) return false
+        if (!packageMatchesExpected(candidate.packageName, expectedPackage)) return false
+        if (isWeakDumpCandidate(candidate)) return false
+        return candidate.semanticConfidence >= 0.28f || candidate.elements.size >= 2 || candidate.dump.lines().size >= 2
+    }
     private fun scoreDumpQuality(packageName: String, dump: String, fingerprint: String): Int {
         var score = 0
         val clean = dump.trim()
@@ -624,7 +639,7 @@ class KaiAccessibilityService : AccessibilityService() {
 
         if (packageName.isNotBlank()) score += 120
         if (isExternalAppPackage(packageName)) score += 150
-        if (expectedDumpPackage.isNotBlank() && packageMatchesExpected(packageName, expectedDumpPackage)) score += 220
+        if (expectedDumpPackage.isNotBlank() && packageMatchesExpected(packageName, expectedDumpPackage)) score += 260
         if (packageName == lastKnownExternalPackage && isRecentPackageTransition()) score += 90
 
         if (fingerprint != lastDeliveredFingerprint) score += 120 else score -= 180

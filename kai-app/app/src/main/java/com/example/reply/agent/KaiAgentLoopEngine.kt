@@ -291,12 +291,6 @@ class KaiAgentLoopEngine(
                         )
                 }
 
-                fun shouldDeferGoalCommit(stageSnapshot: KaiTaskStageEngine.StageSnapshot): Boolean {
-                    return stageSnapshot.appEntryComplete &&
-                        !stageSnapshot.finalGoalComplete &&
-                        stageSnapshot.goalMode != KaiTaskStageEngine.GoalMode.OPEN_ONLY
-                }
-
                 suspend fun stabilizeObservationBeforePlanning(
                     baseline: KaiScreenState,
                     stageSnapshot: KaiTaskStageEngine.StageSnapshot,
@@ -595,16 +589,20 @@ class KaiAgentLoopEngine(
                     }
 
                     if (plan.goalComplete || plan.steps.isEmpty()) {
-                        plannerSignaledGoalComplete = plan.goalComplete
-                        val strictEvidence = hasStrictCycleEvidence(userPrompt, currentState)
-                        if (!strictEvidence) {
+                        val plannerCompletionTrusted = KaiExecutionDecisionAuthority.shouldAcceptPlannerGoalComplete(
+                            plan = plan,
+                            userPrompt = userPrompt,
+                            currentState = currentState
+                        )
+                        plannerSignaledGoalComplete = plannerCompletionTrusted
+                        if (plan.goalComplete && !plannerCompletionTrusted) {
                             withContext(Dispatchers.Main) {
-                                onLog("system", "planner_completion_rejected_without_strict_evidence")
+                                onLog("system", "planner_completion_rejected_without_runtime_authority_evidence")
                             }
-                            if (plan.steps.isEmpty()) {
-                                withContext(Dispatchers.Main) {
-                                    onLog("system", "planner_no_steps_without_strict_evidence; delegated_to_authority")
-                                }
+                        }
+                        if (plan.steps.isEmpty() && !plannerCompletionTrusted) {
+                            withContext(Dispatchers.Main) {
+                                onLog("system", "planner_no_steps_without_runtime_authority_evidence; delegated_to_authority")
                             }
                         }
                     }
@@ -766,7 +764,7 @@ class KaiAgentLoopEngine(
                         var effectiveDirective = runtimeDecision.directive
                         if (
                             runtimeDecision.directive == KaiExecutionDecisionAuthority.RuntimeDirective.STOP_SUCCESS &&
-                                shouldDeferGoalCommit(stageSnapshot)
+                                KaiExecutionDecisionAuthority.shouldDeferFinalCommit(stageSnapshot)
                         ) {
                             withContext(Dispatchers.Main) {
                                 onLog("system", "deferred_goal_commit_after_app_arrival_multi_step")
@@ -1174,7 +1172,7 @@ class KaiAgentLoopEngine(
 
                     val deferCycleCommit =
                         cycleDecision.directive == KaiExecutionDecisionAuthority.RuntimeDirective.STOP_SUCCESS &&
-                            shouldDeferGoalCommit(lastStageSnapshot)
+                            KaiExecutionDecisionAuthority.shouldDeferFinalCommit(lastStageSnapshot)
                     val effectiveCycleDirective = if (deferCycleCommit) {
                         withContext(Dispatchers.Main) {
                             onLog("system", "deferred_cycle_commit_after_app_arrival_multi_step")
@@ -1195,7 +1193,7 @@ class KaiAgentLoopEngine(
                         KaiExecutionDecisionAuthority.RuntimeDirective.STOP_FAILURE -> {
                             val stopAsSuccess = cycleDecision.directive == KaiExecutionDecisionAuthority.RuntimeDirective.STOP_SUCCESS
                             val finalMessage = if (stopAsSuccess) {
-                                "Goal committed from strict cycle evidence."
+                                "Final goal committed by runtime authority from strict cycle evidence."
                             } else {
                                 "Runtime authority cycle stop: ${cycleDecision.reason}"
                             }

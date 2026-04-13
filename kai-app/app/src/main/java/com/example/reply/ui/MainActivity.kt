@@ -48,8 +48,7 @@ class MainActivity : ComponentActivity() {
 
         modeState = extractMode(intent)
 
-        // Ensure observation bridge is alive as early as possible in app lifecycle.
-        KaiObservationRuntime.ensureBridge(applicationContext)
+                ensureRuntimeBridge()
 
         applyFullScreenBars()
 
@@ -76,14 +75,27 @@ class MainActivity : ComponentActivity() {
         setIntent(intent)
         modeState = extractMode(intent)
 
-        KaiObservationRuntime.ensureBridge(applicationContext)
+        ensureRuntimeBridge()
         applyFullScreenBars()
+    }
+
+    override fun onStart() {
+        super.onStart()
+        ensureRuntimeBridge()
     }
 
     override fun onResume() {
         super.onResume()
-        KaiObservationRuntime.ensureBridge(applicationContext)
+        ensureRuntimeBridge()
         applyFullScreenBars()
+    }
+
+
+    private fun ensureRuntimeBridge() {
+        KaiObservationRuntime.ensureBridge(applicationContext)
+        if (modeState.isNotBlank() || KaiBubbleManager.isShowing()) {
+            KaiObservationRuntime.requestImmediateDump()
+        }
     }
 
     private fun extractMode(intent: Intent?): String {

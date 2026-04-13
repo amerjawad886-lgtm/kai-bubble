@@ -22,6 +22,7 @@ class KaiService : Service() {
 
         if (Settings.canDrawOverlays(this)) {
             KaiBubbleManager.show(this)
+            KaiObservationRuntime.requestImmediateDump()
         }
     }
 
@@ -52,6 +53,19 @@ class KaiService : Service() {
                 .build()
 
         startForeground(1, notification)
+    }
+
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        KaiObservationRuntime.ensureBridge(applicationContext)
+
+        if (Settings.canDrawOverlays(this)) {
+            if (!KaiBubbleManager.isShowing()) {
+                KaiBubbleManager.show(this)
+            }
+            KaiObservationRuntime.requestImmediateDump()
+        }
+
+        return START_STICKY
     }
 
     override fun onDestroy() {

@@ -18,6 +18,8 @@ object KaiRuntimeLoopCoordinator {
     private const val EXECUTION_ACK = "Make Action accepted as full execution permission on your responsibility."
     private const val LOOP_START = "Agent loop starting…"
 
+    @Volatile private var lastStartTs = 0L
+
     private fun resetTransientStateForNewRun(context: Context) {
         // Preflight should clean transient UI/voice/model state only.
         // Observation runtime ownership stays with KaiObservationRuntime / engine startup.
@@ -27,7 +29,9 @@ object KaiRuntimeLoopCoordinator {
         KaiAgentController.resetTransientStateForNewRun()
         KaiObservationRuntime.ensureBridge(appContext)
         KaiBubbleManager.releaseAllSuppression()
-        KaiBubbleManager.softResetUiState()
+        if (KaiBubbleManager.isShowing()) {
+            KaiBubbleManager.softResetUiState()
+        }
     }
 
     fun startLoop(
@@ -37,6 +41,13 @@ object KaiRuntimeLoopCoordinator {
         onPhase: (KaiRuntimePhase) -> Unit,
         onFinished: (KaiLoopResult) -> Unit
     ): KaiAgentLoopEngine? {
+        val now = System.currentTimeMillis()
+        if (now - lastStartTs < 500L) {
+            appendLog("system", "Ignored duplicate loop start")
+            return null
+        }
+        lastStartTs = now
+
         val clean = prompt.trim()
         if (clean.isBlank()) return null
 
@@ -46,6 +57,7 @@ object KaiRuntimeLoopCoordinator {
         KaiAgentController.ensureRuntimeObservationBridge(appContext)
 
         if (KaiObservationRuntime.isWatching) {
+            KaiObservationRuntime.requestImmediateDump()
             appendLog("system", "Monitoring carried into action loop")
         }
 

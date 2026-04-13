@@ -170,7 +170,21 @@ object KaiObservationRuntime {
         if (normalized == KaiScreenStateParser.normalize("(empty dump)")) return false
         if (isOverlayOnlyDump(normalized)) return false
         if (obs.packageName.startsWith("com.example.reply")) return false
+        if (obs.screenPreview.trim().length < 10 && obs.elements.size < 2) return false
         return true
+    }
+
+    private fun isSemanticallyRich(obs: KaiObservation): Boolean {
+        if (!isUsefulObservation(obs)) return false
+        if (obs.semanticConfidence >= 0.42f) return true
+        if (obs.elements.size >= 3) return true
+        val lines = obs.screenPreview.lines().count { it.trim().length >= 2 }
+        return lines >= 2
+    }
+
+    private fun packageMatchesExpected(observedPackage: String, expectedPackage: String): Boolean {
+        if (expectedPackage.isBlank()) return true
+        return KaiAppIdentityRegistry.packageMatchesFamily(expectedPackage, observedPackage)
     }
 
     suspend fun awaitFresh(afterTime: Long, timeoutMs: Long): KaiObservation? {
@@ -178,15 +192,16 @@ object KaiObservationRuntime {
         var nudgedAt = 0L
 
         while (System.currentTimeMillis() < deadline) {
-            val a = authoritative
-            if (a.updatedAt > afterTime && isUsefulObservation(a)) return a
+            val expected = lastWatchExpectedPackage
+            val auth = getBestAvailable(expectedPackage = expected, authoritativeOnly = true)
+            if (auth.updatedAt > afterTime && isUsefulObservation(auth)) return auth
 
-            val l = live
-            if (l.updatedAt > afterTime && isUsefulObservation(l)) return l
+            val best = getBestAvailable(expectedPackage = expected)
+            if (best.updatedAt > afterTime && isUsefulObservation(best)) return best
 
             if (System.currentTimeMillis() - nudgedAt >= 320L) {
                 nudgedAt = System.currentTimeMillis()
-                requestImmediateDump(lastWatchExpectedPackage)
+                requestImmediateDump(expected)
             }
 
             delay(80L)
@@ -262,25 +277,48 @@ object KaiObservationRuntime {
         watchJob = null
     }
 
-    fun hasRecentAuthoritative(maxAgeMs: Long): Boolean {
+    fun hasRecentAuthoritative(
+        maxAgeMs: Long,
+        expectedPackage: String = "",
+        requireSemantic: Boolean = false
+    ): Boolean {
         val obs = authoritative
-        return isUsefulObservation(obs) &&
-            obs.updatedAt > 0 &&
-            System.currentTimeMillis() - obs.updatedAt <= maxAgeMs
+        val freshEnough = obs.updatedAt > 0 && System.currentTimeMillis() - obs.updatedAt <= maxAgeMs
+        if (!freshEnough) return false
+        if (!packageMatchesExpected(obs.packageName, expectedPackage)) return false
+        return if (requireSemantic) isSemanticallyRich(obs) else isUsefulObservation(obs)
     }
 
-    fun hasRecentUsefulObservation(maxAgeMs: Long): Boolean {
+    fun hasRecentUsefulObservation(
+        maxAgeMs: Long,
+        expectedPackage: String = "",
+        requireAuthoritative: Boolean = false
+    ): Boolean {
         val now = System.currentTimeMillis()
-        return (isUsefulObservation(authoritative) && authoritative.updatedAt > 0 && now - authoritative.updatedAt <= maxAgeMs) ||
-            (isUsefulObservation(live) && live.updatedAt > 0 && now - live.updatedAt <= maxAgeMs)
+        val authOk = hasRecentAuthoritative(maxAgeMs, expectedPackage)
+        if (authOk) return true
+        if (requireAuthoritative) return false
+        val l = live
+        return isUsefulObservation(l) &&
+            packageMatchesExpected(l.packageName, expectedPackage) &&
+            l.updatedAt > 0 && now - l.updatedAt <= maxAgeMs
     }
 
-    fun getBestAvailable(): KaiObservation {
+    fun getBestAvailable(
+        expectedPackage: String = "",
+        authoritativeOnly: Boolean = false
+    ): KaiObservation {
+        val auth = authoritative
+        val liveObs = live
+        val authUsable = isUsefulObservation(auth) && packageMatchesExpected(auth.packageName, expectedPackage)
+        val liveUsable = !authoritativeOnly && isUsefulObservation(liveObs) && packageMatchesExpected(liveObs.packageName, expectedPackage)
         return when {
-            isUsefulObservation(authoritative) -> authoritative
-            isUsefulObservation(live) -> live
-            authoritative.updatedAt >= live.updatedAt -> authoritative
-            else -> live
+            authUsable && liveUsable -> if (auth.updatedAt >= liveObs.updatedAt) auth else liveObs
+            authUsable -> auth
+            liveUsable -> liveObs
+            authoritativeOnly -> auth
+            auth.updatedAt >= liveObs.updatedAt -> auth
+            else -> liveObs
         }
     }
 

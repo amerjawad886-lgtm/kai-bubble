@@ -214,4 +214,23 @@ object KaiAppIdentityRegistry {
         return sameAppFamily(expectedPackage, observedPackage)
     }
 
+
+    fun textMatchesKey(text: String, appKey: String): Boolean {
+        val resolved = resolveAppKey(text)
+        if (resolved.isBlank()) return false
+        return normalize(resolved) == normalize(appKey)
+    }
+
+    fun resolvePackageCandidates(textOrKey: String): List<String> {
+        val key = resolveAppKey(textOrKey).ifBlank { normalize(textOrKey) }
+        return packageCandidatesForKey(key)
+    }
+
+    fun matchesExpectedApp(expectedPackage: String, observedPackage: String, observedText: String = ""): Boolean {
+        if (packageMatchesFamily(expectedPackage, observedPackage)) return true
+        val expectedKey = resolveAppKeyFromPackage(expectedPackage)
+        if (expectedKey.isBlank() || observedText.isBlank()) return false
+        return textMatchesKey(observedText, expectedKey)
+    }
+
 }

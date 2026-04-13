@@ -318,8 +318,16 @@ object KaiCommandParser {
             return KaiParsedCommand.Stop
         }
 
-        if (containsAny(lower, "refresh and reset", "reset and refresh", "soft reset", "refresh reset", "اعمل refresh و reset", "اعمل ريفرش و ريسيت", "ريفرش و ريسيت", "اعمل reset", "اعمل refresh", "اعمل سوفت ريسيت", "reset", "refresh")) {
+        if (containsAny(lower, "refresh kai", "reset kai", "soft reset", "refresh and reset", "reset and refresh", "refresh reset", "اعمل refresh و reset", "اعمل ريفرش و ريسيت", "ريفرش و ريسيت", "اعمل reset", "اعمل سوفت ريسيت", "reset")) {
             return KaiParsedCommand.SoftReset
+        }
+
+        if (containsAny(lower, "reanalyze screen", "reanalyze", "analyze again", "analyze screen again", "حلل مره اخرى", "حلل مرة اخرى", "حلل الشاشة مرة اخرى")) {
+            return KaiParsedCommand.AnalyzeScreen
+        }
+
+        if (containsAny(lower, "refresh screen", "refresh view", "read screen again", "اعمل ريفرش للشاشه", "اعمل ريفرش للشاشة", "اقرا الشاشة مرة اخرى")) {
+            return KaiParsedCommand.ReadScreen
         }
 
         if (containsAny(lower, "report", "تقرير", "اعطني تقرير", "give me a report", "custom prompt", "prompt")) {
@@ -352,6 +360,9 @@ object KaiCommandParser {
 
         parseScrollCommand(lower, text)?.let { return it }
 
+        val directUiAlias = findUiElementAliasIn(text)
+        val directAppAlias = findAppAliasIn(text)
+
         if (typeVerbs.any { lower.contains(norm(it)) }) {
             val typed = extractAfter(text, *typeVerbs.toTypedArray()).trim()
             return if (typed.isNotBlank()) {
@@ -359,6 +370,10 @@ object KaiCommandParser {
             } else {
                 KaiParsedCommand.Ask(text)
             }
+        }
+
+        if (directUiAlias != null && directAppAlias == null && !openVerbs.any { lower.contains(norm(it)) }) {
+            return KaiParsedCommand.Click(directUiAlias)
         }
 
         if (openVerbs.any { lower.contains(norm(it)) }) {

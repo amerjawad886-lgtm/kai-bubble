@@ -52,6 +52,8 @@ object KaiBubbleManager {
 
     private var suppressionCounter: Int = 0
     private var strongSuppressionCounter: Int = 0
+    private var lastUiApplyAt: Long = 0L
+    private var pendingUiApply = false
 
     fun isShowing(): Boolean = bubbleView != null
     fun getCurrentX(): Int = bubbleParams?.x ?: lastX
@@ -304,30 +306,43 @@ object KaiBubbleManager {
         main.post {
             suppressionCounter = 0
             strongSuppressionCounter = 0
-            applyActionUiState()
+            applyActionUiState(force = true)
         }
     }
 
     fun prepareForObservationPulse() {
         main.post {
             strongSuppressionCounter = 1
-            applyActionUiState()
+            applyActionUiState(force = true)
             main.postDelayed({
                 strongSuppressionCounter = 0
-                applyActionUiState()
-            }, 220L)
+                applyActionUiState(force = true)
+            }, 180L)
         }
     }
 
-    private fun applyActionUiState() {
+    private fun applyActionUiState(force: Boolean = false) {
         val view = bubbleView ?: return
+        val now = System.currentTimeMillis()
+        if (!force && pendingUiApply) return
+        if (!force && now - lastUiApplyAt < 90L) {
+            pendingUiApply = true
+            main.postDelayed({
+                pendingUiApply = false
+                applyActionUiState(force = true)
+            }, 96L)
+            return
+        }
+        lastUiApplyAt = now
         try {
             val alpha = when {
-                strongSuppressionCounter > 0 -> 0f
-                suppressionCounter > 0 -> 0.38f
+                strongSuppressionCounter > 0 -> 0.08f
+                suppressionCounter > 0 -> 0.45f
                 else -> 1f
             }
-            view.visibility = if (strongSuppressionCounter > 0) View.INVISIBLE else View.VISIBLE
+            // Keep the view visible to avoid flicker / re-attach feeling.
+            // We only fade aggressively during strong suppression.
+            view.visibility = View.VISIBLE
             view.alpha = alpha
         } catch (e: Exception) {
             Log.e(TAG, "applyActionUiState failed: ${e.message}", e)

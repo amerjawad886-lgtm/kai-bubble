@@ -40,6 +40,7 @@ object OpenAIClient {
     private val streamSeq = AtomicInteger(0)
     @Volatile private var activeStreamCall: Call? = null
     @Volatile private var activeStreamToken: Int = 0
+    @Volatile private var lastStreamCancelledAt: Long = 0L
 
     private fun isCurrentStream(token: Int): Boolean = activeStreamToken == token
     private fun clearActiveStreamState() {
@@ -209,13 +210,16 @@ object OpenAIClient {
     }
 
     fun cancelActiveStream() {
+        lastStreamCancelledAt = System.currentTimeMillis()
         streamSeq.incrementAndGet()
         try { activeStreamCall?.cancel() } catch (_: Exception) {}
         clearActiveStreamState()
     }
 
     fun resetTransientStateForNewRun() {
-        cancelActiveStream()
+        if (activeStreamCall != null) {
+            cancelActiveStream()
+        }
     }
 
     fun askStream(
@@ -270,6 +274,14 @@ object OpenAIClient {
         call.enqueue(object : okhttp3.Callback {
             override fun onFailure(call: Call, e: IOException) {
                 if (!stillCurrent()) return
+                val now = System.currentTimeMillis()
+                if (now - lastStreamCancelledAt < 800L) {
+                    complete {
+                        clearIfCurrent()
+                        onDone()
+                    }
+                    return
+                }
                 complete {
                     clearIfCurrent()
                     onError("Connection failed: ${e.message ?: "Unknown"}")

@@ -50,9 +50,11 @@ object KaiVoice {
     @Volatile private var player: MediaPlayer? = null
     @Volatile private var activeCall: Call? = null
     @Volatile private var lastAudioFile: File? = null
+    @Volatile private var lastStopAt: Long = 0L
 
     fun speakingNow(): Boolean = isSpeaking || isStopping
     fun speechFullyCompleted(): Boolean = !isSpeaking && !isStopping && player == null && activeCall == null
+    fun recentlyStopped(withinMs: Long = 320L): Boolean = System.currentTimeMillis() - lastStopAt <= withinMs
 
     private fun sanitizeForSpeech(text: String): String =
         text.replace(Regex("""[`*_#>\[\]\(\)"]"""), " ")
@@ -155,145 +157,156 @@ object KaiVoice {
             return
         }
 
-        stop()
-        val mySeq = seq.incrementAndGet()
+        val startPlayback = {
+            stop()
+            val mySeq = seq.incrementAndGet()
 
-        val payload = JSONObject()
-            .put("model", KaiModelRouter.forTask(KaiTask.TTS))
-            .put("voice", chooseVoice(tone))
-            .put("format", "mp3")
-            .put("input", spokenText)
-            .toString()
+            val payload = JSONObject()
+                .put("model", KaiModelRouter.forTask(KaiTask.TTS))
+                .put("voice", chooseVoice(tone))
+                .put("format", "mp3")
+                .put("input", spokenText)
+                .toString()
 
-        val request = Request.Builder()
-            .url("https://api.openai.com/v1/audio/speech")
-            .addHeader("Authorization", "Bearer $key")
-            .addHeader("Content-Type", "application/json")
-            .post(payload.toRequestBody(JSON))
-            .build()
+            val request = Request.Builder()
+                .url("https://api.openai.com/v1/audio/speech")
+                .addHeader("Authorization", "Bearer $key")
+                .addHeader("Content-Type", "application/json")
+                .post(payload.toRequestBody(JSON))
+                .build()
 
-        val call = client.newCall(request)
-        activeCall = call
+            val call = client.newCall(request)
+            activeCall = call
 
-        var sessionFinalized = false
-        fun stillCurrent(): Boolean = seq.get() == mySeq
-        fun finalizeSession(error: String? = null, invokeDone: Boolean = true) {
-            if (!stillCurrent() || sessionFinalized) return
-            sessionFinalized = true
-            clearPlaybackState(releasePlayer = true)
-            if (error != null) onError?.invoke(error)
-            if (invokeDone) onDone?.invoke()
-        }
-
-        call.enqueue(object : Callback {
-            override fun onFailure(call: Call, e: IOException) {
-                if (!stillCurrent()) return
-                main.post { finalizeSession(e.message ?: "network failure") }
+            var sessionFinalized = false
+            fun stillCurrent(): Boolean = seq.get() == mySeq
+            fun finalizeSession(error: String? = null, invokeDone: Boolean = true) {
+                if (!stillCurrent() || sessionFinalized) return
+                sessionFinalized = true
+                clearPlaybackState(releasePlayer = true)
+                if (error != null) onError?.invoke(error)
+                if (invokeDone) onDone?.invoke()
             }
 
-            override fun onResponse(call: Call, response: Response) {
-                if (!stillCurrent()) {
-                    response.close()
-                    return
+            call.enqueue(object : Callback {
+                override fun onFailure(call: Call, e: IOException) {
+                    if (!stillCurrent()) return
+                    main.post { finalizeSession(e.message ?: "network failure") }
                 }
 
-                response.use { res ->
-                    if (!res.isSuccessful) {
-                        main.post { finalizeSession("http ${res.code}") }
+                override fun onResponse(call: Call, response: Response) {
+                    if (!stillCurrent()) {
+                        response.close()
                         return
                     }
 
-                    val bytes = res.body?.bytes()
-                    if (bytes == null || bytes.isEmpty()) {
-                        main.post { finalizeSession("empty audio") }
-                        return
-                    }
-
-                    val file = File(context.cacheDir, "kai_voice_$mySeq.mp3")
-                    try {
-                        FileOutputStream(file).use { it.write(bytes) }
-                    } catch (e: Exception) {
-                        main.post { finalizeSession("file write error: ${e.message ?: "unknown"}") }
-                        return
-                    }
-
-                    main.post {
-                        if (!stillCurrent()) {
-                            try { file.delete() } catch (_: Exception) {}
-                            return@post
+                    response.use { res ->
+                        if (!res.isSuccessful) {
+                            main.post { finalizeSession("http ${res.code}") }
+                            return
                         }
 
-                        cleanupOldAudio(file)
-                        lastAudioFile = file
-                        clearPlaybackState(releasePlayer = true)
+                        val bytes = res.body?.bytes()
+                        if (bytes == null || bytes.isEmpty()) {
+                            main.post { finalizeSession("empty audio") }
+                            return
+                        }
 
-                        val newPlayer = MediaPlayer()
-                        player = newPlayer
+                        val file = File(context.cacheDir, "kai_voice_$mySeq.mp3")
                         try {
-                            newPlayer.setAudioAttributes(
-                                AudioAttributes.Builder()
-                                    .setUsage(AudioAttributes.USAGE_ASSISTANT)
-                                    .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
-                                    .build()
-                            )
-                            newPlayer.setDataSource(file.absolutePath)
-                            newPlayer.setOnPreparedListener { mp ->
-                                if (!stillCurrent() || player !== mp) {
-                                    try { mp.release() } catch (_: Exception) {}
-                                    return@setOnPreparedListener
+                            FileOutputStream(file).use { it.write(bytes) }
+                        } catch (e: Exception) {
+                            main.post { finalizeSession("file write error: ${e.message ?: "unknown"}") }
+                            return
+                        }
+
+                        main.post {
+                            if (!stillCurrent()) {
+                                try { file.delete() } catch (_: Exception) {}
+                                return@post
+                            }
+
+                            cleanupOldAudio(file)
+                            lastAudioFile = file
+                            clearPlaybackState(releasePlayer = true)
+
+                            val newPlayer = MediaPlayer()
+                            player = newPlayer
+                            try {
+                                newPlayer.setAudioAttributes(
+                                    AudioAttributes.Builder()
+                                        .setUsage(AudioAttributes.USAGE_ASSISTANT)
+                                        .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                                        .build()
+                                )
+                                newPlayer.setDataSource(file.absolutePath)
+                                newPlayer.setOnPreparedListener { mp ->
+                                    if (!stillCurrent() || player !== mp) {
+                                        try { mp.release() } catch (_: Exception) {}
+                                        return@setOnPreparedListener
+                                    }
+                                    isStopping = false
+                                    isSpeaking = true
+                                    onStart?.invoke()
+                                    try {
+                                        mp.start()
+                                    } catch (e: Exception) {
+                                        if (player === mp) player = null
+                                        try { mp.release() } catch (_: Exception) {}
+                                        finalizeSession(e.message ?: "start playback error")
+                                    }
                                 }
-                                isStopping = false
-                                isSpeaking = true
-                                onStart?.invoke()
-                                try {
-                                    mp.start()
-                                } catch (e: Exception) {
+                                newPlayer.setOnCompletionListener { mp ->
+                                    if (!stillCurrent() || player !== mp) {
+                                        try { mp.release() } catch (_: Exception) {}
+                                        return@setOnCompletionListener
+                                    }
                                     if (player === mp) player = null
                                     try { mp.release() } catch (_: Exception) {}
-                                    finalizeSession(e.message ?: "start playback error")
+                                    isSpeaking = false
+                                    isStopping = false
+                                    finalizeSession(invokeDone = true)
                                 }
-                            }
-                            newPlayer.setOnCompletionListener { mp ->
-                                if (!stillCurrent() || player !== mp) {
+                                newPlayer.setOnErrorListener { mp, _, _ ->
+                                    if (!stillCurrent() || player !== mp) {
+                                        try { mp.release() } catch (_: Exception) {}
+                                        return@setOnErrorListener true
+                                    }
+                                    if (player === mp) player = null
                                     try { mp.release() } catch (_: Exception) {}
-                                    return@setOnCompletionListener
+                                    finalizeSession("MediaPlayer error")
+                                    true
                                 }
-                                if (player === mp) player = null
-                                try { mp.release() } catch (_: Exception) {}
-                                isSpeaking = false
-                                isStopping = false
-                                finalizeSession(invokeDone = true)
+                                newPlayer.prepareAsync()
+                            } catch (e: Exception) {
+                                if (player === newPlayer) player = null
+                                try { newPlayer.release() } catch (_: Exception) {}
+                                finalizeSession(e.message ?: "player setup error")
                             }
-                            newPlayer.setOnErrorListener { mp, _, _ ->
-                                if (!stillCurrent() || player !== mp) {
-                                    try { mp.release() } catch (_: Exception) {}
-                                    return@setOnErrorListener true
-                                }
-                                if (player === mp) player = null
-                                try { mp.release() } catch (_: Exception) {}
-                                finalizeSession("MediaPlayer error")
-                                true
-                            }
-                            newPlayer.prepareAsync()
-                        } catch (e: Exception) {
-                            if (player === newPlayer) player = null
-                            try { newPlayer.release() } catch (_: Exception) {}
-                            finalizeSession(e.message ?: "player setup error")
                         }
                     }
                 }
-            }
-        })
+            })
+        }
+
+        if (recentlyStopped(220L)) {
+            main.postDelayed({ startPlayback() }, 240L)
+        } else {
+            startPlayback()
+        }
     }
 
-    fun stop() {
+    fun stop() {    fun stop() {
         seq.incrementAndGet()
+        lastStopAt = System.currentTimeMillis()
         isStopping = true
         try { activeCall?.cancel() } catch (_: Exception) {}
         clearPlaybackState(releasePlayer = true)
     }
 
     fun resetTransientStateForNewRun() {
-        stop()
+        if (speakingNow() || activeCall != null || player != null) {
+            stop()
+        }
     }
 }

@@ -1,5 +1,22 @@
 package com.example.reply.agent
 
+enum class KaiGoalBoundary {
+    UNKNOWN,
+    APP_ENTRY,
+    SURFACE_READY,
+    ENTITY_OPENED,
+    INPUT_READY,
+    CONTENT_COMMITTED,
+    FINAL_GOAL
+}
+
+enum class KaiContinuationKind {
+    NONE,
+    STAGE_CONTINUATION,
+    RECOVERY_CONTINUATION,
+    VERIFICATION
+}
+
 data class KaiActionStep(
     val cmd: String,
     val text: String = "",
@@ -23,13 +40,20 @@ data class KaiActionStep(
     val expectedTexts: List<String> = emptyList(),
     val expectedScreenKind: String = "",
     val strategy: String = "",
-    val confidence: Float = 0f
+    val confidence: Float = 0f,
+    // New authority/stage metadata. All defaults preserve backward compatibility.
+    val stageHint: String = "",
+    val completionBoundary: KaiGoalBoundary = KaiGoalBoundary.UNKNOWN,
+    val continuationKind: KaiContinuationKind = KaiContinuationKind.NONE,
+    val allowsFinalCommit: Boolean = false
 )
 
 data class KaiActionPlan(
     val summary: String,
     val steps: List<KaiActionStep>,
-    val goalComplete: Boolean = false
+    val goalComplete: Boolean = false,
+    // Planner can signal completion, but runtime authority must still verify it.
+    val plannerGoalComplete: Boolean = goalComplete
 )
 
 data class KaiLoopResult(

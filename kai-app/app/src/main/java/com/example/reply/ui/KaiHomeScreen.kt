@@ -497,7 +497,7 @@ fun KaiHomeScreen(
 
     fun hardStopSpeech() {
         speechSessionId += 1
-        muteSpeakUntilMs = System.currentTimeMillis() + 1200L
+        muteSpeakUntilMs = System.currentTimeMillis() + 420L
         KaiVoice.stop()
         OpenAIClient.cancelActiveStream()
     }
@@ -513,10 +513,9 @@ fun KaiHomeScreen(
         KaiBubbleManager.softResetUiState()
         clearTransientUiState()
         recognizerDirty = true
-        requestFreshDump(120L)
-        requestFreshDump(360L)
+        requestFreshDump(140L)
         if (notify) push(MsgRole.SYSTEM, "Soft reset completed")
-        if (voiceLoop && !KaiVoice.speakingNow()) restartVoiceLoop(650L)
+        if (voiceLoop && !KaiVoice.speakingNow()) restartVoiceLoop(620L)
     }
 
     fun stopAll() {
@@ -529,7 +528,16 @@ fun KaiHomeScreen(
 
     fun speakKai(text: String, afterDone: (() -> Unit)? = null) {
         val now = System.currentTimeMillis()
-        if (now < muteSpeakUntilMs) return
+        if (now < muteSpeakUntilMs) {
+            val delayMs = (muteSpeakUntilMs - now).coerceAtMost(500L)
+            scope.launch {
+                delay(delayMs)
+                if (!KaiVoice.speakingNow() && !isExecutingAction) {
+                    speakKai(text, afterDone)
+                }
+            }
+            return
+        }
 
         val mySpeechSession = ++speechSessionId
         if (isListening) stopListening()
@@ -654,7 +662,7 @@ fun KaiHomeScreen(
                 agentLoopEngine = null
                 softAgentRefreshAfterRun()
                 push(MsgRole.SYSTEM, result.finalMessage)
-                if (voiceLoop && !KaiVoice.speakingNow()) restartVoiceLoop(700L)
+                if (voiceLoop && !KaiVoice.speakingNow()) restartVoiceLoop(620L)
             }
         )
 

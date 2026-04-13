@@ -137,6 +137,26 @@ data class KaiScreenState(
         return title || body
     }
 
+
+
+    fun hasSemanticStructure(): Boolean {
+        val meaningfulLines = lines.count { KaiScreenStateParser.normalize(it).length >= 2 }
+        return elements.size >= 2 ||
+            likelyInputFields.isNotEmpty() ||
+            likelyPrimaryActions.isNotEmpty() ||
+            likelyNavigationTargets.isNotEmpty() ||
+            (semanticConfidence >= 0.35f && meaningfulLines >= 1) ||
+            meaningfulLines >= 2
+    }
+
+    fun matchesExpectedPackage(expectedPackage: String): Boolean {
+        val expected = KaiScreenStateParser.normalize(expectedPackage)
+        if (expected.isBlank()) return true
+        val observed = KaiScreenStateParser.normalize(packageName)
+        if (observed.isBlank()) return false
+        return observed == expected || observed.startsWith("$expected.") ||
+            KaiAppIdentityRegistry.packageMatchesFamily(expectedPackage, packageName)
+    }
     fun containsText(query: String): Boolean {
         val nQuery = KaiScreenStateParser.normalize(query)
         if (nQuery.isBlank()) return false
@@ -172,8 +192,7 @@ data class KaiScreenState(
         val meaningfulLines = lines.count {
             KaiScreenStateParser.normalize(it).length >= 2
         }
-        val hasStructuredUi =
-            elements.size >= 2 || likelyInputFields.isNotEmpty() || likelyPrimaryActions.isNotEmpty()
+        val hasStructuredUi = hasSemanticStructure()
         val semanticallyUsable = semanticConfidence >= 0.28f &&
             (elements.isNotEmpty() || meaningfulLines >= 1)
 
@@ -196,14 +215,14 @@ data class KaiScreenState(
         val meaningfulLines = lines.count {
             KaiScreenStateParser.normalize(it).length >= 2
         }
-        val hasStructuredUi =
-            elements.size >= 2 || likelyInputFields.isNotEmpty() || likelyPrimaryActions.isNotEmpty()
+        val hasStructuredUi = hasSemanticStructure()
         val semanticallyUsable = semanticConfidence >= 0.32f &&
             (elements.isNotEmpty() || meaningfulLines >= 1)
 
         if (meaningfulLines < 1 && !hasStructuredUi && !semanticallyUsable) return true
         if (rawDump.trim().length < 10 && !hasStructuredUi) return true
         if (isLauncher() && meaningfulLines < 2 && elements.size < 3) return true
+        if (semanticConfidence < 0.24f && !hasStructuredUi && meaningfulLines < 2) return true
 
         return false
     }
