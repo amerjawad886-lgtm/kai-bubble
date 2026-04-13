@@ -89,10 +89,17 @@ object KaiObservationRuntime {
         lastWatchExpectedPackage = ""
     }
 
-    fun requestWarmupObservation(expectedPackage: String = "", burstCount: Int = 5, gapMs: Long = 140L) {
+    fun requestWarmupObservation(
+        expectedPackage: String = "",
+        burstCount: Int = 5,
+        gapMs: Long = 140L,
+        skipTransitionReset: Boolean = false
+    ) {
         val safeBursts = burstCount.coerceIn(1, 8)
         lastWatchExpectedPackage = expectedPackage
-        requestTransitionReset()
+        if (!skipTransitionReset) {
+            requestTransitionReset()
+        }
         repeat(safeBursts) { index ->
             watchScope.launch {
                 if (index > 0) delay(index * gapMs)

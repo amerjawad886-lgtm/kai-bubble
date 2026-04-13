@@ -145,7 +145,10 @@ class KaiAgentLoopEngine(
                 }
 
                 if (!KaiObservationRuntime.hasRecentUsefulObservation(1900L)) {
-                    KaiObservationRuntime.requestWarmupObservation(burstCount = 5)
+                    KaiObservationRuntime.requestWarmupObservation(
+                        burstCount = 5,
+                        skipTransitionReset = !watchingAlreadyActive
+                    )
                 }
                 KaiObservationRuntime.awaitFresh(
                     afterTime = startupObservationBaseline,
@@ -225,24 +228,44 @@ class KaiAgentLoopEngine(
                         maxAttempts = 4
                     )
                     if (!readiness.passed) {
-                        val finalMessage =
-                            "Authoritative observation handshake failed: ${readiness.reason}."
-                        pushAgentState(
-                            state = "warning",
-                            observation = readiness.state.rawDump,
-                            decision = finalMessage,
-                            action = "observation_handshake",
-                            notes = "startup_authoritative_observation_not_ready"
-                        )
-                        KaiAgentController.finishActionLoopSession(finalMessage)
-                        executor.resetRuntimeState(clearLastGoodScreen = false)
-                        return@withContext KaiLoopResult(
-                            success = false,
-                            finalMessage = finalMessage,
-                            executedSteps = 0
-                        )
+                        if (startupOpenIntentGate) {
+                            // Cold-start tolerance: open-app commands don't require
+                            // authoritative observation of the current screen — the first
+                            // action is to launch the target app, which will change the
+                            // screen anyway.  Use the best available observation or a
+                            // blank state rather than aborting the entire loop.
+                            val bestObs = KaiObservationRuntime.getBestAvailable()
+                            currentState = if (bestObs.packageName.isNotBlank() &&
+                                !bestObs.packageName.startsWith("com.example.reply")
+                            ) {
+                                KaiScreenStateParser.fromDump(bestObs.packageName, bestObs.screenPreview)
+                            } else {
+                                KaiScreenStateParser.fromDump("", "")
+                            }
+                            executor.adoptCanonicalRuntimeState(currentState)
+                            onLog("system",
+                                "startup_cold_start_open_intent_fallback: reason=${readiness.reason} pkg=${currentState.packageName}")
+                        } else {
+                            val finalMessage =
+                                "Authoritative observation handshake failed: ${readiness.reason}."
+                            pushAgentState(
+                                state = "warning",
+                                observation = readiness.state.rawDump,
+                                decision = finalMessage,
+                                action = "observation_handshake",
+                                notes = "startup_authoritative_observation_not_ready"
+                            )
+                            KaiAgentController.finishActionLoopSession(finalMessage)
+                            executor.resetRuntimeState(clearLastGoodScreen = false)
+                            return@withContext KaiLoopResult(
+                                success = false,
+                                finalMessage = finalMessage,
+                                executedSteps = 0
+                            )
+                        }
+                    } else {
+                        currentState = readiness.state
                     }
-                    currentState = readiness.state
                 }
 
                 // Both the fast-path (adoptCanonicalRuntimeState) and the slow-path

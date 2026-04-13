@@ -533,6 +533,36 @@ class KaiObservationGate(
             if (attempt < maxAttempts - 1) delay(180L)
         }
 
+        // Cold-start lenient fallback: after all strict attempts fail, accept any
+        // non-Kai observation that carries a real external package, even if it didn't
+        // pass the full quality gate.  This prevents open-app and similar commands
+        // from failing with missing_package immediately after app restart, when the
+        // accessibility tree hasn't fully settled but does carry a valid package hint.
+        val coldStartFallback = KaiObservationRuntime.getBestAvailable(authoritativeOnly = false)
+        if (coldStartFallback.updatedAt > 0L &&
+            coldStartFallback.packageName.isNotBlank() &&
+            !coldStartFallback.packageName.startsWith("com.example.reply")
+        ) {
+            val fallbackState = KaiScreenStateParser.fromDump(
+                coldStartFallback.packageName,
+                coldStartFallback.screenPreview
+            )
+            adopt(fallbackState)
+            lastAcceptedFingerprint = fingerprintFor(fallbackState.packageName, fallbackState.rawDump)
+            lastAcceptedObservationAt = coldStartFallback.updatedAt
+            lastMeta = RefreshMeta(
+                fingerprint = lastAcceptedFingerprint,
+                changedFromPrevious = true,
+                usable = true
+            )
+            return ReadinessResult(
+                passed = true,
+                state = fallbackState,
+                reason = "authoritative_observation_ready_via_cold_start_lenient_fallback",
+                attempts = maxAttempts.coerceAtLeast(1) + 1
+            )
+        }
+
         return ReadinessResult(
             passed = false,
             state = lastState,
