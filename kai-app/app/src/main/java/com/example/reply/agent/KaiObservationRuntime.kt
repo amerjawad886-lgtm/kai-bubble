@@ -73,8 +73,6 @@ object KaiObservationRuntime {
     }
 
     fun softCleanupAfterRun() {
-        // Intentionally light. We do not want aggressive cleanup to destroy
-        // useful external app/package awareness between runs.
         lastWatchExpectedPackage = ""
     }
 
@@ -154,14 +152,7 @@ object KaiObservationRuntime {
         )
         live = obs
 
-        val state = KaiScreenStateParser.fromDump(
-            packageName = pkg,
-            dump = dump,
-            elements = elements,
-            screenKindHint = screenKind,
-            semanticConfidence = confidence
-        )
-
+        val state = screenStateOf(obs)
         if (isUsefulScreenState(state)) {
             authoritative = obs
             runCatching {
@@ -211,17 +202,11 @@ object KaiObservationRuntime {
     ): KaiObservation {
         val deadline = System.currentTimeMillis() + timeoutMs.coerceAtLeast(300L)
         while (System.currentTimeMillis() < deadline) {
-            val candidate = getBestAvailable(
-                expectedPackage = expectedPackage,
-                authoritativeOnly = authoritativeOnly
-            )
+            val candidate = getBestAvailable(expectedPackage, authoritativeOnly)
             if (candidate.updatedAt > afterTime) return candidate
             delay(FRESH_POLL_MS)
         }
-        return getBestAvailable(
-            expectedPackage = expectedPackage,
-            authoritativeOnly = authoritativeOnly
-        )
+        return getBestAvailable(expectedPackage, authoritativeOnly)
     }
 
     fun startWatching(immediateDump: Boolean = true, expectedPackage: String = "") {
@@ -287,16 +272,13 @@ object KaiObservationRuntime {
         expectedPackage: String = "",
         requireAuthoritative: Boolean = false
     ): Boolean {
-        if (requireAuthoritative) {
-            return hasRecentAuthoritative(maxAgeMs, expectedPackage, requireSemantic = false)
-        }
-
         val now = System.currentTimeMillis()
-        val candidates = listOf(authoritative, live)
+        val candidates = if (requireAuthoritative) listOf(authoritative) else listOf(authoritative, live)
         return candidates.any { obs ->
             obs.updatedAt > 0L &&
                 now - obs.updatedAt <= maxAgeMs &&
-                matchesExpectedPackage(obs.packageName, expectedPackage)
+                matchesExpectedPackage(obs.packageName, expectedPackage) &&
+                (!requireAuthoritative || isUsefulScreenState(screenStateOf(obs)))
         }
     }
 
@@ -305,38 +287,31 @@ object KaiObservationRuntime {
         expectedPackage: String = "",
         authoritativeOnly: Boolean = false
     ): KaiObservation {
-        val candidates = if (authoritativeOnly) {
-            listOf(authoritative)
-        } else {
-            listOf(authoritative, live)
-        }
+        val candidates = if (authoritativeOnly) listOf(authoritative) else listOf(authoritative, live)
 
         val matching = candidates
             .filter { it.updatedAt > 0L }
             .filter { matchesExpectedPackage(it.packageName, expectedPackage) }
 
         if (matching.isNotEmpty()) {
-            return matching.maxByOrNull { scoreObservation(it) } ?: matching.first()
+            return matching.maxByOrNull(::scoreObservation) ?: matching.first()
         }
 
         val any = candidates.filter { it.updatedAt > 0L }
         if (any.isNotEmpty()) {
-            return any.maxByOrNull { scoreObservation(it) } ?: any.first()
+            return any.maxByOrNull(::scoreObservation) ?: any.first()
         }
 
         return if (authoritative.updatedAt >= live.updatedAt) authoritative else live
     }
 
-    fun currentScreenState(): KaiScreenState {
-        val best = getBestAvailable()
-        return screenStateOf(best)
-    }
+    fun currentScreenState(): KaiScreenState = screenStateOf(getBestAvailable())
 
     private fun scoreObservation(obs: KaiObservation): Long {
         val state = screenStateOf(obs)
         var score = obs.updatedAt
-        if (isUsefulScreenState(state)) score += 10_000_000L
         if (state.packageName.isNotBlank()) score += 5_000_000L
+        if (isUsefulScreenState(state)) score += 10_000_000L
         if (!state.isWeakObservation()) score += 1_000_000L
         return score
     }
@@ -362,11 +337,10 @@ object KaiObservationRuntime {
     }
 
     private fun isUsefulScreenState(state: KaiScreenState): Boolean {
-        if (state.packageName.isBlank()) return false
-        if (state.rawDump.isBlank()) return false
-        if (state.isOverlayPolluted()) return false
-        if (!state.isMeaningful()) return false
-        return true
+        return state.packageName.isNotBlank() &&
+            state.rawDump.isNotBlank() &&
+            !state.isOverlayPolluted() &&
+            state.isMeaningful()
     }
 
     internal fun parseElementsFromJson(raw: String?): List<KaiUiElement> {

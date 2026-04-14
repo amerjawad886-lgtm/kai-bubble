@@ -1,4 +1,3 @@
-
 package com.example.reply.agent
 
 import android.content.Context
@@ -39,10 +38,7 @@ class KaiAgentLoopEngine(
         scope.cancel()
     }
 
-    fun start(
-        userPrompt: String,
-        onFinished: (KaiLoopResult) -> Unit
-    ) {
+    fun start(userPrompt: String, onFinished: (KaiLoopResult) -> Unit) {
         cancel()
         currentRunId = UUID.randomUUID().toString()
         val runId = currentRunId
@@ -54,13 +50,7 @@ class KaiAgentLoopEngine(
             } catch (_: CancellationException) {
                 if (runId == currentRunId) {
                     onStatus("Cancelled")
-                    onFinished(
-                        KaiLoopResult(
-                            success = false,
-                            finalMessage = "Agent loop cancelled.",
-                            executedSteps = 0
-                        )
-                    )
+                    onFinished(KaiLoopResult(success = false, finalMessage = "Agent loop cancelled.", executedSteps = 0))
                 }
             } finally {
                 KaiObservationRuntime.softCleanupAfterRun()
@@ -72,15 +62,10 @@ class KaiAgentLoopEngine(
         }
     }
 
-    private suspend fun runLoop(
-        userPrompt: String,
-        runId: String
-    ): KaiLoopResult {
+    private suspend fun runLoop(userPrompt: String, runId: String): KaiLoopResult {
         val appContext = context.applicationContext
         val executor = KaiActionExecutor(appContext) { text ->
-            scope.launch(Dispatchers.Main.immediate) {
-                onLog("system", text)
-            }
+            scope.launch(Dispatchers.Main.immediate) { onLog("system", text) }
         }
         val agentStateRepo = KaiAgentStateRepository(appContext)
 
@@ -108,6 +93,19 @@ class KaiAgentLoopEngine(
             }
         }
 
+        suspend fun finishLoop(success: Boolean, message: String, executedSteps: Int, observation: String, notes: String): KaiLoopResult {
+            pushAgentState(
+                state = if (success) "idle" else "error",
+                observation = observation,
+                decision = message,
+                action = "stop",
+                notes = notes
+            )
+            KaiAgentController.finishActionLoopSession(message)
+            executor.resetRuntimeState(clearLastGoodScreen = false)
+            return KaiLoopResult(success = success, finalMessage = message, executedSteps = executedSteps)
+        }
+
         return withContext(Dispatchers.IO) {
             ensureActiveOrThrow()
 
@@ -116,12 +114,11 @@ class KaiAgentLoopEngine(
             executor.resetRuntimeState(clearLastGoodScreen = false)
             executor.resetObservationTransitionStateForRun()
 
-            val startupGateTier =
-                if (KaiTaskStageEngine.classifyGoalMode(userPrompt) == KaiTaskStageEngine.GoalMode.OPEN_ONLY) {
-                    KaiActionExecutor.ObservationGateTier.APP_LAUNCH_SAFE
-                } else {
-                    KaiActionExecutor.ObservationGateTier.SEMANTIC_ACTION_SAFE
-                }
+            val startupGateTier = if (KaiTaskStageEngine.classifyGoalMode(userPrompt) == KaiTaskStageEngine.GoalMode.OPEN_ONLY) {
+                KaiActionExecutor.ObservationGateTier.APP_LAUNCH_SAFE
+            } else {
+                KaiActionExecutor.ObservationGateTier.SEMANTIC_ACTION_SAFE
+            }
 
             val startup = executor.ensureAuthoritativeObservationReady(
                 timeoutMs = 3200L,
@@ -151,13 +148,15 @@ class KaiAgentLoopEngine(
             var repeatedNoProgressSteps = 0
             var noProgressCycles = 0
             var lastDecision: KaiExecutionDecisionAuthority.RuntimeDecision? = null
+            var lastOpenAppOutcome: KaiOpenAppOutcome? = null
 
-            repeat(5) { cycle ->
+            repeat(6) { cycle ->
                 ensureActiveOrThrow()
 
                 val stageSnapshot = KaiTaskStageEngine.evaluate(
                     userPrompt = userPrompt,
-                    currentState = currentState
+                    currentState = currentState,
+                    openAppOutcome = lastOpenAppOutcome
                 )
 
                 val cycleGate = executor.ensureStrongObservationGate(
@@ -169,53 +168,27 @@ class KaiAgentLoopEngine(
                         KaiActionExecutor.ObservationGateTier.SEMANTIC_ACTION_SAFE
                     } else {
                         startupGateTier
-                    }
+                    },
+                    staleRetryAttempts = 2,
+                    missingPackageRetryAttempts = 2
                 )
 
-                if (cycleGate.passed) {
-                    currentState = cycleGate.state
-                } else {
-                    currentState = cycleGate.state
-                    if (stageSnapshot.appEntryComplete &&
-                        cycleGate.reason.contains("stale_observation")
-                    ) {
-                        noProgressCycles += 1
-                        withContext(Dispatchers.Main) {
-                            onLog("system", "observation_not_stable_before_planning_cycle=${cycle + 1}")
-                        }
-                        return@repeat
-                    }
-                }
+                currentState = cycleGate.state
+                executor.adoptCanonicalRuntimeState(currentState)
 
-                val earlyStageCheck = KaiTaskStageEngine.evaluate(userPrompt, currentState)
-                if (!earlyStageCheck.shouldContinue &&
-                    KaiExecutionDecisionAuthority.likelyGoalSatisfied(userPrompt, currentState)
-                ) {
-                    val finalMessage = "Final goal committed from current screen state."
-                    pushAgentState(
-                        state = "idle",
-                        observation = currentState.rawDump,
-                        decision = finalMessage,
-                        action = "stop",
-                        notes = "goal_satisfied_without_additional_steps"
-                    )
-                    KaiAgentController.finishActionLoopSession(finalMessage)
-                    executor.resetRuntimeState(clearLastGoodScreen = false)
-                    return@withContext KaiLoopResult(
-                        success = true,
-                        finalMessage = finalMessage,
-                        executedSteps = totalSteps
-                    )
+                if (!cycleGate.passed && cycleGate.reason.contains("stale_observation")) {
+                    noProgressCycles += 1
+                    withContext(Dispatchers.Main) { onLog("system", "observation_not_stable_before_planning_cycle=${cycle + 1}") }
+                    return@repeat
                 }
 
                 withContext(Dispatchers.Main) { onStatus("Planning") }
-
                 pushAgentState(
                     state = "planning",
                     observation = currentState.rawDump,
                     decision = userPrompt,
                     action = "build_action_plan",
-                    notes = "cycle=${cycle + 1}"
+                    notes = "cycle=${cycle + 1} stage=${stageSnapshot.stage}"
                 )
 
                 var plan = KaiAgentController.buildActionPlan(
@@ -233,11 +206,7 @@ class KaiAgentLoopEngine(
                     )
                     if (continuation != null) {
                         plan = plan.copy(
-                            summary = if (plan.summary.isBlank()) {
-                                "Using stage continuation"
-                            } else {
-                                plan.summary
-                            },
+                            summary = if (plan.summary.isBlank()) "Using stage continuation" else plan.summary,
                             steps = listOf(continuation)
                         )
                     }
@@ -264,7 +233,7 @@ class KaiAgentLoopEngine(
                         onLog(
                             "system",
                             "Step $totalSteps: ${step.cmd}" +
-                                (step.text.ifBlank { step.selectorText }.takeIf { it.isNotBlank() }?.let { " → $it" } ?: "")
+                                (step.semanticPayload().takeIf { it.isNotBlank() }?.let { " → $it" } ?: "")
                         )
                     }
 
@@ -276,6 +245,9 @@ class KaiAgentLoopEngine(
                     )
                     currentState = after
                     executor.adoptCanonicalRuntimeState(currentState)
+                    if (step.isOpenAppStep()) {
+                        lastOpenAppOutcome = result.openAppOutcome
+                    }
 
                     pushAgentState(
                         state = "executing",
@@ -313,59 +285,42 @@ class KaiAgentLoopEngine(
 
                     when (decision.directive) {
                         KaiExecutionDecisionAuthority.RuntimeDirective.STOP_SUCCESS -> {
-                            val finalMessage = "Final goal committed by runtime authority."
-                            pushAgentState(
-                                state = "idle",
-                                observation = currentState.rawDump,
-                                decision = finalMessage,
-                                action = "stop",
-                                notes = decision.reason
-                            )
-                            KaiAgentController.finishActionLoopSession(finalMessage)
-                            executor.resetRuntimeState(clearLastGoodScreen = false)
-                            return@withContext KaiLoopResult(
+                            return@withContext finishLoop(
                                 success = true,
-                                finalMessage = finalMessage,
-                                executedSteps = totalSteps
-                            )
-                        }
-
-                        KaiExecutionDecisionAuthority.RuntimeDirective.STOP_FAILURE -> {
-                            val finalMessage = "Runtime authority stop: ${decision.reason}"
-                            pushAgentState(
-                                state = "error",
+                                message = "Final goal committed by runtime authority.",
+                                executedSteps = totalSteps,
                                 observation = currentState.rawDump,
-                                decision = finalMessage,
-                                action = "stop",
                                 notes = decision.reason
                             )
-                            KaiAgentController.finishActionLoopSession(finalMessage)
-                            executor.resetRuntimeState(clearLastGoodScreen = false)
-                            return@withContext KaiLoopResult(
+                        }
+                        KaiExecutionDecisionAuthority.RuntimeDirective.STOP_FAILURE -> {
+                            return@withContext finishLoop(
                                 success = false,
-                                finalMessage = finalMessage,
-                                executedSteps = totalSteps
+                                message = "Runtime authority stop: ${decision.reason}",
+                                executedSteps = totalSteps,
+                                observation = currentState.rawDump,
+                                notes = decision.reason
                             )
                         }
-
                         KaiExecutionDecisionAuthority.RuntimeDirective.RECOVER -> {
                             val recovery = executor.attemptRecoveryForStep(step, currentState)
                             currentState = recovery.screenState ?: currentState
                             executor.adoptCanonicalRuntimeState(currentState)
-                            withContext(Dispatchers.Main) {
-                                onLog("system", "runtime_recovery: ${recovery.message}")
-                            }
+                            withContext(Dispatchers.Main) { onLog("system", "runtime_recovery: ${recovery.message}") }
                         }
-
                         KaiExecutionDecisionAuthority.RuntimeDirective.REPLAN -> {
                             replanRequested = true
                         }
-
-                        KaiExecutionDecisionAuthority.RuntimeDirective.CONTINUE -> {
-                            // Continue to next step.
-                        }
+                        KaiExecutionDecisionAuthority.RuntimeDirective.CONTINUE -> Unit
                     }
+
                     if (replanRequested) break
+                }
+
+                if (cycleHadProgress) {
+                    noProgressCycles = 0
+                } else {
+                    noProgressCycles += 1
                 }
 
                 val cycleDecision = KaiExecutionDecisionAuthority.evaluateCycleOutcome(
@@ -384,62 +339,37 @@ class KaiAgentLoopEngine(
 
                 when (cycleDecision.directive) {
                     KaiExecutionDecisionAuthority.RuntimeDirective.STOP_SUCCESS -> {
-                        val finalMessage = "Final goal committed from cycle evidence."
-                        pushAgentState(
-                            state = "idle",
-                            observation = currentState.rawDump,
-                            decision = finalMessage,
-                            action = "stop",
-                            notes = cycleDecision.reason
-                        )
-                        KaiAgentController.finishActionLoopSession(finalMessage)
-                        executor.resetRuntimeState(clearLastGoodScreen = false)
-                        return@withContext KaiLoopResult(
+                        return@withContext finishLoop(
                             success = true,
-                            finalMessage = finalMessage,
-                            executedSteps = totalSteps
-                        )
-                    }
-
-                    KaiExecutionDecisionAuthority.RuntimeDirective.STOP_FAILURE -> {
-                        val finalMessage = "Runtime authority cycle stop: ${cycleDecision.reason}"
-                        pushAgentState(
-                            state = "error",
+                            message = "Final goal committed from cycle evidence.",
+                            executedSteps = totalSteps,
                             observation = currentState.rawDump,
-                            decision = finalMessage,
-                            action = "stop",
                             notes = cycleDecision.reason
                         )
-                        KaiAgentController.finishActionLoopSession(finalMessage)
-                        executor.resetRuntimeState(clearLastGoodScreen = false)
-                        return@withContext KaiLoopResult(
+                    }
+                    KaiExecutionDecisionAuthority.RuntimeDirective.STOP_FAILURE -> {
+                        return@withContext finishLoop(
                             success = false,
-                            finalMessage = finalMessage,
-                            executedSteps = totalSteps
+                            message = "Runtime authority cycle stop: ${cycleDecision.reason}",
+                            executedSteps = totalSteps,
+                            observation = currentState.rawDump,
+                            notes = cycleDecision.reason
                         )
                     }
-
-                    else -> Unit
+                    KaiExecutionDecisionAuthority.RuntimeDirective.REPLAN -> {
+                        withContext(Dispatchers.Main) { onLog("system", "cycle_replan: ${cycleDecision.reason}") }
+                    }
+                    KaiExecutionDecisionAuthority.RuntimeDirective.RECOVER,
+                    KaiExecutionDecisionAuthority.RuntimeDirective.CONTINUE -> Unit
                 }
-
-                if (!cycleHadProgress) noProgressCycles += 1
             }
 
-            val finalMessage = "Runtime authority stop: loop_limit_reached. Refine the prompt and try again."
-            pushAgentState(
-                state = "idle",
-                observation = currentState.rawDump,
-                decision = "loop_limit_reached",
-                action = "stop",
-                notes = "Agent reached current loop limit"
-            )
-            KaiAgentController.finishActionLoopSession(finalMessage)
-            executor.resetRuntimeState(clearLastGoodScreen = false)
-
-            KaiLoopResult(
+            return@withContext finishLoop(
                 success = false,
-                finalMessage = finalMessage,
-                executedSteps = totalSteps
+                message = "Agent loop stopped without final commit.",
+                executedSteps = totalSteps,
+                observation = currentState.rawDump,
+                notes = "loop_exhausted"
             )
         }
     }

@@ -1,3 +1,7 @@
+// Shrink pass: this file remains intentionally rich because it is the shared semantic
+// screen vocabulary for the rest of Kai OS. The behavioral decision logic was moved out
+// during the REWRITE phase; this file now acts mainly as semantic description + lookup helpers.
+
 package com.example.reply.agent
 
 import java.util.Locale

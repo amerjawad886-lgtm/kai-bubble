@@ -1,4 +1,3 @@
-
 package com.example.reply.agent
 
 import android.content.Context
@@ -249,9 +248,7 @@ class KaiActionExecutor(
         step: KaiActionStep,
         currentState: KaiScreenState
     ): KaiActionExecutionResult {
-        val cmd = step.cmd.trim().lowercase(Locale.ROOT)
-
-        return when (cmd) {
+        return when (step.normalizedCommand()) {
             "open_app" -> executeOpenApp(step, currentState)
             "click_text" -> executeClickText(step, currentState)
             "long_press_text" -> executeLongPressText(step, currentState)
@@ -270,7 +267,7 @@ class KaiActionExecutor(
             "wait" -> executeWait(step, currentState)
             else -> KaiActionExecutionResult(
                 success = false,
-                message = "unsupported_command:$cmd",
+                message = "unsupported_command:${step.normalizedCommand()}",
                 screenState = currentState
             )
         }
@@ -284,7 +281,7 @@ class KaiActionExecutor(
         step: KaiActionStep,
         currentState: KaiScreenState
     ): KaiActionExecutionResult {
-        val rawTarget = step.text.ifBlank { step.selectorText }.trim()
+        val rawTarget = step.semanticPayload()
         val targetHint = KaiAppIdentityRegistry.resolveAppKey(rawTarget).ifBlank {
             KaiScreenStateParser.inferAppHint(rawTarget)
         }
@@ -296,16 +293,22 @@ class KaiActionExecutor(
             return KaiActionExecutionResult(
                 success = false,
                 message = "open_app_missing_target",
-                screenState = currentState
+                screenState = currentState,
+                openAppOutcome = KaiOpenAppOutcome.OPEN_FAILED
             )
         }
 
-        if (targetPackage.isNotBlank() && currentState.matchesExpectedPackage(targetPackage)) {
+        if (targetPackage.isNotBlank() && currentState.matchesExpectedPackage(targetPackage) && !currentState.isLauncher()) {
+            val outcome = if (currentState.isWeakObservation()) {
+                KaiOpenAppOutcome.USABLE_INTERMEDIATE_IN_TARGET_APP
+            } else {
+                KaiOpenAppOutcome.TARGET_READY
+            }
             return KaiActionExecutionResult(
                 success = true,
                 message = "open_app_already_in_target",
                 screenState = currentState,
-                openAppOutcome = KaiOpenAppOutcome.TARGET_READY
+                openAppOutcome = outcome
             )
         }
 
@@ -318,26 +321,24 @@ class KaiActionExecutor(
         )
 
         val beforeFingerprint = currentState.semanticFingerprint()
-        repeat(4) { attempt ->
+        var bestIntermediate: KaiScreenState? = null
+
+        repeat(5) { attempt ->
             val after = requestFreshScreen(
-                timeoutMs = 1800L + (attempt * 300L),
-                expectedPackage = ""
+                timeoutMs = 1800L + (attempt * 350L),
+                expectedPackage = if (targetPackage.isNotBlank()) targetPackage else ""
             )
-            val inTarget = when {
+
+            val targetMatched = when {
                 targetPackage.isNotBlank() -> after.matchesExpectedPackage(targetPackage)
                 targetHint.isNotBlank() -> after.likelyMatchesAppHint(targetHint)
-                else -> after.packageName.isNotBlank() && !after.isLauncher()
+                else -> false
             }
 
-            val moved = KaiExecutionDecisionAuthority.hasMeaningfulProgress(currentState, after) ||
+            val progress = KaiExecutionDecisionAuthority.hasMeaningfulProgress(currentState, after) ||
                 beforeFingerprint != after.semanticFingerprint()
 
-            if (inTarget && !after.isLauncher()) {
-                val outcome = if (after.isWeakObservation()) {
-                    KaiOpenAppOutcome.USABLE_INTERMEDIATE_IN_TARGET_APP
-                } else {
-                    KaiOpenAppOutcome.TARGET_READY
-                }
+            if (targetMatched && !after.isLauncher()) {
                 gate.markActionProgress(
                     currentState.packageName,
                     after.packageName,
@@ -345,74 +346,88 @@ class KaiActionExecutor(
                     after.semanticFingerprint(),
                     "open_app"
                 )
+                val outcome = if (after.isWeakObservation()) {
+                    KaiOpenAppOutcome.USABLE_INTERMEDIATE_IN_TARGET_APP
+                } else {
+                    KaiOpenAppOutcome.TARGET_READY
+                }
                 return KaiActionExecutionResult(
                     success = true,
-                    message = "open_app_confirmed:$outcome",
+                    message = if (outcome == KaiOpenAppOutcome.TARGET_READY) "open_app_target_ready" else "open_app_target_weak",
                     screenState = after,
                     openAppOutcome = outcome
                 )
             }
 
-            if (moved && after.packageName.isNotBlank() && !after.isLauncher()) {
+            if (progress && after.packageName.isNotBlank() && !after.isLauncher()) {
+                bestIntermediate = after
+            }
+
+            if (targetPackage.isNotBlank() && after.packageName.isNotBlank() && !after.matchesExpectedPackage(targetPackage) && !after.isLauncher()) {
                 return KaiActionExecutionResult(
-                    success = true,
-                    message = "open_app_intermediate_transition",
+                    success = false,
+                    message = "open_app_wrong_package_after_launch",
                     screenState = after,
-                    openAppOutcome = KaiOpenAppOutcome.USABLE_INTERMEDIATE_IN_TARGET_APP
+                    openAppOutcome = KaiOpenAppOutcome.WRONG_PACKAGE_CONFIRMED
                 )
             }
 
             delay(120L)
         }
 
-        val finalState = requestFreshScreen(timeoutMs = 1800L, expectedPackage = "")
+        if (bestIntermediate != null) {
+            return KaiActionExecutionResult(
+                success = true,
+                message = "open_app_transition_progress_only",
+                screenState = bestIntermediate,
+                openAppOutcome = KaiOpenAppOutcome.OPEN_TRANSITION_IN_PROGRESS
+            )
+        }
 
-        // Check final state before giving up
-        val finalInTarget = when {
+        val finalState = requestFreshScreen(timeoutMs = 1800L, expectedPackage = if (targetPackage.isNotBlank()) targetPackage else "")
+        val finalMatch = when {
             targetPackage.isNotBlank() -> finalState.matchesExpectedPackage(targetPackage)
             targetHint.isNotBlank() -> finalState.likelyMatchesAppHint(targetHint)
             else -> false
         }
-        if (finalInTarget && !finalState.isLauncher()) {
-            gate.markActionProgress(
-                currentState.packageName,
-                finalState.packageName,
-                beforeFingerprint,
-                finalState.semanticFingerprint(),
-                "open_app_late_confirm"
-            )
+        if (finalMatch && !finalState.isLauncher()) {
+            val outcome = if (finalState.isWeakObservation()) {
+                KaiOpenAppOutcome.USABLE_INTERMEDIATE_IN_TARGET_APP
+            } else {
+                KaiOpenAppOutcome.TARGET_READY
+            }
             return KaiActionExecutionResult(
                 success = true,
-                message = "open_app_confirmed_late",
+                message = "open_app_late_match",
                 screenState = finalState,
-                openAppOutcome = KaiOpenAppOutcome.TARGET_READY
+                openAppOutcome = outcome
             )
         }
-        // Any non-launcher screen after launch attempt = practical intermediate success
-        if (finalState.packageName.isNotBlank() && !finalState.isLauncher()) {
+
+        if (targetPackage.isNotBlank() && finalState.packageName.isNotBlank() && !finalState.isLauncher() && !finalState.matchesExpectedPackage(targetPackage)) {
             return KaiActionExecutionResult(
-                success = true,
-                message = "open_app_intermediate_fallback",
+                success = false,
+                message = "open_app_final_wrong_package",
                 screenState = finalState,
-                openAppOutcome = KaiOpenAppOutcome.USABLE_INTERMEDIATE_IN_TARGET_APP
+                openAppOutcome = KaiOpenAppOutcome.WRONG_PACKAGE_CONFIRMED
             )
         }
+
         return KaiActionExecutionResult(
             success = false,
             message = "open_app_not_confirmed_yet",
             screenState = finalState,
-            openAppOutcome = KaiOpenAppOutcome.OPEN_TRANSITION_IN_PROGRESS
+            openAppOutcome = if (finalState.packageName.isBlank() || finalState.isLauncher()) {
+                KaiOpenAppOutcome.OPEN_FAILED
+            } else {
+                KaiOpenAppOutcome.OPEN_TRANSITION_IN_PROGRESS
+            }
         )
     }
 
-    private suspend fun executeClickText(
-        step: KaiActionStep,
-        currentState: KaiScreenState
-    ): KaiActionExecutionResult {
-        val text = step.text.ifBlank { step.selectorText }.trim()
-        if (text.isBlank()) {
-            return KaiActionExecutionResult(false, "click_text_missing_text", currentState)
-        }
+    private suspend fun executeClickText(step: KaiActionStep, currentState: KaiScreenState): KaiActionExecutionResult {
+        val text = step.semanticPayload()
+        if (text.isBlank()) return KaiActionExecutionResult(false, "click_text_missing_text", currentState)
         sendKaiCmdSuppressed(
             cmd = KaiAccessibilityService.CMD_CLICK_TEXT,
             text = text,
@@ -424,23 +439,13 @@ class KaiActionExecutor(
             timeoutMs = step.timeoutMs.coerceIn(1200L, 2600L),
             expectedPackage = step.expectedPackage.ifBlank { currentState.packageName }
         )
-        val success = KaiExecutionDecisionAuthority.hasMeaningfulProgress(currentState, after) ||
-            after.containsText(text)
-        return KaiActionExecutionResult(
-            success = success,
-            message = if (success) "click_text_ok" else "click_text_no_progress",
-            screenState = after
-        )
+        val success = KaiExecutionDecisionAuthority.hasMeaningfulProgress(currentState, after) || after.containsText(text)
+        return KaiActionExecutionResult(success, if (success) "click_text_ok" else "click_text_no_progress", after)
     }
 
-    private suspend fun executeLongPressText(
-        step: KaiActionStep,
-        currentState: KaiScreenState
-    ): KaiActionExecutionResult {
-        val text = step.text.ifBlank { step.selectorText }.trim()
-        if (text.isBlank()) {
-            return KaiActionExecutionResult(false, "long_press_text_missing_text", currentState)
-        }
+    private suspend fun executeLongPressText(step: KaiActionStep, currentState: KaiScreenState): KaiActionExecutionResult {
+        val text = step.semanticPayload()
+        if (text.isBlank()) return KaiActionExecutionResult(false, "long_press_text_missing_text", currentState)
         sendKaiCmdSuppressed(
             cmd = KaiAccessibilityService.CMD_LONG_PRESS_TEXT,
             text = text,
@@ -451,17 +456,10 @@ class KaiActionExecutor(
         )
         val after = requestFreshScreen(2200L, step.expectedPackage.ifBlank { currentState.packageName })
         val success = KaiExecutionDecisionAuthority.hasMeaningfulProgress(currentState, after)
-        return KaiActionExecutionResult(
-            success = success,
-            message = if (success) "long_press_text_ok" else "long_press_text_no_progress",
-            screenState = after
-        )
+        return KaiActionExecutionResult(success, if (success) "long_press_text_ok" else "long_press_text_no_progress", after)
     }
 
-    private suspend fun executeClickBestMatch(
-        step: KaiActionStep,
-        currentState: KaiScreenState
-    ): KaiActionExecutionResult {
+    private suspend fun executeClickBestMatch(step: KaiActionStep, currentState: KaiScreenState): KaiActionExecutionResult {
         val query = step.selectorText.ifBlank { step.text }.trim()
         val element = selectSemanticElement(currentState, step)
         val issued = when {
@@ -480,30 +478,18 @@ class KaiActionExecutor(
         }
 
         if (!issued) {
-            return KaiActionExecutionResult(
-                success = false,
-                message = "ambiguous_click_target",
-                screenState = currentState
-            )
+            return KaiActionExecutionResult(false, "ambiguous_click_target", currentState)
         }
 
         val after = requestFreshScreen(
             timeoutMs = step.timeoutMs.coerceIn(1400L, 2800L),
             expectedPackage = step.expectedPackage.ifBlank { currentState.packageName }
         )
-        val success = KaiExecutionDecisionAuthority.hasMeaningfulProgress(currentState, after) ||
-            expectedStateSatisfied(step, after)
-        return KaiActionExecutionResult(
-            success = success,
-            message = if (success) "click_best_match_ok" else "click_best_match_no_progress",
-            screenState = after
-        )
+        val success = KaiExecutionDecisionAuthority.hasMeaningfulProgress(currentState, after) || expectedStateSatisfied(step, after)
+        return KaiActionExecutionResult(success, if (success) "click_best_match_ok" else "click_best_match_no_progress", after)
     }
 
-    private suspend fun executeFocusBestInput(
-        step: KaiActionStep,
-        currentState: KaiScreenState
-    ): KaiActionExecutionResult {
+    private suspend fun executeFocusBestInput(step: KaiActionStep, currentState: KaiScreenState): KaiActionExecutionResult {
         val field = currentState.findBestInputField(step.selectorHint.ifBlank { step.selectorText.ifBlank { step.text } })
         val issued = when {
             field != null -> tapSemanticElement(field)
@@ -521,31 +507,18 @@ class KaiActionExecutor(
         }
 
         if (!issued) {
-            return KaiActionExecutionResult(
-                success = false,
-                message = "focus_input_not_found",
-                screenState = currentState
-            )
+            return KaiActionExecutionResult(false, "focus_input_not_found", currentState)
         }
 
         val after = requestFreshScreen(2200L, step.expectedPackage.ifBlank { currentState.packageName })
         val success = after.findBestInputField(step.selectorHint.ifBlank { step.selectorText.ifBlank { step.text } }) != null ||
             KaiExecutionDecisionAuthority.hasMeaningfulProgress(currentState, after)
-        return KaiActionExecutionResult(
-            success = success,
-            message = if (success) "focus_best_input_ok" else "focus_best_input_no_progress",
-            screenState = after
-        )
+        return KaiActionExecutionResult(success, if (success) "focus_best_input_ok" else "focus_best_input_no_progress", after)
     }
 
-    private suspend fun executeInput(
-        step: KaiActionStep,
-        currentState: KaiScreenState
-    ): KaiActionExecutionResult {
-        val text = step.text.ifBlank { step.selectorText }.trim()
-        if (text.isBlank()) {
-            return KaiActionExecutionResult(false, "input_text_missing_text", currentState)
-        }
+    private suspend fun executeInput(step: KaiActionStep, currentState: KaiScreenState): KaiActionExecutionResult {
+        val text = step.semanticPayload()
+        if (text.isBlank()) return KaiActionExecutionResult(false, "input_text_missing_text", currentState)
 
         val focused = currentState.findBestInputField(step.selectorHint)
         if (focused != null) {
@@ -564,19 +537,11 @@ class KaiActionExecutor(
             timeoutMs = step.timeoutMs.coerceIn(1400L, 2800L),
             expectedPackage = step.expectedPackage.ifBlank { currentState.packageName }
         )
-        val success = after.containsText(text) ||
-            after.editableTextSignature().contains(KaiScreenStateParser.normalize(text))
-        return KaiActionExecutionResult(
-            success = success,
-            message = if (success) "input_text_ok" else "input_text_not_verified",
-            screenState = after
-        )
+        val success = after.containsText(text) || after.editableTextSignature().contains(KaiScreenStateParser.normalize(text))
+        return KaiActionExecutionResult(success, if (success) "input_text_ok" else "input_text_not_verified", after)
     }
 
-    private suspend fun executePressPrimaryAction(
-        step: KaiActionStep,
-        currentState: KaiScreenState
-    ): KaiActionExecutionResult {
+    private suspend fun executePressPrimaryAction(step: KaiActionStep, currentState: KaiScreenState): KaiActionExecutionResult {
         val send = currentState.findSendAction()
         val issued = when {
             send != null -> tapSemanticElement(send)
@@ -593,31 +558,18 @@ class KaiActionExecutor(
             else -> false
         }
 
-        if (!issued) {
-            return KaiActionExecutionResult(
-                success = false,
-                message = "primary_action_not_found",
-                screenState = currentState
-            )
-        }
+        if (!issued) return KaiActionExecutionResult(false, "primary_action_not_found", currentState)
 
         val after = requestFreshScreen(
             timeoutMs = step.timeoutMs.coerceIn(1400L, 2800L),
             expectedPackage = step.expectedPackage.ifBlank { currentState.packageName }
         )
         val success = KaiExecutionDecisionAuthority.hasMeaningfulProgress(currentState, after) ||
-            currentState.findSendAction() != null && after.findSendAction() == null
-        return KaiActionExecutionResult(
-            success = success,
-            message = if (success) "press_primary_action_ok" else "press_primary_action_no_progress",
-            screenState = after
-        )
+            (currentState.findSendAction() != null && after.findSendAction() == null)
+        return KaiActionExecutionResult(success, if (success) "press_primary_action_ok" else "press_primary_action_no_progress", after)
     }
 
-    private suspend fun executeScroll(
-        step: KaiActionStep,
-        currentState: KaiScreenState
-    ): KaiActionExecutionResult {
+    private suspend fun executeScroll(step: KaiActionStep, currentState: KaiScreenState): KaiActionExecutionResult {
         sendKaiCmdSuppressed(
             cmd = KaiAccessibilityService.CMD_SCROLL,
             dir = step.dir.ifBlank { "down" },
@@ -631,18 +583,10 @@ class KaiActionExecutor(
             expectedPackage = step.expectedPackage.ifBlank { currentState.packageName }
         )
         val success = KaiExecutionDecisionAuthority.hasMeaningfulProgress(currentState, after)
-        return KaiActionExecutionResult(
-            success = success,
-            message = if (success) "scroll_ok" else "scroll_no_progress",
-            screenState = after
-        )
+        return KaiActionExecutionResult(success, if (success) "scroll_ok" else "scroll_no_progress", after)
     }
 
-    private suspend fun executeSystemNav(
-        cmd: String,
-        step: KaiActionStep,
-        currentState: KaiScreenState
-    ): KaiActionExecutionResult {
+    private suspend fun executeSystemNav(cmd: String, step: KaiActionStep, currentState: KaiScreenState): KaiActionExecutionResult {
         sendKaiCmdSuppressed(
             cmd = cmd,
             expectedPackage = step.expectedPackage.ifBlank { currentState.packageName },
@@ -651,20 +595,12 @@ class KaiActionExecutor(
         )
         val after = requestFreshScreen(timeoutMs = 2200L, expectedPackage = "")
         val success = KaiExecutionDecisionAuthority.hasMeaningfulProgress(currentState, after) ||
-            cmd == KaiAccessibilityService.CMD_HOME ||
-            cmd == KaiAccessibilityService.CMD_BACK
-        return KaiActionExecutionResult(
-            success = success,
-            message = "${cmd}_ok",
-            screenState = after
-        )
+            cmd == KaiAccessibilityService.CMD_HOME || cmd == KaiAccessibilityService.CMD_BACK
+        return KaiActionExecutionResult(success, "${cmd}_ok", after)
     }
 
-    private suspend fun executeVerify(
-        step: KaiActionStep,
-        currentState: KaiScreenState
-    ): KaiActionExecutionResult {
-        val after = if (step.cmd.equals("wait_for_text", true) && step.expectedTexts.isNotEmpty()) {
+    private suspend fun executeVerify(step: KaiActionStep, currentState: KaiScreenState): KaiActionExecutionResult {
+        val after = if (step.normalizedCommand() == "wait_for_text" && step.expectedTexts.isNotEmpty()) {
             waitForExpectedText(
                 expectedTexts = step.expectedTexts,
                 timeoutMs = step.timeoutMs.coerceIn(1000L, 8000L),
@@ -677,19 +613,11 @@ class KaiActionExecutor(
             )
         }
 
-        val success = expectedStateSatisfied(step, after) ||
-            KaiExecutionDecisionAuthority.hasMeaningfulProgress(currentState, after)
-        return KaiActionExecutionResult(
-            success = success,
-            message = if (success) "verify_state_ok" else "verify_state_not_satisfied",
-            screenState = after
-        )
+        val success = expectedStateSatisfied(step, after) || KaiExecutionDecisionAuthority.hasMeaningfulProgress(currentState, after)
+        return KaiActionExecutionResult(success, if (success) "verify_state_ok" else "verify_state_not_satisfied", after)
     }
 
-    private suspend fun executeTap(
-        step: KaiActionStep,
-        currentState: KaiScreenState
-    ): KaiActionExecutionResult {
+    private suspend fun executeTap(step: KaiActionStep, currentState: KaiScreenState): KaiActionExecutionResult {
         sendKaiCmdSuppressed(
             cmd = KaiAccessibilityService.CMD_TAP_XY,
             x = step.x,
@@ -703,17 +631,10 @@ class KaiActionExecutor(
             expectedPackage = step.expectedPackage.ifBlank { currentState.packageName }
         )
         val success = KaiExecutionDecisionAuthority.hasMeaningfulProgress(currentState, after)
-        return KaiActionExecutionResult(
-            success = success,
-            message = if (success) "tap_xy_ok" else "tap_xy_no_progress",
-            screenState = after
-        )
+        return KaiActionExecutionResult(success, if (success) "tap_xy_ok" else "tap_xy_no_progress", after)
     }
 
-    private suspend fun executeLongPress(
-        step: KaiActionStep,
-        currentState: KaiScreenState
-    ): KaiActionExecutionResult {
+    private suspend fun executeLongPress(step: KaiActionStep, currentState: KaiScreenState): KaiActionExecutionResult {
         sendKaiCmdSuppressed(
             cmd = KaiAccessibilityService.CMD_LONG_PRESS_XY,
             x = step.x,
@@ -728,17 +649,10 @@ class KaiActionExecutor(
             expectedPackage = step.expectedPackage.ifBlank { currentState.packageName }
         )
         val success = KaiExecutionDecisionAuthority.hasMeaningfulProgress(currentState, after)
-        return KaiActionExecutionResult(
-            success = success,
-            message = if (success) "long_press_xy_ok" else "long_press_xy_no_progress",
-            screenState = after
-        )
+        return KaiActionExecutionResult(success, if (success) "long_press_xy_ok" else "long_press_xy_no_progress", after)
     }
 
-    private suspend fun executeSwipe(
-        step: KaiActionStep,
-        currentState: KaiScreenState
-    ): KaiActionExecutionResult {
+    private suspend fun executeSwipe(step: KaiActionStep, currentState: KaiScreenState): KaiActionExecutionResult {
         sendKaiCmdSuppressed(
             cmd = KaiAccessibilityService.CMD_SWIPE_XY,
             x = step.x,
@@ -755,46 +669,27 @@ class KaiActionExecutor(
             expectedPackage = step.expectedPackage.ifBlank { currentState.packageName }
         )
         val success = KaiExecutionDecisionAuthority.hasMeaningfulProgress(currentState, after)
-        return KaiActionExecutionResult(
-            success = success,
-            message = if (success) "swipe_xy_ok" else "swipe_xy_no_progress",
-            screenState = after
-        )
+        return KaiActionExecutionResult(success, if (success) "swipe_xy_ok" else "swipe_xy_no_progress", after)
     }
 
-    private suspend fun executeWait(
-        step: KaiActionStep,
-        currentState: KaiScreenState
-    ): KaiActionExecutionResult {
+    private suspend fun executeWait(step: KaiActionStep, currentState: KaiScreenState): KaiActionExecutionResult {
         delay(step.waitMs.coerceIn(80L, 12_000L))
-        val after = requestFreshScreen(
-            timeoutMs = 1400L,
-            expectedPackage = step.expectedPackage.ifBlank { currentState.packageName }
-        )
+        val after = requestFreshScreen(timeoutMs = 1400L, expectedPackage = step.expectedPackage.ifBlank { currentState.packageName })
         return KaiActionExecutionResult(
             success = true,
-            message = if (KaiExecutionDecisionAuthority.hasMeaningfulProgress(currentState, after)) {
-                "wait_observed_progress"
-            } else {
-                "wait_complete"
-            },
+            message = if (KaiExecutionDecisionAuthority.hasMeaningfulProgress(currentState, after)) "wait_observed_progress" else "wait_complete",
             screenState = after
         )
     }
 
     internal fun selectSemanticElement(state: KaiScreenState, step: KaiActionStep): KaiUiElement? {
-        if (step.expectedPackage.isNotBlank() && !state.matchesExpectedPackage(step.expectedPackage)) {
-            return null
-        }
+        if (step.expectedPackage.isNotBlank() && !state.matchesExpectedPackage(step.expectedPackage)) return null
 
         val query = step.selectorText.ifBlank { step.text }
         return when {
             step.selectorRole.equals("input", true) ||
                 step.selectorRole.equals("editor", true) ||
-                step.selectorRole.equals("search_field", true) -> {
-                state.findBestInputField(step.selectorHint.ifBlank { query })
-            }
-
+                step.selectorRole.equals("search_field", true) -> state.findBestInputField(step.selectorHint.ifBlank { query })
             step.selectorRole.equals("send_button", true) -> state.findSendAction()
             query.isNotBlank() -> state.findBestClickableTarget(query)
             else -> state.likelyPrimaryActions.firstOrNull() ?: state.likelyNavigationTargets.firstOrNull()
@@ -804,11 +699,7 @@ class KaiActionExecutor(
     private fun tapSemanticElement(element: KaiUiElement): Boolean {
         val (cx, cy) = parseCenterFromBounds(element.bounds)
         if (cx == null || cy == null) return false
-        sendKaiCmd(
-            cmd = KaiAccessibilityService.CMD_TAP_XY,
-            x = cx,
-            y = cy
-        )
+        sendKaiCmd(cmd = KaiAccessibilityService.CMD_TAP_XY, x = cx, y = cy)
         return true
     }
 
@@ -821,18 +712,12 @@ class KaiActionExecutor(
         return ((left + right) / 2f) to ((top + bottom) / 2f)
     }
 
-    private suspend fun waitForExpectedText(
-        expectedTexts: List<String>,
-        timeoutMs: Long,
-        expectedPackage: String
-    ): KaiScreenState {
+    private suspend fun waitForExpectedText(expectedTexts: List<String>, timeoutMs: Long, expectedPackage: String): KaiScreenState {
         val deadline = System.currentTimeMillis() + timeoutMs
         var latest = resolveCanonicalRuntimeState()
         while (System.currentTimeMillis() < deadline) {
             latest = requestFreshScreen(timeoutMs = 1200L, expectedPackage = expectedPackage)
-            if (expectedTexts.all { latest.containsText(it) }) {
-                return latest
-            }
+            if (expectedTexts.all { latest.containsText(it) }) return latest
             delay(120L)
         }
         return latest
@@ -888,9 +773,7 @@ class KaiActionExecutor(
             if (endY != null) putExtra(KaiAccessibilityService.EXTRA_END_Y, endY)
             if (holdMs > 0L) putExtra(KaiAccessibilityService.EXTRA_HOLD_MS, holdMs)
             if (timeoutMs > 0L) putExtra(KaiAccessibilityService.EXTRA_TIMEOUT_MS, timeoutMs)
-            if (expectedPackage.isNotBlank()) {
-                putExtra(KaiAccessibilityService.EXTRA_EXPECTED_PACKAGE, expectedPackage)
-            }
+            if (expectedPackage.isNotBlank()) putExtra(KaiAccessibilityService.EXTRA_EXPECTED_PACKAGE, expectedPackage)
         }
         context.sendBroadcast(intent)
     }

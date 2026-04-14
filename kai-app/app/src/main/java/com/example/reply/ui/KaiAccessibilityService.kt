@@ -1,3 +1,6 @@
+// Shrink pass: command surface kept stable for compatibility with the rewritten executor.
+// The service remains large because it owns Android accessibility IO, dump capture, and gesture dispatch.
+
 package com.example.reply.ui
 
 import android.accessibilityservice.AccessibilityService

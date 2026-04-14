@@ -31,7 +31,6 @@ data class KaiActionStep(
     val timeoutMs: Long = 4000L,
     val optional: Boolean = false,
     val note: String = "",
-    // Compatibility-preserving semantic selectors for richer planning/execution.
     val selectorText: String = "",
     val selectorHint: String = "",
     val selectorId: String = "",
@@ -41,18 +40,24 @@ data class KaiActionStep(
     val expectedScreenKind: String = "",
     val strategy: String = "",
     val confidence: Float = 0f,
-    // New authority/stage metadata. All defaults preserve backward compatibility.
     val stageHint: String = "",
     val completionBoundary: KaiGoalBoundary = KaiGoalBoundary.UNKNOWN,
     val continuationKind: KaiContinuationKind = KaiContinuationKind.NONE,
     val allowsFinalCommit: Boolean = false
-)
+) {
+    fun semanticPayload(): String = text.ifBlank { selectorText }.trim()
+
+    fun normalizedCommand(): String = cmd.trim().lowercase()
+
+    fun isOpenAppStep(): Boolean = normalizedCommand() == "open_app"
+
+    fun isVerificationStep(): Boolean = normalizedCommand() in setOf("verify_state", "read_screen", "wait_for_text")
+}
 
 data class KaiActionPlan(
     val summary: String,
     val steps: List<KaiActionStep>,
     val goalComplete: Boolean = false,
-    // Planner can signal completion, but runtime authority must still verify it.
     val plannerGoalComplete: Boolean = goalComplete
 )
 

@@ -1,8 +1,6 @@
-
 package com.example.reply.agent
 
 import android.content.Context
-import com.example.reply.ui.KaiBubbleManager
 import kotlinx.coroutines.delay
 import java.util.Locale
 
@@ -80,12 +78,17 @@ class KaiObservationGate(
     }
 
     fun adopt(state: KaiScreenState) {
+        if (state.packageName.isBlank()) return
         canonical = state
+        lastAcceptedFingerprint = fingerprintFor(state.packageName, state.rawDump)
+        lastAcceptedObservationAt = state.updatedAt
         runCatching { KaiAgentController.mirrorRuntimeObservation(state) }
     }
 
     fun resolve(): KaiScreenState {
-        return canonical ?: runCatching { KaiAgentController.getLatestScreenState() }
+        val local = canonical
+        if (local != null) return local
+        return runCatching { KaiAgentController.getLatestScreenState() }
             .getOrElse { KaiScreenStateParser.fromDump("", "") }
     }
 
@@ -137,61 +140,82 @@ class KaiObservationGate(
         return o == e || o.startsWith("$e.") || KaiAppIdentityRegistry.packageMatchesFamily(expected, observed)
     }
 
-    suspend fun requestFreshScreen(
-        timeoutMs: Long = 2200L,
-        expectedPackage: String = ""
-    ): KaiScreenState {
-        val after = System.currentTimeMillis()
-        KaiObservationRuntime.requestImmediateDump(expectedPackage)
-        val obs = KaiObservationRuntime.awaitFresh(
-            afterTime = after,
-            timeoutMs = timeoutMs,
-            expectedPackage = expectedPackage,
-            authoritativeOnly = false
-        )
-        val state = KaiScreenStateParser.fromDump(
+    private fun isUsableState(state: KaiScreenState): Boolean {
+        if (!isUsableDump(state.rawDump, state.packageName)) return false
+        if (state.packageName.isBlank()) return false
+        if (state.isOverlayPolluted()) return false
+        return true
+    }
+
+    private fun buildState(obs: KaiObservation): KaiScreenState {
+        return KaiScreenStateParser.fromDump(
             packageName = obs.packageName,
             dump = obs.screenPreview,
             elements = obs.elements,
             screenKindHint = obs.screenKind,
             semanticConfidence = obs.semanticConfidence
         )
+    }
+
+    private fun classifyFailureReason(
+        state: KaiScreenState,
+        expectedPackage: String,
+        allowLauncherSurface: Boolean,
+        tier: GateTier,
+        stale: Boolean
+    ): String {
+        val packageMismatch = expectedPackage.isNotBlank() &&
+            !isExpectedPackageMatch(state.packageName, expectedPackage)
+
+        return when {
+            state.isOverlayPolluted() -> "overlay_pollution"
+            state.packageName.isBlank() -> "missing_package"
+            packageMismatch -> "wrong_package"
+            stale -> "stale_observation"
+            tier == GateTier.SEMANTIC_ACTION_SAFE && state.isWeakObservation() -> "weak_observation"
+            state.isLauncher() && !allowLauncherSurface -> "launcher_surface"
+            else -> "observation_not_ready"
+        }
+    }
+
+    suspend fun requestFreshScreen(
+        timeoutMs: Long = 2200L,
+        expectedPackage: String = ""
+    ): KaiScreenState {
+        val afterTime = System.currentTimeMillis()
+        KaiObservationRuntime.requestImmediateDump(expectedPackage)
+        val obs = KaiObservationRuntime.awaitFresh(
+            afterTime = afterTime,
+            timeoutMs = timeoutMs,
+            expectedPackage = expectedPackage,
+            authoritativeOnly = false
+        )
+        val state = buildState(obs)
         val fingerprint = fingerprintFor(state.packageName, state.rawDump)
         val usable = isUsableState(state)
+        val weak = state.isWeakObservation()
         val changed = !sameFingerprint(fingerprint, lastAcceptedFingerprint)
+        val stale = !changed && lastAcceptedFingerprint.isNotBlank()
 
         lastMeta = RefreshMeta(
             fingerprint = fingerprint,
             changedFromPrevious = changed,
             usable = usable,
             fallback = false,
-            weak = state.isWeakObservation(),
-            stale = !changed && lastAcceptedFingerprint.isNotBlank(),
+            weak = weak,
+            stale = stale,
             reusedLastGood = false
         )
 
-        if (state.isWeakObservation() || !usable) {
+        if (!usable || weak) {
             consecutiveWeakReads += 1
-            if (lastMeta.stale) consecutiveStaleReads += 1
-            val fallback = canonical
-            if (fallback != null && isContinuationEligible(fallback, expectedPackage)) {
-                lastMeta = lastMeta.copy(
-                    fallback = true,
-                    reusedLastGood = true,
-                    usable = true,
-                    stale = false
-                )
-                return fallback
-            }
+            if (stale) consecutiveStaleReads += 1
             return state
         }
 
         consecutiveWeakReads = 0
-        consecutiveStaleReads = if (lastMeta.stale) consecutiveStaleReads + 1 else 0
-        canonical = state
-        lastAcceptedFingerprint = fingerprint
-        lastAcceptedObservationAt = obs.updatedAt
-        runCatching { KaiAgentController.mirrorRuntimeObservation(state) }
+        consecutiveStaleReads = if (stale) consecutiveStaleReads + 1 else 0
+        adopt(state)
         return state
     }
 
@@ -204,34 +228,69 @@ class KaiObservationGate(
         staleRetryAttempts: Int = 1,
         missingPackageRetryAttempts: Int = 1
     ): GateResult {
-        val state = requestFreshScreen(timeoutMs = timeoutMs, expectedPackage = expectedPackage)
+        var lastState = resolve()
+        var staleSeen = 0
+        var missingSeen = 0
+        val attempts = maxAttempts.coerceAtLeast(1)
 
-        val overlay = state.isOverlayPolluted()
-        val packageMissing = state.packageName.isBlank()
-        val launcher = state.isLauncher()
-        val weak = state.isWeakObservation()
-        val packageMismatch = expectedPackage.isNotBlank() &&
-            !isExpectedPackageMatch(state.packageName, expectedPackage)
+        repeat(attempts) { attempt ->
+            val state = requestFreshScreen(timeoutMs = timeoutMs, expectedPackage = expectedPackage)
+            lastState = state
+            val meta = lastMeta
+            val packageMismatch = expectedPackage.isNotBlank() &&
+                !isExpectedPackageMatch(state.packageName, expectedPackage)
+            val passed = when (tier) {
+                GateTier.APP_LAUNCH_SAFE -> {
+                    !state.isOverlayPolluted() &&
+                        state.packageName.isNotBlank() &&
+                        !packageMismatch &&
+                        (allowLauncherSurface || !state.isLauncher())
+                }
+                GateTier.SEMANTIC_ACTION_SAFE -> {
+                    !state.isOverlayPolluted() &&
+                        state.packageName.isNotBlank() &&
+                        !state.isWeakObservation() &&
+                        !packageMismatch &&
+                        (allowLauncherSurface || !state.isLauncher())
+                }
+            }
 
-        val passed = when (tier) {
-            GateTier.APP_LAUNCH_SAFE ->
-                !overlay && !packageMissing && (allowLauncherSurface || !launcher)
-            GateTier.SEMANTIC_ACTION_SAFE ->
-                !overlay && !packageMissing && !weak && !packageMismatch &&
-                    (allowLauncherSurface || !launcher)
+            if (passed) {
+                return GateResult(true, state, "observation_ready")
+            }
+
+            if (meta.stale) staleSeen += 1
+            if (state.packageName.isBlank()) missingSeen += 1
+
+            val shouldRetry = when {
+                meta.stale && staleSeen <= staleRetryAttempts -> true
+                state.packageName.isBlank() && missingSeen <= missingPackageRetryAttempts -> true
+                attempt < attempts - 1 -> true
+                else -> false
+            }
+
+            if (!shouldRetry) {
+                val reason = classifyFailureReason(
+                    state = state,
+                    expectedPackage = expectedPackage,
+                    allowLauncherSurface = allowLauncherSurface,
+                    tier = tier,
+                    stale = meta.stale
+                )
+                return GateResult(false, state, reason)
+            }
+
+            delay(140L)
         }
 
-        val reason = when {
-            passed -> "observation_ready"
-            overlay -> "overlay_pollution"
-            packageMissing -> "missing_package"
-            packageMismatch -> "wrong_package"
-            weak -> "weak_observation"
-            launcher && !allowLauncherSurface -> "launcher_surface"
-            else -> "observation_not_ready"
-        }
-
-        return GateResult(passed, state, reason)
+        val reason = classifyFailureReason(
+            state = lastState,
+            expectedPackage = expectedPackage,
+            allowLauncherSurface = allowLauncherSurface,
+            tier = tier,
+            stale = lastMeta.stale
+        )
+        return GateResult(false, lastState, reason)
     }
 
     suspend fun ensureAuthoritative(
@@ -241,62 +300,72 @@ class KaiObservationGate(
         maxAttempts: Int = 2
     ): ReadinessResult {
         var lastState = resolve()
+        val attempts = maxAttempts.coerceAtLeast(1)
 
-        repeat(maxAttempts.coerceAtLeast(1)) { attempt ->
-            // Try authoritative source first, then fall back to fresh screen
-            val obs = KaiObservationRuntime.getBestAvailable(authoritativeOnly = attempt == 0)
-            if (obs.updatedAt > 0L && obs.packageName.isNotBlank()) {
-                val state = KaiScreenStateParser.fromDump(
-                    packageName = obs.packageName,
-                    dump = obs.screenPreview,
-                    elements = obs.elements,
-                    screenKindHint = obs.screenKind,
-                    semanticConfidence = obs.semanticConfidence
-                )
+        repeat(attempts) { attempt ->
+            val best = KaiObservationRuntime.getBestAvailable(authoritativeOnly = attempt == 0)
+            if (best.updatedAt > 0L) {
+                val state = buildState(best)
                 lastState = state
-
                 val ready = when (tier) {
-                    GateTier.APP_LAUNCH_SAFE ->
-                        !state.isOverlayPolluted() && (allowLauncherSurface || !state.isLauncher())
-                    GateTier.SEMANTIC_ACTION_SAFE ->
-                        !state.isOverlayPolluted() && !state.isWeakObservation() &&
+                    GateTier.APP_LAUNCH_SAFE -> {
+                        state.packageName.isNotBlank() &&
+                            !state.isOverlayPolluted() &&
                             (allowLauncherSurface || !state.isLauncher())
+                    }
+                    GateTier.SEMANTIC_ACTION_SAFE -> {
+                        state.packageName.isNotBlank() &&
+                            !state.isOverlayPolluted() &&
+                            !state.isWeakObservation() &&
+                            (allowLauncherSurface || !state.isLauncher())
+                    }
                 }
-
                 if (ready) {
                     adopt(state)
-                    lastAcceptedFingerprint = fingerprintFor(state.packageName, state.rawDump)
-                    lastAcceptedObservationAt = obs.updatedAt
                     lastMeta = RefreshMeta(
-                        fingerprint = lastAcceptedFingerprint,
+                        fingerprint = fingerprintFor(state.packageName, state.rawDump),
                         changedFromPrevious = true,
-                        usable = true
+                        usable = true,
+                        fallback = false,
+                        weak = false,
+                        stale = false,
+                        reusedLastGood = false
                     )
                     return ReadinessResult(true, state, "observation_ready", attempt + 1)
                 }
             }
 
-            // Fallback: request fresh screen
             val fresh = requestFreshScreen(timeoutMs = timeoutMs, expectedPackage = "")
             lastState = fresh
-            if (fresh.packageName.isNotBlank() && !fresh.isOverlayPolluted() &&
-                (allowLauncherSurface || !fresh.isLauncher())
-            ) {
+            val freshReady = when (tier) {
+                GateTier.APP_LAUNCH_SAFE -> {
+                    fresh.packageName.isNotBlank() &&
+                        !fresh.isOverlayPolluted() &&
+                        (allowLauncherSurface || !fresh.isLauncher())
+                }
+                GateTier.SEMANTIC_ACTION_SAFE -> {
+                    fresh.packageName.isNotBlank() &&
+                        !fresh.isOverlayPolluted() &&
+                        !fresh.isWeakObservation() &&
+                        (allowLauncherSurface || !fresh.isLauncher())
+                }
+            }
+            if (freshReady) {
                 adopt(fresh)
-                lastAcceptedFingerprint = fingerprintFor(fresh.packageName, fresh.rawDump)
-                lastAcceptedObservationAt = System.currentTimeMillis()
-                lastMeta = RefreshMeta(
-                    fingerprint = lastAcceptedFingerprint,
-                    changedFromPrevious = true,
-                    usable = true
-                )
                 return ReadinessResult(true, fresh, "observation_ready_via_fresh", attempt + 1)
             }
 
-            if (attempt < maxAttempts - 1) delay(150L)
+            if (attempt < attempts - 1) delay(160L)
         }
 
-        return ReadinessResult(false, lastState, "observation_not_ready", maxAttempts)
+        val reason = classifyFailureReason(
+            state = lastState,
+            expectedPackage = "",
+            allowLauncherSurface = allowLauncherSurface,
+            tier = tier,
+            stale = lastMeta.stale
+        )
+        return ReadinessResult(false, lastState, reason, attempts)
     }
 
     fun markActionProgress(
@@ -319,18 +388,10 @@ class KaiObservationGate(
     fun isContinuationEligible(state: KaiScreenState, expectedPackage: String): Boolean {
         if (state.packageName.isBlank()) return false
         if (state.isOverlayPolluted()) return false
-        if (expectedPackage.isNotBlank() && !isExpectedPackageMatch(state.packageName, expectedPackage)) {
-            return false
-        }
+        if (expectedPackage.isNotBlank() && !isExpectedPackageMatch(state.packageName, expectedPackage)) return false
         return !state.isSearchLikeSurface() &&
             !state.isCameraOrMediaOverlaySurface() &&
-            !state.isSheetOrDialogSurface()
-    }
-
-    private fun isUsableState(state: KaiScreenState): Boolean {
-        if (!isUsableDump(state.rawDump, state.packageName)) return false
-        if (state.packageName.isBlank()) return false
-        if (state.isOverlayPolluted()) return false
-        return true
+            !state.isSheetOrDialogSurface() &&
+            !state.isWeakObservation()
     }
 }

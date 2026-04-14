@@ -1,3 +1,4 @@
+
 package com.example.reply.agent
 
 import android.content.Context
@@ -85,6 +86,7 @@ object KaiAgentController {
             memory.addLast(obs)
             while (memory.size > MAX_MEMORY) memory.removeFirst()
         }
+
         if (packageName.isNotBlank() || screenPreview.isNotBlank()) {
             snapshot = snapshot.copy(
                 currentPackage = packageName.ifBlank { snapshot.currentPackage },
@@ -162,7 +164,6 @@ object KaiAgentController {
         synchronized(memory) { memory.clear() }
         insightBusy = false
         lastInsightAt = 0L
-
         snapshot = snapshot.copy(
             currentPackage = "",
             lastScreenPreview = "",
@@ -208,7 +209,7 @@ object KaiAgentController {
         snapshot = snapshot.copy(isRunning = true, statusText = "Monitoring")
 
         KaiObservationRuntime.startWatching(immediateDump = true)
-        try { onRequestDump() } catch (_: Exception) {}
+        runCatching { onRequestDump() }
 
         continuousJob = scope.launch {
             while (isActive && continuousRunning && !snapshot.actionLoopActive) {
@@ -280,18 +281,18 @@ object KaiAgentController {
 
         val memoryText = synchronized(memory) {
             memory.takeLast(8).joinToString("\n\n") { item ->
-                "Package: ${item.packageName.ifBlank { "Unknown" }}\nScreen:\n${item.screenPreview.take(1000)}"
+                "Package: ${item.packageName.ifBlank { "Unknown" }}\nScreen:\n${item.screenPreview.take(900)}"
             }
         }
 
         val appHint = inferPrimaryAppHint(effectivePrompt)
-        val isMultiStepGoal =
-            KaiTaskStageEngine.classifyGoalMode(effectivePrompt) == KaiTaskStageEngine.GoalMode.MULTI_STAGE
+        val goalMode = KaiTaskStageEngine.classifyGoalMode(effectivePrompt)
         val stageSnapshot = KaiTaskStageEngine.evaluate(
             userPrompt = effectivePrompt,
             currentState = currentScreenState
         )
-        val effectiveMaxSteps = if (isMultiStepGoal) {
+
+        val effectiveMaxSteps = if (goalMode == KaiTaskStageEngine.GoalMode.MULTI_STAGE) {
             maxStepsPerChunk.coerceIn(3, 5)
         } else {
             maxStepsPerChunk.coerceIn(1, 3)
@@ -300,9 +301,10 @@ object KaiAgentController {
         val plannerPrompt = """
             You are Kai Agent inside Kai OS.
             Return STRICT JSON only.
-            Build compact actionable chunk only; do not over-plan.
-            Prefer concrete direct actions over retries.
-            Max $effectiveMaxSteps steps.
+            Build a compact action chunk only.
+            Do not claim final completion unless the current state already proves it.
+            Prefer direct semantic actions over noisy retries.
+            Max steps: $effectiveMaxSteps
 
             Stage snapshot:
             - stage=${stageSnapshot.stage.name}
@@ -320,7 +322,7 @@ object KaiAgentController {
             ${currentScreenState.packageName.ifBlank { "Unknown" }}
 
             Current visible screen:
-            ${currentScreenState.preview(2600)}
+            ${currentScreenState.preview(2400)}
 
             Recent memory:
             ${memoryText.ifBlank { "No memory yet." }}
@@ -329,35 +331,62 @@ object KaiAgentController {
             ${priorProgress.ifBlank { "No prior execution yet." }}
 
             Allowed commands:
-            open_app, click_text, long_press_text, input_text, click_best_match,
-            focus_best_input, input_into_best_field, press_primary_action,
-            open_best_list_item, verify_state, scroll, read_screen, wait_for_text,
-            tap_xy, long_press_xy, swipe_xy, back, home, recents, wait.
+            open_app, click_text, long_press_text, input_text,
+            click_best_match, focus_best_input, input_into_best_field,
+            press_primary_action, open_best_list_item, verify_state,
+            scroll, wait_for_text, tap_xy, long_press_xy, swipe_xy,
+            back, home, recents, wait
 
             JSON shape:
             {
               "summary": "short summary",
               "goalComplete": false,
-              "steps": [{"cmd":"click_text","text":""}]
+              "steps": [
+                {
+                  "cmd": "click_text",
+                  "text": "",
+                  "dir": "",
+                  "times": 1,
+                  "waitMs": 500,
+                  "x": null,
+                  "y": null,
+                  "endX": null,
+                  "endY": null,
+                  "holdMs": 450,
+                  "timeoutMs": 4000,
+                  "optional": false,
+                  "note": "",
+                  "selectorText": "",
+                  "selectorHint": "",
+                  "selectorId": "",
+                  "selectorRole": "",
+                  "expectedPackage": "",
+                  "expectedTexts": [],
+                  "expectedScreenKind": "",
+                  "strategy": "",
+                  "confidence": 0.0
+                }
+              ]
             }
         """.trimIndent()
 
         val raw = OpenAIClient.ask(plannerPrompt, task = KaiTask.ACTION_PLANNING)
-        val plan = parseActionPlan(raw)
-        val enrichedPlan = plan.copy(
-            steps = plan.steps.take(effectiveMaxSteps),
-            goalComplete = false
+        val parsedPlan = parseActionPlan(raw)
+        val plan = parsedPlan.copy(
+            steps = parsedPlan.steps.take(effectiveMaxSteps),
+            goalComplete = false,
+            plannerGoalComplete = false
         )
 
         snapshot = snapshot.copy(
             customPrompt = effectivePrompt,
-            lastSuggestion = enrichedPlan.summary,
+            lastSuggestion = plan.summary,
             statusText = if (isRunning()) "Monitoring" else "Action plan ready",
             requiresApproval = false
         )
 
         return postProcessPlan(
-            plan = enrichedPlan,
+            plan = plan,
             currentScreenState = currentScreenState,
             appHint = appHint,
             maxStepsPerChunk = effectiveMaxSteps,
@@ -429,19 +458,23 @@ object KaiAgentController {
         priorProgress: String
     ): KaiActionPlan {
         val onLauncher = isLauncherPackage(currentScreenState.packageName)
-        val maxSteps = maxStepsPerChunk.coerceIn(1, 8)
         val currentMatches = currentScreenState.likelyMatchesAppHint(appHint) && !onLauncher
+        val maxSteps = maxStepsPerChunk.coerceIn(1, 8)
         val steps = plan.steps.filter { it.cmd.isNotBlank() }.toMutableList()
 
         if (steps.isEmpty() && onLauncher && appHint.isNotBlank() && !currentMatches) {
             return plan.copy(
                 goalComplete = false,
+                plannerGoalComplete = false,
                 summary = "Starting from launcher/home: opening target app first.",
                 steps = listOf(
                     KaiActionStep(
                         cmd = "open_app",
                         text = appHint,
-                        note = "launcher_requires_open_app_first"
+                        note = "launcher_requires_open_app_first",
+                        completionBoundary = KaiGoalBoundary.APP_ENTRY,
+                        continuationKind = KaiContinuationKind.STAGE_CONTINUATION,
+                        allowsFinalCommit = false
                     )
                 )
             )
@@ -451,15 +484,17 @@ object KaiAgentController {
             val existingOpen = steps.firstOrNull { it.cmd == "open_app" }
             val openFirst = existingOpen?.copy(
                 text = existingOpen.text.ifBlank { appHint },
-                note = if (existingOpen.note.isBlank()) {
-                    "launcher_requires_open_app_first"
-                } else {
-                    existingOpen.note
-                }
+                note = existingOpen.note.ifBlank { "launcher_requires_open_app_first" },
+                completionBoundary = KaiGoalBoundary.APP_ENTRY,
+                continuationKind = KaiContinuationKind.STAGE_CONTINUATION,
+                allowsFinalCommit = false
             ) ?: KaiActionStep(
                 cmd = "open_app",
                 text = appHint,
-                note = "launcher_requires_open_app_first"
+                note = "launcher_requires_open_app_first",
+                completionBoundary = KaiGoalBoundary.APP_ENTRY,
+                continuationKind = KaiContinuationKind.STAGE_CONTINUATION,
+                allowsFinalCommit = false
             )
 
             val rebuilt = mutableListOf<KaiActionStep>()
@@ -468,24 +503,30 @@ object KaiAgentController {
 
             return plan.copy(
                 goalComplete = false,
+                plannerGoalComplete = false,
                 summary = "Starting from launcher/home: open target app before semantic actions.",
                 steps = rebuilt.take(maxSteps)
             )
         }
 
         val cleanedSteps = buildList {
-            var verifyOrReadRun = 0
+            var verifyRun = 0
             steps.forEach { step ->
                 if (step.cmd in setOf("verify_state", "read_screen", "wait_for_text")) {
-                    verifyOrReadRun += 1
-                    if (verifyOrReadRun > 2) return@forEach
+                    verifyRun += 1
+                    if (verifyRun > 2) return@forEach
                 } else {
-                    verifyOrReadRun = 0
+                    verifyRun = 0
                 }
                 add(step)
             }
         }
-        return plan.copy(steps = cleanedSteps.take(maxSteps), goalComplete = false)
+
+        return plan.copy(
+            steps = cleanedSteps.take(maxSteps),
+            goalComplete = false,
+            plannerGoalComplete = false
+        )
     }
 
     private fun parseActionPlan(raw: String): KaiActionPlan {
@@ -543,13 +584,34 @@ object KaiAgentController {
                         expectedTexts = item.optStringList("expectedTexts"),
                         expectedScreenKind = item.optString("expectedScreenKind").trim(),
                         strategy = item.optString("strategy").trim(),
-                        confidence = item.optDouble("confidence", 0.0).toFloat().coerceIn(0f, 1f)
+                        confidence = item.optDouble("confidence", 0.0).toFloat().coerceIn(0f, 1f),
+                        completionBoundary = when (KaiScreenStateParser.normalize(item.optString("completionBoundary"))) {
+                            "app_entry" -> KaiGoalBoundary.APP_ENTRY
+                            "surface_ready" -> KaiGoalBoundary.SURFACE_READY
+                            "entity_opened" -> KaiGoalBoundary.ENTITY_OPENED
+                            "input_ready" -> KaiGoalBoundary.INPUT_READY
+                            "content_committed" -> KaiGoalBoundary.CONTENT_COMMITTED
+                            "final_goal" -> KaiGoalBoundary.FINAL_GOAL
+                            else -> KaiGoalBoundary.UNKNOWN
+                        },
+                        continuationKind = when (KaiScreenStateParser.normalize(item.optString("continuationKind"))) {
+                            "stage_continuation" -> KaiContinuationKind.STAGE_CONTINUATION
+                            "recovery_continuation" -> KaiContinuationKind.RECOVERY_CONTINUATION
+                            "verification" -> KaiContinuationKind.VERIFICATION
+                            else -> KaiContinuationKind.NONE
+                        },
+                        allowsFinalCommit = item.optBoolean("allowsFinalCommit", false)
                     )
                 )
             }
         }
 
-        return KaiActionPlan(summary = summary, steps = steps, goalComplete = goalComplete)
+        return KaiActionPlan(
+            summary = summary,
+            steps = steps,
+            goalComplete = goalComplete,
+            plannerGoalComplete = goalComplete
+        )
     }
 
     private fun JSONObject.optFloatOrNull(name: String): Float? {
