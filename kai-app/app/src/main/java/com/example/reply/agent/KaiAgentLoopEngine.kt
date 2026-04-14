@@ -187,7 +187,10 @@ class KaiAgentLoopEngine(
                     }
                 }
 
-                if (KaiExecutionDecisionAuthority.likelyGoalSatisfied(userPrompt, currentState)) {
+                val earlyStageCheck = KaiTaskStageEngine.evaluate(userPrompt, currentState)
+                if (!earlyStageCheck.shouldContinue &&
+                    KaiExecutionDecisionAuthority.likelyGoalSatisfied(userPrompt, currentState)
+                ) {
                     val finalMessage = "Final goal committed from current screen state."
                     pushAgentState(
                         state = "idle",
