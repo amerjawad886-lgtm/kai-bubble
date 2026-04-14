@@ -365,7 +365,38 @@ class KaiActionExecutor(
             delay(120L)
         }
 
-        val finalState = requestFreshScreen(timeoutMs = 1400L, expectedPackage = "")
+        val finalState = requestFreshScreen(timeoutMs = 1800L, expectedPackage = "")
+
+        // Check final state before giving up
+        val finalInTarget = when {
+            targetPackage.isNotBlank() -> finalState.matchesExpectedPackage(targetPackage)
+            targetHint.isNotBlank() -> finalState.likelyMatchesAppHint(targetHint)
+            else -> false
+        }
+        if (finalInTarget && !finalState.isLauncher()) {
+            gate.markActionProgress(
+                currentState.packageName,
+                finalState.packageName,
+                beforeFingerprint,
+                finalState.semanticFingerprint(),
+                "open_app_late_confirm"
+            )
+            return KaiActionExecutionResult(
+                success = true,
+                message = "open_app_confirmed_late",
+                screenState = finalState,
+                openAppOutcome = KaiOpenAppOutcome.TARGET_READY
+            )
+        }
+        // Any non-launcher screen after launch attempt = practical intermediate success
+        if (finalState.packageName.isNotBlank() && !finalState.isLauncher()) {
+            return KaiActionExecutionResult(
+                success = true,
+                message = "open_app_intermediate_fallback",
+                screenState = finalState,
+                openAppOutcome = KaiOpenAppOutcome.USABLE_INTERMEDIATE_IN_TARGET_APP
+            )
+        }
         return KaiActionExecutionResult(
             success = false,
             message = "open_app_not_confirmed_yet",

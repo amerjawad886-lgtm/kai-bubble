@@ -180,13 +180,26 @@ object KaiExecutionDecisionAuthority {
         val progress = hasMeaningfulProgress(before, after) && !telemetry.observationReusedLastGood
         val evidence = expectedEvidenceSatisfied(step, after)
 
-        // open_app: require target package confirmation, stop after repeated failures
+        // open_app: trust executor outcome, stop after repeated failures
         if (step.cmd.equals("open_app", true)) {
+            // Trust the executor's confirmed open_app verdict
+            if (result.success && result.openAppOutcome in setOf(
+                    KaiOpenAppOutcome.TARGET_READY,
+                    KaiOpenAppOutcome.USABLE_INTERMEDIATE_IN_TARGET_APP
+                )
+            ) {
+                return RuntimeDecision(
+                    directive = RuntimeDirective.CONTINUE,
+                    progressLevel = ProgressLevel.TARGET_READY,
+                    goalCommitted = false,
+                    reason = "open_app_target_confirmed"
+                )
+            }
+            // Fallback: verify from screen state
             val targetPkg = step.expectedPackage
             val inTarget = when {
                 targetPkg.isNotBlank() -> after.matchesExpectedPackage(targetPkg) && !after.isLauncher()
-                else -> after.packageName.isNotBlank() && !after.isLauncher() &&
-                    before.packageName != after.packageName
+                else -> after.packageName.isNotBlank() && !after.isLauncher()
             }
             if (result.success && inTarget) {
                 return RuntimeDecision(
@@ -271,15 +284,7 @@ object KaiExecutionDecisionAuthority {
         lastDecision: RuntimeDecision? = null,
         telemetry: RuntimeTelemetry = RuntimeTelemetry()
     ): RuntimeDecision {
-        if (likelyGoalSatisfied(userPrompt, currentState)) {
-            return RuntimeDecision(
-                directive = RuntimeDirective.STOP_SUCCESS,
-                progressLevel = ProgressLevel.GOAL_COMMITTED,
-                goalCommitted = true,
-                reason = "goal_satisfied_from_cycle_state"
-            )
-        }
-
+        // Hard safety limits first
         if (telemetry.loopSafetyLimitReached || telemetry.noProgressCycles >= 4) {
             return RuntimeDecision(
                 directive = RuntimeDirective.STOP_FAILURE,
@@ -289,15 +294,7 @@ object KaiExecutionDecisionAuthority {
             )
         }
 
-        if (telemetry.observationWeak || telemetry.weakReadStreak >= 2 || telemetry.staleReadStreak >= 2) {
-            return RuntimeDecision(
-                directive = RuntimeDirective.REPLAN,
-                progressLevel = ProgressLevel.NONE,
-                goalCommitted = false,
-                reason = "cycle_observation_unstable"
-            )
-        }
-
+        // Stage engine BEFORE goal check: if multi-stage task has remaining stages, continue
         val stageSnapshot = KaiTaskStageEngine.evaluate(userPrompt, currentState)
         if (stageSnapshot.shouldContinue) {
             return RuntimeDecision(
@@ -309,6 +306,25 @@ object KaiExecutionDecisionAuthority {
                 },
                 goalCommitted = false,
                 reason = "stage_continuation_required:${stageSnapshot.nextSemanticAction}"
+            )
+        }
+
+        // Only declare goal satisfied after all stages are complete
+        if (likelyGoalSatisfied(userPrompt, currentState)) {
+            return RuntimeDecision(
+                directive = RuntimeDirective.STOP_SUCCESS,
+                progressLevel = ProgressLevel.GOAL_COMMITTED,
+                goalCommitted = true,
+                reason = "goal_satisfied_from_cycle_state"
+            )
+        }
+
+        if (telemetry.observationWeak || telemetry.weakReadStreak >= 2 || telemetry.staleReadStreak >= 2) {
+            return RuntimeDecision(
+                directive = RuntimeDirective.REPLAN,
+                progressLevel = ProgressLevel.NONE,
+                goalCommitted = false,
+                reason = "cycle_observation_unstable"
             )
         }
 
