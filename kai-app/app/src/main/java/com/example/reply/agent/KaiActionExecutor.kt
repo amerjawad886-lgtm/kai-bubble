@@ -118,7 +118,7 @@ class KaiActionExecutor(
             requireStrong = false
         )
         val frame = KaiVisionInterpreter.classify(
-            observation = obs,
+            obs = obs,
             expectedPackage = expectedPackage,
             allowLauncherSurface = true
         )

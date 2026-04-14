@@ -270,7 +270,6 @@ class KaiAgentLoopEngine(
                         before = before,
                         after = after,
                         result = result,
-                        userPrompt = userPrompt,
                         repeatedNoProgressSteps = repeatedNoProgressSteps,
                         recoverablePathExists = true,
                         telemetry = KaiExecutionDecisionAuthority.RuntimeTelemetry(
@@ -333,9 +332,7 @@ class KaiAgentLoopEngine(
                     noProgressCycles += 1
                 }
 
-                val cycleDecision = KaiExecutionDecisionAuthority.evaluateCycleOutcome(
-                    currentState = currentState,
-                    userPrompt = userPrompt,
+                val cycleDecision = KaiExecutionDecisionAuthority.evaluateCycleHealth(
                     lastDecision = lastDecision,
                     telemetry = KaiExecutionDecisionAuthority.RuntimeTelemetry(
                         noProgressCycles = noProgressCycles,

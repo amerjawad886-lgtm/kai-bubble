@@ -41,20 +41,6 @@ object KaiObservationRuntime {
         KaiLiveObservationRuntime.softCleanupAfterRun()
     }
 
-    fun requestWarmupObservation(
-        expectedPackage: String = "",
-        burstCount: Int = 4,
-        gapMs: Long = 140L,
-        skipTransitionReset: Boolean = false
-    ) {
-        KaiLiveObservationRuntime.requestWarmupObservation(
-            expectedPackage = expectedPackage,
-            burstCount = burstCount,
-            gapMs = gapMs,
-            skipTransitionReset = skipTransitionReset
-        )
-    }
-
     fun ensureBridge(context: Context) {
         KaiLiveObservationRuntime.ensureBridge(context)
     }
