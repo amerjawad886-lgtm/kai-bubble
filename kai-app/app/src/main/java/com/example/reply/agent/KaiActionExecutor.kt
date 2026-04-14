@@ -405,7 +405,8 @@ class KaiActionExecutor(
         if (targetPackage.isNotBlank() &&
             currentState.matchesExpectedPackage(targetPackage) &&
             !currentState.isLauncher() &&
-            !currentState.isWeakObservation()
+            currentState.packageName.isNotBlank() &&
+            !currentState.isOverlayPolluted()
         ) {
             return KaiActionExecutionResult(
                 success = true,
@@ -441,7 +442,8 @@ class KaiActionExecutor(
             val progress = KaiExecutionDecisionAuthority.hasMeaningfulProgress(currentState, after) ||
                 beforeFingerprint != after.semanticFingerprint()
 
-            if (targetMatched && !after.isLauncher() && !after.isWeakObservation()) {
+            if (targetMatched && !after.isLauncher() && after.packageName.isNotBlank() && !after.isOverlayPolluted()) {
+                softResetObservationState()
                 markActionProgress(
                     currentState.packageName,
                     after.packageName,
@@ -488,7 +490,8 @@ class KaiActionExecutor(
             else -> false
         }
 
-        if (finalMatch && !finalState.isLauncher() && !finalState.isWeakObservation()) {
+        if (finalMatch && !finalState.isLauncher() && finalState.packageName.isNotBlank() && !finalState.isOverlayPolluted()) {
+            softResetObservationState()
             return KaiActionExecutionResult(
                 success = true,
                 message = "open_app_late_match",
@@ -514,10 +517,10 @@ class KaiActionExecutor(
             success = false,
             message = if (sawTransition) "open_app_transition_unconfirmed" else "open_app_not_confirmed",
             screenState = finalState,
-            openAppOutcome = if (finalState.packageName.isBlank() || finalState.isLauncher()) {
-                KaiOpenAppOutcome.OPEN_FAILED
-            } else {
-                KaiOpenAppOutcome.OPEN_TRANSITION_IN_PROGRESS
+            openAppOutcome = when {
+                finalState.packageName.isBlank() || finalState.isLauncher() -> KaiOpenAppOutcome.OPEN_FAILED
+                targetPackage.isNotBlank() && finalState.matchesExpectedPackage(targetPackage) -> KaiOpenAppOutcome.USABLE_INTERMEDIATE_IN_TARGET_APP
+                else -> KaiOpenAppOutcome.OPEN_TRANSITION_IN_PROGRESS
             }
         )
     }

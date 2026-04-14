@@ -103,14 +103,19 @@ object KaiExecutionDecisionAuthority {
                     goalCommitted = false,
                     reason = "open_app_wrong_package"
                 )
+                KaiOpenAppOutcome.USABLE_INTERMEDIATE_IN_TARGET_APP -> RuntimeDecision(
+                    directive = RuntimeDirective.CONTINUE,
+                    progressLevel = ProgressLevel.INTERMEDIATE,
+                    goalCommitted = false,
+                    reason = "open_app_usable_intermediate"
+                )
                 KaiOpenAppOutcome.OPEN_FAILED -> RuntimeDecision(
-                    directive = if (repeatedNoProgressSteps >= 1) RuntimeDirective.STOP_FAILURE else RuntimeDirective.REPLAN,
+                    directive = if (repeatedNoProgressSteps >= 2) RuntimeDirective.STOP_FAILURE else RuntimeDirective.REPLAN,
                     progressLevel = ProgressLevel.NONE,
                     goalCommitted = false,
                     reason = "open_app_failed"
                 )
                 KaiOpenAppOutcome.OPEN_TRANSITION_IN_PROGRESS,
-                KaiOpenAppOutcome.USABLE_INTERMEDIATE_IN_TARGET_APP,
                 null -> RuntimeDecision(
                     directive = if (progress) RuntimeDirective.CONTINUE else RuntimeDirective.REPLAN,
                     progressLevel = if (progress) ProgressLevel.INTERMEDIATE else ProgressLevel.NONE,
@@ -176,8 +181,8 @@ object KaiExecutionDecisionAuthority {
             )
         }
 
-        val unreliable = telemetry.observationWeak || telemetry.observationFallback || telemetry.observationReusedLastGood ||
-            telemetry.weakReadStreak >= 2 || telemetry.staleReadStreak >= 2
+        val unreliable = telemetry.observationFallback || telemetry.observationReusedLastGood ||
+            telemetry.weakReadStreak >= 3 || telemetry.staleReadStreak >= 3
         if (unreliable) {
             return RuntimeDecision(
                 directive = RuntimeDirective.REPLAN,

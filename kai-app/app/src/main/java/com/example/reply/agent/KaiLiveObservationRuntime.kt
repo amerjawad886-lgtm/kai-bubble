@@ -64,6 +64,7 @@ object KaiLiveObservationRuntime {
 
     fun softCleanupAfterRun() {
         expectedPackageHint = ""
+        reset()
     }
 
     fun ensureBridge(context: Context) {
