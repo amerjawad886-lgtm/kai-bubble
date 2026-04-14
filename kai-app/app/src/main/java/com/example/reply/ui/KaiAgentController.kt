@@ -632,5 +632,5 @@ object KaiAgentController {
     }
 
     fun parseElementsFromJson(elementsJson: String?): List<KaiUiElement> =
-        KaiObservationRuntime.parseElementsFromJson(elementsJson)
+        KaiLiveObservationRuntime.parseElementsFromJson(elementsJson)
 }
