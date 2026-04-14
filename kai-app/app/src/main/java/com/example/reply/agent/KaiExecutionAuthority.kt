@@ -28,16 +28,11 @@ object KaiExecutionDecisionAuthority {
 
     data class RuntimeTelemetry(
         val noProgressCycles: Int = 0,
-        val repeatedSameSemanticIntentCycles: Int = 0,
-        val consecutiveWrongSurfaceChunks: Int = 0,
-        val wrongSurfaceSignals: Int = 0,
-        val normalizationFailures: Int = 0,
         val weakReadStreak: Int = 0,
         val staleReadStreak: Int = 0,
         val observationWeak: Boolean = false,
         val observationFallback: Boolean = false,
         val observationReusedLastGood: Boolean = false,
-        val optionalStep: Boolean = false,
         val loopSafetyLimitReached: Boolean = false
     )
 
@@ -81,101 +76,18 @@ object KaiExecutionDecisionAuthority {
         return true
     }
 
-    fun isGoalCommitted(
-        step: KaiActionStep,
-        before: KaiScreenState,
-        after: KaiScreenState,
-        stepSucceeded: Boolean
-    ): Boolean {
-        if (!stepSucceeded) return false
-
-        return when (step.normalizedCommand()) {
-            "open_app" -> step.allowsFinalCommit && after.matchesExpectedPackage(step.expectedPackage) && !after.isLauncher()
-            "verify_state", "read_screen", "wait_for_text" -> expectedEvidenceSatisfied(step, after)
-            "input_text", "input_into_best_field", "type_text" -> {
-                val payload = step.semanticPayload()
-                payload.isNotBlank() && (
-                    after.containsText(payload) ||
-                        after.editableTextSignature().contains(KaiScreenStateParser.normalize(payload))
-                    )
-            }
-            "press_primary_action" -> before.findSendAction() != null && after.findSendAction() == null
-            else -> step.allowsFinalCommit && hasMeaningfulProgress(before, after)
-        }
-    }
-
-    fun likelyGoalSatisfied(userPrompt: String, state: KaiScreenState): Boolean {
-        if (state.packageName.isBlank()) return false
-        if (state.isWeakObservation() || state.isOverlayPolluted()) return false
-
-        val appHint = KaiScreenStateParser.inferAppHint(userPrompt)
-        if (appHint.isNotBlank() && !state.likelyMatchesAppHint(appHint)) return false
-
-        val goalMode = KaiTaskStageEngine.classifyGoalMode(userPrompt)
-        if (goalMode == KaiTaskStageEngine.GoalMode.OPEN_ONLY) {
-            return !state.isLauncher() && state.packageName.isNotBlank()
-        }
-
-        val prompt = KaiScreenStateParser.normalize(userPrompt)
-        val wantsConversation = listOf("conversation", "thread", "chat with", "message to", "dm to", "محادثة")
-            .any { prompt.contains(it) }
-        val wantsMessages = listOf("message", "messages", "chat", "dm", "رسائل", "محادث")
-            .any { prompt.contains(it) }
-        val wantsNote = appHint == "notes" || prompt.contains("note") || prompt.contains("ملاحظ")
-        val wantsPlayer = listOf("play", "watch", "شغل", "ابدأ", "شاهد").any { prompt.contains(it) }
-
-        return when {
-            wantsConversation -> state.isChatThreadScreen() || state.isChatComposerSurface()
-            wantsMessages -> state.isChatListScreen() || state.isChatThreadScreen() || state.isChatComposerSurface()
-            wantsNote -> state.isNotesEditorSurface() || state.isNotesBodyInputSurface() || state.isNotesTitleInputSurface()
-            wantsPlayer -> state.isDetailSurface() || state.isPlayerSurface()
-            else -> state.isMeaningful()
-        }
-    }
-
-    fun shouldDeferFinalCommit(stageSnapshot: KaiTaskStageEngine.StageSnapshot): Boolean {
-        return stageSnapshot.appEntryComplete &&
-            !stageSnapshot.finalGoalComplete &&
-            stageSnapshot.goalMode != KaiTaskStageEngine.GoalMode.OPEN_ONLY
-    }
-
-    fun shouldAcceptPlannerGoalComplete(
-        plan: KaiActionPlan,
-        userPrompt: String,
-        currentState: KaiScreenState
-    ): Boolean {
-        if (!plan.goalComplete && !plan.plannerGoalComplete) return false
-        return likelyGoalSatisfied(userPrompt, currentState)
-    }
-
-    fun isCriticalCommand(step: KaiActionStep): Boolean {
-        return step.normalizedCommand() in setOf(
-            "open_app",
-            "click_text",
-            "click_best_match",
-            "open_best_list_item",
-            "focus_best_input",
-            "input_into_best_field",
-            "input_text",
-            "press_primary_action",
-            "verify_state",
-            "wait_for_text"
-        )
-    }
-
     fun evaluateStepOutcome(
         step: KaiActionStep,
         before: KaiScreenState,
         after: KaiScreenState,
         result: KaiActionExecutionResult,
-        userPrompt: String,
         repeatedNoProgressSteps: Int,
         recoverablePathExists: Boolean,
         telemetry: RuntimeTelemetry = RuntimeTelemetry()
     ): RuntimeDecision {
         val progress = hasMeaningfulProgress(before, after) && !telemetry.observationReusedLastGood
         val evidence = expectedEvidenceSatisfied(step, after)
-        val hardUnreliable = telemetry.observationWeak || telemetry.observationFallback || telemetry.observationReusedLastGood
+        val unreliable = telemetry.observationWeak || telemetry.observationFallback || telemetry.observationReusedLastGood
 
         if (step.isOpenAppStep()) {
             return when (result.openAppOutcome) {
@@ -185,12 +97,6 @@ object KaiExecutionDecisionAuthority {
                     goalCommitted = false,
                     reason = "open_app_target_ready"
                 )
-                KaiOpenAppOutcome.USABLE_INTERMEDIATE_IN_TARGET_APP -> RuntimeDecision(
-                    directive = RuntimeDirective.CONTINUE,
-                    progressLevel = ProgressLevel.INTERMEDIATE,
-                    goalCommitted = false,
-                    reason = "open_app_intermediate_only"
-                )
                 KaiOpenAppOutcome.WRONG_PACKAGE_CONFIRMED -> RuntimeDecision(
                     directive = if (recoverablePathExists) RuntimeDirective.RECOVER else RuntimeDirective.REPLAN,
                     progressLevel = ProgressLevel.NONE,
@@ -198,13 +104,15 @@ object KaiExecutionDecisionAuthority {
                     reason = "open_app_wrong_package"
                 )
                 KaiOpenAppOutcome.OPEN_FAILED -> RuntimeDecision(
-                    directive = if (repeatedNoProgressSteps >= 2) RuntimeDirective.STOP_FAILURE else RuntimeDirective.REPLAN,
+                    directive = if (repeatedNoProgressSteps >= 1) RuntimeDirective.STOP_FAILURE else RuntimeDirective.REPLAN,
                     progressLevel = ProgressLevel.NONE,
                     goalCommitted = false,
                     reason = "open_app_failed"
                 )
-                KaiOpenAppOutcome.OPEN_TRANSITION_IN_PROGRESS, null -> RuntimeDecision(
-                    directive = RuntimeDirective.CONTINUE,
+                KaiOpenAppOutcome.OPEN_TRANSITION_IN_PROGRESS,
+                KaiOpenAppOutcome.USABLE_INTERMEDIATE_IN_TARGET_APP,
+                null -> RuntimeDecision(
+                    directive = if (progress) RuntimeDirective.CONTINUE else RuntimeDirective.REPLAN,
                     progressLevel = if (progress) ProgressLevel.INTERMEDIATE else ProgressLevel.NONE,
                     goalCommitted = false,
                     reason = if (progress) "open_app_transition_progress" else "open_app_transition_pending"
@@ -213,21 +121,11 @@ object KaiExecutionDecisionAuthority {
         }
 
         if (result.hardStop) {
-            return RuntimeDecision(
-                directive = RuntimeDirective.STOP_FAILURE,
-                progressLevel = ProgressLevel.NONE,
-                goalCommitted = false,
-                reason = "hard_stop:${result.message}"
-            )
+            return RuntimeDecision(RuntimeDirective.STOP_FAILURE, ProgressLevel.NONE, false, "hard_stop:${result.message}")
         }
 
         if (telemetry.loopSafetyLimitReached) {
-            return RuntimeDecision(
-                directive = RuntimeDirective.STOP_FAILURE,
-                progressLevel = ProgressLevel.NONE,
-                goalCommitted = false,
-                reason = "loop_limit_reached"
-            )
+            return RuntimeDecision(RuntimeDirective.STOP_FAILURE, ProgressLevel.NONE, false, "loop_limit_reached")
         }
 
         if (result.success && (progress || evidence)) {
@@ -239,7 +137,7 @@ object KaiExecutionDecisionAuthority {
             )
         }
 
-        if (hardUnreliable || telemetry.weakReadStreak >= 2 || telemetry.staleReadStreak >= 2) {
+        if (unreliable || telemetry.weakReadStreak >= 2 || telemetry.staleReadStreak >= 2) {
             return RuntimeDecision(
                 directive = if (recoverablePathExists) RuntimeDirective.RECOVER else RuntimeDirective.REPLAN,
                 progressLevel = ProgressLevel.NONE,
@@ -265,10 +163,8 @@ object KaiExecutionDecisionAuthority {
         )
     }
 
-    fun evaluateCycleOutcome(
-        currentState: KaiScreenState,
-        userPrompt: String,
-        lastDecision: RuntimeDecision? = null,
+    fun evaluateCycleHealth(
+        lastDecision: RuntimeDecision?,
         telemetry: RuntimeTelemetry = RuntimeTelemetry()
     ): RuntimeDecision {
         if (telemetry.loopSafetyLimitReached || telemetry.noProgressCycles >= 4) {
@@ -280,27 +176,8 @@ object KaiExecutionDecisionAuthority {
             )
         }
 
-        val stageSnapshot = KaiTaskStageEngine.evaluate(userPrompt, currentState)
-        if (stageSnapshot.shouldContinue) {
-            return RuntimeDecision(
-                directive = RuntimeDirective.CONTINUE,
-                progressLevel = if (stageSnapshot.appEntryComplete) ProgressLevel.TARGET_READY else ProgressLevel.INTERMEDIATE,
-                goalCommitted = false,
-                reason = "stage_continuation_required:${stageSnapshot.nextSemanticAction}"
-            )
-        }
-
         val unreliable = telemetry.observationWeak || telemetry.observationFallback || telemetry.observationReusedLastGood ||
             telemetry.weakReadStreak >= 2 || telemetry.staleReadStreak >= 2
-        if (!unreliable && stageSnapshot.finalGoalComplete && likelyGoalSatisfied(userPrompt, currentState)) {
-            return RuntimeDecision(
-                directive = RuntimeDirective.STOP_SUCCESS,
-                progressLevel = ProgressLevel.GOAL_COMMITTED,
-                goalCommitted = true,
-                reason = "goal_satisfied_from_cycle_state"
-            )
-        }
-
         if (unreliable) {
             return RuntimeDecision(
                 directive = RuntimeDirective.REPLAN,
@@ -316,215 +193,5 @@ object KaiExecutionDecisionAuthority {
             goalCommitted = false,
             reason = "cycle_continue"
         )
-    }
-}
-
-object KaiTaskStageEngine {
-
-    enum class GoalMode {
-        OPEN_ONLY,
-        MULTI_STAGE
-    }
-
-    enum class Stage {
-        APP_ENTRY,
-        REACH_MESSAGES_SURFACE,
-        LOCATE_TARGET_CONVERSATION,
-        OPEN_TARGET_CONVERSATION,
-        REACH_NOTE_EDITOR,
-        OPEN_MEDIA,
-        GENERAL_CONTINUATION,
-        SUCCESS
-    }
-
-    data class StageSnapshot(
-        val goalMode: GoalMode,
-        val stage: Stage,
-        val appEntryComplete: Boolean,
-        val finalGoalComplete: Boolean,
-        val shouldContinue: Boolean,
-        val nextSemanticAction: String,
-        val reason: String
-    )
-
-    fun classifyGoalMode(prompt: String): GoalMode {
-        val p = KaiScreenStateParser.normalize(prompt)
-        if (p.isBlank()) return GoalMode.MULTI_STAGE
-
-        val openIntent = p.startsWith("open ") ||
-            p.startsWith("launch ") ||
-            p.startsWith("افتح ") ||
-            p.startsWith("شغل ")
-
-        val followUpSignals = listOf(
-            " and ", " then ", " ثم ", "بعد", "اكتب", "send", "reply",
-            "message", "conversation", "chat", "note", "play", "watch"
-        ).any { p.contains(it) }
-
-        return if (openIntent && !followUpSignals) GoalMode.OPEN_ONLY else GoalMode.MULTI_STAGE
-    }
-
-    fun evaluate(
-        userPrompt: String,
-        currentState: KaiScreenState,
-        openAppOutcome: KaiOpenAppOutcome? = null
-    ): StageSnapshot {
-        val goalMode = classifyGoalMode(userPrompt)
-        val appHint = KaiScreenStateParser.inferAppHint(userPrompt)
-        val appEntryComplete = when {
-            openAppOutcome == KaiOpenAppOutcome.TARGET_READY -> true
-            appHint.isNotBlank() && currentState.likelyMatchesAppHint(appHint) && !currentState.isLauncher() && currentState.packageName.isNotBlank() -> true
-            else -> false
-        }
-
-        if (!appEntryComplete) {
-            return StageSnapshot(
-                goalMode = goalMode,
-                stage = Stage.APP_ENTRY,
-                appEntryComplete = false,
-                finalGoalComplete = false,
-                shouldContinue = true,
-                nextSemanticAction = "open_app",
-                reason = "app_entry_not_confirmed"
-            )
-        }
-
-        if (goalMode == GoalMode.OPEN_ONLY) {
-            return StageSnapshot(
-                goalMode = goalMode,
-                stage = Stage.SUCCESS,
-                appEntryComplete = true,
-                finalGoalComplete = true,
-                shouldContinue = false,
-                nextSemanticAction = "none",
-                reason = "open_only_goal_satisfied"
-            )
-        }
-
-        val prompt = KaiScreenStateParser.normalize(userPrompt)
-        val wantsMessages = listOf("message", "messages", "chat", "dm", "رسائل", "محادث").any { prompt.contains(it) }
-        val wantsConversation = listOf("conversation", "thread", "chat with", "محادثة").any { prompt.contains(it) }
-        val wantsNote = appHint == "notes" || prompt.contains("note") || prompt.contains("ملاحظ")
-        val wantsMedia = listOf("play", "watch", "شغل", "شاهد").any { prompt.contains(it) }
-
-        return when {
-            wantsMessages && !currentState.isChatListScreen() && !currentState.isChatThreadScreen() && !currentState.isChatComposerSurface() -> {
-                StageSnapshot(goalMode, Stage.REACH_MESSAGES_SURFACE, true, false, true, "open_messages", "messages_surface_not_reached")
-            }
-            wantsConversation && !currentState.isChatThreadScreen() && !currentState.isChatComposerSurface() -> {
-                StageSnapshot(goalMode, Stage.OPEN_TARGET_CONVERSATION, true, false, true, "open_target_conversation", "conversation_not_opened")
-            }
-            wantsNote && !(currentState.isNotesEditorSurface() || currentState.isNotesBodyInputSurface() || currentState.isNotesTitleInputSurface()) -> {
-                StageSnapshot(goalMode, Stage.REACH_NOTE_EDITOR, true, false, true, "open_note_editor", "note_editor_not_ready")
-            }
-            wantsMedia && !(currentState.isDetailSurface() || currentState.isPlayerSurface()) -> {
-                StageSnapshot(goalMode, Stage.OPEN_MEDIA, true, false, true, "open_first_media", "media_not_opened")
-            }
-            else -> {
-                val finalGoal = KaiExecutionDecisionAuthority.likelyGoalSatisfied(userPrompt, currentState)
-                StageSnapshot(
-                    goalMode = goalMode,
-                    stage = if (finalGoal) Stage.SUCCESS else Stage.GENERAL_CONTINUATION,
-                    appEntryComplete = true,
-                    finalGoalComplete = finalGoal,
-                    shouldContinue = !finalGoal,
-                    nextSemanticAction = if (finalGoal) "none" else "continue_semantic_navigation",
-                    reason = if (finalGoal) "goal_satisfied" else "general_continuation"
-                )
-            }
-        }
-    }
-
-    fun buildContinuationStep(
-        stageSnapshot: StageSnapshot,
-        userPrompt: String,
-        currentState: KaiScreenState
-    ): KaiActionStep? {
-        val appHint = KaiScreenStateParser.inferAppHint(userPrompt)
-        val expectedPackage = KaiAppIdentityRegistry.primaryPackageForKey(appHint)
-
-        return when (stageSnapshot.nextSemanticAction) {
-            "open_app" -> KaiActionStep(
-                cmd = "open_app",
-                text = appHint.ifBlank { userPrompt.trim() },
-                expectedPackage = expectedPackage,
-                stageHint = "app_entry",
-                completionBoundary = KaiGoalBoundary.APP_ENTRY,
-                continuationKind = KaiContinuationKind.STAGE_CONTINUATION,
-                allowsFinalCommit = stageSnapshot.goalMode == GoalMode.OPEN_ONLY,
-                note = "stage_continuation_open_app"
-            )
-
-            "open_messages" -> KaiActionStep(
-                cmd = "click_text",
-                text = if (currentState.packageName.contains("whatsapp", true)) "chats" else "messages",
-                expectedPackage = expectedPackage,
-                stageHint = "messages_surface",
-                completionBoundary = KaiGoalBoundary.SURFACE_READY,
-                continuationKind = KaiContinuationKind.STAGE_CONTINUATION,
-                note = "stage_continuation_messages"
-            )
-
-            "open_target_conversation" -> KaiActionStep(
-                cmd = "open_best_list_item",
-                selectorRole = "chat_item",
-                selectorText = extractConversationQuery(userPrompt),
-                text = extractConversationQuery(userPrompt),
-                expectedPackage = expectedPackage,
-                expectedScreenKind = "chat_thread",
-                stageHint = "conversation_open",
-                completionBoundary = KaiGoalBoundary.ENTITY_OPENED,
-                continuationKind = KaiContinuationKind.STAGE_CONTINUATION,
-                note = "stage_continuation_conversation"
-            )
-
-            "open_note_editor" -> KaiActionStep(
-                cmd = "open_best_list_item",
-                selectorRole = "create_button",
-                selectorText = "new",
-                text = "new",
-                expectedPackage = expectedPackage,
-                expectedScreenKind = "notes_editor",
-                stageHint = "note_editor",
-                completionBoundary = KaiGoalBoundary.SURFACE_READY,
-                continuationKind = KaiContinuationKind.STAGE_CONTINUATION,
-                note = "stage_continuation_note_editor"
-            )
-
-            "open_first_media" -> KaiActionStep(
-                cmd = "open_best_list_item",
-                selectorRole = "list_item",
-                expectedPackage = expectedPackage,
-                expectedScreenKind = "detail",
-                stageHint = "media_open",
-                completionBoundary = KaiGoalBoundary.ENTITY_OPENED,
-                continuationKind = KaiContinuationKind.STAGE_CONTINUATION,
-                note = "stage_continuation_media"
-            )
-
-            "continue_semantic_navigation" -> KaiActionStep(
-                cmd = "verify_state",
-                expectedPackage = expectedPackage,
-                stageHint = "verify_progress",
-                completionBoundary = KaiGoalBoundary.UNKNOWN,
-                continuationKind = KaiContinuationKind.VERIFICATION,
-                note = "stage_continuation_verify"
-            )
-
-            else -> null
-        }
-    }
-
-    private fun extractConversationQuery(prompt: String): String {
-        val p = prompt.trim()
-        val patterns = listOf(
-            Regex("""(?i)(?:conversation|chat|thread)\s+([\p{L}\p{N}_\-.@]{2,})"""),
-            Regex("""(?i)(?:to|with)\s+([\p{L}\p{N}_\-.@]{2,})"""),
-            Regex("""(?i)(?:محادثه|محادثة|الدردشه|الدردشة)\s+([\p{L}\p{N}_\-.@]{2,})""")
-        )
-        return patterns.asSequence()
-            .mapNotNull { it.find(p)?.groupValues?.getOrNull(1)?.trim() }
-            .firstOrNull { it.isNotBlank() }
-            .orEmpty()
     }
 }
