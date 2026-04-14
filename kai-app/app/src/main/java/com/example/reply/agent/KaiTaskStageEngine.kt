@@ -52,13 +52,16 @@ object KaiTaskStageEngine {
     ): StageSnapshot {
         val goalMode = classifyGoalMode(userPrompt)
         val appHint = KaiScreenStateParser.inferAppHint(userPrompt)
+        val expectedPackage = KaiAppIdentityRegistry.primaryPackageForKey(appHint)
+
+        val strongForApp = currentState.isKaiLiveStrong(
+            expectedPackage = expectedPackage.ifBlank { currentState.packageName },
+            allowLauncherSurface = false
+        )
 
         val appEntryComplete = when {
             openAppOutcome == KaiOpenAppOutcome.TARGET_READY -> true
-            appHint.isNotBlank() &&
-                currentState.likelyMatchesAppHint(appHint) &&
-                currentState.packageName.isNotBlank() &&
-                !currentState.isLauncher() -> true
+            appHint.isNotBlank() && strongForApp && currentState.likelyMatchesAppHint(appHint) -> true
             else -> false
         }
 
@@ -92,6 +95,29 @@ object KaiTaskStageEngine {
         val wantsNote = appHint == "notes" || prompt.contains("note") || prompt.contains("ملاحظ")
         val wantsMedia = listOf("play", "watch", "شغل", "شاهد").any { prompt.contains(it) }
 
+        val finalGoalComplete = when {
+            wantsConversation -> currentState.isKaiLiveStrong(expectedPackage) &&
+                (currentState.isChatThreadScreen() || currentState.isChatComposerSurface())
+            wantsMessages -> currentState.isKaiLiveStrong(expectedPackage) && currentState.isChatListScreen()
+            wantsNote -> currentState.isKaiLiveStrong(expectedPackage) &&
+                (currentState.isNotesEditorSurface() || currentState.isNotesBodyInputSurface() || currentState.isNotesTitleInputSurface())
+            wantsMedia -> currentState.isKaiLiveStrong(expectedPackage) &&
+                (currentState.isDetailSurface() || currentState.isPlayerSurface())
+            else -> currentState.isKaiLiveStrong(expectedPackage)
+        }
+
+        if (finalGoalComplete) {
+            return StageSnapshot(
+                goalMode = goalMode,
+                stage = Stage.SUCCESS,
+                appEntryComplete = true,
+                finalGoalComplete = true,
+                shouldContinue = false,
+                nextSemanticAction = "none",
+                reason = "stage_goal_satisfied"
+            )
+        }
+
         return when {
             wantsMessages && !currentState.isChatListScreen() && !currentState.isChatThreadScreen() && !currentState.isChatComposerSurface() -> {
                 StageSnapshot(goalMode, Stage.REACH_MESSAGES_SURFACE, true, false, true, "open_messages", "messages_surface_not_reached")
@@ -106,15 +132,7 @@ object KaiTaskStageEngine {
                 StageSnapshot(goalMode, Stage.OPEN_MEDIA, true, false, true, "open_first_media", "media_not_opened")
             }
             else -> {
-                StageSnapshot(
-                    goalMode = goalMode,
-                    stage = Stage.SUCCESS,
-                    appEntryComplete = true,
-                    finalGoalComplete = true,
-                    shouldContinue = false,
-                    nextSemanticAction = "none",
-                    reason = "stage_goal_satisfied"
-                )
+                StageSnapshot(goalMode, Stage.GENERAL_CONTINUATION, true, false, true, "verify_surface", "general_continuation")
             }
         }
     }
@@ -138,17 +156,16 @@ object KaiTaskStageEngine {
                 allowsFinalCommit = stageSnapshot.goalMode == GoalMode.OPEN_ONLY,
                 note = "stage_continuation_open_app"
             )
-
             "open_messages" -> KaiActionStep(
                 cmd = "click_text",
                 text = if (currentState.packageName.contains("whatsapp", true)) "chats" else "messages",
                 expectedPackage = expectedPackage,
+                expectedScreenKind = "chat_list",
                 stageHint = "messages_surface",
                 completionBoundary = KaiGoalBoundary.SURFACE_READY,
                 continuationKind = KaiContinuationKind.STAGE_CONTINUATION,
                 note = "stage_continuation_messages"
             )
-
             "open_target_conversation" -> KaiActionStep(
                 cmd = "open_best_list_item",
                 selectorRole = "chat_item",
@@ -161,7 +178,6 @@ object KaiTaskStageEngine {
                 continuationKind = KaiContinuationKind.STAGE_CONTINUATION,
                 note = "stage_continuation_conversation"
             )
-
             "open_note_editor" -> KaiActionStep(
                 cmd = "open_best_list_item",
                 selectorRole = "create_button",
@@ -174,7 +190,6 @@ object KaiTaskStageEngine {
                 continuationKind = KaiContinuationKind.STAGE_CONTINUATION,
                 note = "stage_continuation_note_editor"
             )
-
             "open_first_media" -> KaiActionStep(
                 cmd = "open_best_list_item",
                 selectorRole = "list_item",
@@ -185,7 +200,14 @@ object KaiTaskStageEngine {
                 continuationKind = KaiContinuationKind.STAGE_CONTINUATION,
                 note = "stage_continuation_media"
             )
-
+            "verify_surface" -> KaiActionStep(
+                cmd = "verify_state",
+                expectedPackage = expectedPackage,
+                stageHint = "verify_surface",
+                completionBoundary = KaiGoalBoundary.SURFACE_READY,
+                continuationKind = KaiContinuationKind.VERIFICATION,
+                note = "stage_continuation_verify_surface"
+            )
             else -> null
         }
     }

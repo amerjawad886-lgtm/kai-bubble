@@ -313,8 +313,7 @@ class KaiAccessibilityService : AccessibilityService() {
     }
 
     private fun resetTransitionMemory() {
-        // Preserve the latest external package hint. Clearing it here was causing startup dumps
-        // to lose package recovery and fail with missing_package immediately after restart.
+        // Kai Live reset: clear transient dump state only. Do not resurrect stale external package as truth.
         previousExternalPackage = lastKnownExternalPackage
         lastWindowEventAt = 0L
         lastPackageChangeAt = 0L
@@ -440,21 +439,9 @@ class KaiAccessibilityService : AccessibilityService() {
     ): String {
         val expected = expectedPackage.trim()
         val dumpIsSubstantive = isSubstantiveDump(dump)
-
-        if (expected.isNotBlank() && isExternalAppPackage(expected)) {
-            if (isRecentPackageTransition() || dumpIsSubstantive) {
-                return expected
-            }
+        if (expected.isNotBlank() && dumpIsSubstantive && isExternalAppPackage(expected)) {
+            return expected
         }
-
-        val recent = lastKnownExternalPackage.orEmpty()
-        if (dumpIsSubstantive && isExternalAppPackage(recent)) {
-            return recent
-        }
-
-        val launcher = currentVisibleLauncherPackage()
-        if (dumpIsSubstantive && launcher.isNotBlank()) return launcher
-
         return ""
     }
 
@@ -471,14 +458,7 @@ class KaiAccessibilityService : AccessibilityService() {
         if (normalizedDump == norm("(empty dump)")) return ""
         if (isOverlayPolluted(dump)) return ""
 
-        val fallback = fallbackExternalPackage(expectedPackage, dump)
-        if (fallback.isNotBlank()) return fallback
-
-        if (expectedPackage.isNotBlank() && isSubstantiveDump(dump) && isExternalAppPackage(expectedPackage)) {
-            return expectedPackage
-        }
-
-        return ""
+        return fallbackExternalPackage(expectedPackage, dump)
     }
 
     private fun isWeakDumpCandidate(candidate: DumpCandidate): Boolean {

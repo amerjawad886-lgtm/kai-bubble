@@ -727,3 +727,21 @@ object KaiRecoveryPolicy {
 }
 
 // Execution authority and stage engine were extracted to KaiExecutionAuthority.kt
+
+
+object KaiLiveSurfacePolicy {
+    fun isUsableForOpenApp(state: KaiScreenState, expectedPackage: String = ""): Boolean {
+        return state.isKaiLiveStrong(expectedPackage = expectedPackage, allowLauncherSurface = false) &&
+            KaiSurfaceModel.isPostOpenReadyFamily(KaiSurfaceModel.familyOf(state))
+    }
+
+    fun isUsableForSemanticAction(state: KaiScreenState, expectedPackage: String = ""): Boolean {
+        val readiness = KaiObservationReadiness.evaluate(
+            state = state,
+            expectedPackage = expectedPackage,
+            allowLauncherSurface = false,
+            tier = KaiObservationReadiness.Tier.SEMANTIC_ACTION_SAFE
+        )
+        return readiness.passed
+    }
+}

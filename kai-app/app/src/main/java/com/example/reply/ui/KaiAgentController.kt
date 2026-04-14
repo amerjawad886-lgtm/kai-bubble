@@ -59,11 +59,11 @@ object KaiAgentController {
     private var continuousJob: Job? = null
 
     fun getSnapshot(): KaiAgentSnapshot = snapshot
-    fun getLatestObservation(): KaiObservation = KaiObservationRuntime.live
-    fun getLatestScreenState(): KaiScreenState = KaiObservationRuntime.currentScreenState()
+    fun getLatestObservation(): KaiObservation = KaiLiveObservationRuntime.bestObservation()
+    fun getLatestScreenState(): KaiScreenState = KaiLiveObservationRuntime.currentScreenState(requireStrong = false)
 
     fun ensureRuntimeObservationBridge(context: Context) {
-        KaiObservationRuntime.ensureBridge(context)
+        KaiLiveObservationRuntime.ensureBridge(context)
     }
 
     fun isRuntimeObservationBridgeActive(): Boolean = true
@@ -148,7 +148,7 @@ object KaiAgentController {
             lastSuggestion = if (message.isNotBlank()) message else snapshot.lastSuggestion
         )
         if (continuousRunning) {
-            KaiObservationRuntime.startWatching(immediateDump = true)
+            KaiLiveObservationRuntime.startWatching(immediateDump = true)
         }
     }
 
@@ -184,7 +184,7 @@ object KaiAgentController {
         continuousJob?.cancel()
         continuousJob = null
         insightBusy = false
-        KaiObservationRuntime.stopWatching()
+        KaiLiveObservationRuntime.stopWatching()
         snapshot = snapshot.copy(
             isRunning = snapshot.actionLoopActive,
             statusText = if (snapshot.actionLoopActive) "Action loop active" else "Idle"
@@ -208,7 +208,7 @@ object KaiAgentController {
         silentInsightCallback = onInsight
         snapshot = snapshot.copy(isRunning = true, statusText = "Monitoring")
 
-        KaiObservationRuntime.startWatching(immediateDump = true)
+        KaiLiveObservationRuntime.startWatching(immediateDump = true)
         runCatching { onRequestDump() }
 
         continuousJob = scope.launch {

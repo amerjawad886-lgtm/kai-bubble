@@ -52,7 +52,18 @@ data class KaiActionStep(
     fun isOpenAppStep(): Boolean = normalizedCommand() == "open_app"
 
     fun isVerificationStep(): Boolean = normalizedCommand() in setOf("verify_state", "read_screen", "wait_for_text")
+
+    fun requiresStrongObservation(): Boolean = when (completionBoundary) {
+        KaiGoalBoundary.APP_ENTRY,
+        KaiGoalBoundary.SURFACE_READY,
+        KaiGoalBoundary.ENTITY_OPENED,
+        KaiGoalBoundary.INPUT_READY,
+        KaiGoalBoundary.CONTENT_COMMITTED,
+        KaiGoalBoundary.FINAL_GOAL -> true
+        KaiGoalBoundary.UNKNOWN -> false
+    }
 }
+
 
 data class KaiActionPlan(
     val summary: String,

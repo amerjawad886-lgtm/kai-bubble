@@ -2,13 +2,23 @@ package com.example.reply.agent
 
 import android.content.Context
 import kotlinx.coroutines.delay
-import java.util.Locale
 
+/**
+ * Thin compatibility shim only.
+ *
+ * The old Copilot gate used to own canonical/fallback/readiness logic.
+ * Kai Live moved those responsibilities into:
+ * - KaiLiveObservationRuntime
+ * - KaiVisionInterpreter
+ * - KaiObservationReadiness
+ *
+ * Keep a tiny accepted-state cache only for compatibility with legacy call-sites.
+ */
 class KaiObservationGate(
+    @Suppress("UNUSED_PARAMETER")
     private val context: Context,
     private val onLog: (String) -> Unit = {}
 ) {
-
     data class RefreshMeta(
         val fingerprint: String = "",
         val changedFromPrevious: Boolean = false,
@@ -80,102 +90,13 @@ class KaiObservationGate(
     fun adopt(state: KaiScreenState) {
         if (state.packageName.isBlank()) return
         canonical = state
-        lastAcceptedFingerprint = fingerprintFor(state.packageName, state.rawDump)
+        lastAcceptedFingerprint = state.semanticFingerprint().take(5000)
         lastAcceptedObservationAt = state.updatedAt
         runCatching { KaiAgentController.mirrorRuntimeObservation(state) }
     }
 
     fun resolve(): KaiScreenState {
-        val local = canonical
-        if (local != null) return local
-        return runCatching { KaiAgentController.getLatestScreenState() }
-            .getOrElse { KaiScreenStateParser.fromDump("", "") }
-    }
-
-    fun weakReadCount(): Int = consecutiveWeakReads
-    fun staleReadCount(): Int = consecutiveStaleReads
-
-    fun fingerprintFor(packageName: String, rawDump: String): String {
-        return KaiScreenStateParser.fromDump(packageName, rawDump).semanticFingerprint().take(5000)
-    }
-
-    fun sameFingerprint(a: String, b: String): Boolean {
-        return a.isNotBlank() && b.isNotBlank() && a == b
-    }
-
-    fun isExternalPackageChange(before: String, after: String): Boolean {
-        if (before.isBlank() || after.isBlank()) return false
-        if (before == context.packageName || after == context.packageName) return false
-        return !KaiAppIdentityRegistry.packageMatchesFamily(before, after) &&
-            KaiScreenStateParser.normalize(before) != KaiScreenStateParser.normalize(after)
-    }
-
-    fun isOverlayPolluted(raw: String): Boolean {
-        val clean = raw.trim().lowercase(Locale.ROOT)
-        if (clean.isBlank()) return false
-        val hints = listOf(
-            "dynamic island", "custom prompt", "make action", "control panel",
-            "agent loop active", "agent planning", "agent executing", "agent observing",
-            "monitoring paused before action loop", "screen recorder", "recording"
-        )
-        return hints.count { clean.contains(it) } >= 2
-    }
-
-    fun isUsableDump(raw: String, packageName: String = ""): Boolean {
-        val clean = raw.trim()
-        if (clean.isBlank()) return false
-        if (clean.equals("(no active window)", ignoreCase = true)) return false
-        if (clean.equals("(empty dump)", ignoreCase = true)) return false
-        if (clean.lines().size < 2) return false
-        if (packageName == context.packageName) return false
-        if (isOverlayPolluted(clean)) return false
-        return true
-    }
-
-    fun isExpectedPackageMatch(observed: String, expected: String): Boolean {
-        val o = KaiScreenStateParser.normalize(observed)
-        val e = KaiScreenStateParser.normalize(expected)
-        if (e.isBlank()) return true
-        if (o.isBlank()) return false
-        return o == e || o.startsWith("$e.") || KaiAppIdentityRegistry.packageMatchesFamily(expected, observed)
-    }
-
-    private fun isUsableState(state: KaiScreenState): Boolean {
-        if (!isUsableDump(state.rawDump, state.packageName)) return false
-        if (state.packageName.isBlank()) return false
-        if (state.isOverlayPolluted()) return false
-        return true
-    }
-
-    private fun buildState(obs: KaiObservation): KaiScreenState {
-        return KaiScreenStateParser.fromDump(
-            packageName = obs.packageName,
-            dump = obs.screenPreview,
-            elements = obs.elements,
-            screenKindHint = obs.screenKind,
-            semanticConfidence = obs.semanticConfidence
-        )
-    }
-
-    private fun classifyFailureReason(
-        state: KaiScreenState,
-        expectedPackage: String,
-        allowLauncherSurface: Boolean,
-        tier: GateTier,
-        stale: Boolean
-    ): String {
-        val packageMismatch = expectedPackage.isNotBlank() &&
-            !isExpectedPackageMatch(state.packageName, expectedPackage)
-
-        return when {
-            state.isOverlayPolluted() -> "overlay_pollution"
-            state.packageName.isBlank() -> "missing_package"
-            packageMismatch -> "wrong_package"
-            stale -> "stale_observation"
-            tier == GateTier.SEMANTIC_ACTION_SAFE && state.isWeakObservation() -> "weak_observation"
-            state.isLauncher() && !allowLauncherSurface -> "launcher_surface"
-            else -> "observation_not_ready"
-        }
+        return canonical ?: KaiLiveObservationRuntime.currentScreenState()
     }
 
     suspend fun requestFreshScreen(
@@ -183,40 +104,45 @@ class KaiObservationGate(
         expectedPackage: String = ""
     ): KaiScreenState {
         val afterTime = System.currentTimeMillis()
-        KaiObservationRuntime.requestImmediateDump(expectedPackage)
-        val obs = KaiObservationRuntime.awaitFresh(
+        KaiLiveObservationRuntime.requestImmediateDump(expectedPackage)
+
+        val obs = KaiLiveObservationRuntime.awaitFreshObservation(
             afterTime = afterTime,
             timeoutMs = timeoutMs,
             expectedPackage = expectedPackage,
-            authoritativeOnly = false
+            requireStrong = false
         )
-        val state = buildState(obs)
-        val fingerprint = fingerprintFor(state.packageName, state.rawDump)
-        val usable = isUsableState(state)
-        val weak = state.isWeakObservation()
-        val changed = !sameFingerprint(fingerprint, lastAcceptedFingerprint)
+
+        val frame = KaiVisionInterpreter.classify(
+            observation = obs,
+            expectedPackage = expectedPackage,
+            allowLauncherSurface = true
+        )
+
+        val fingerprint = frame.screenState.semanticFingerprint().take(5000)
+        val changed = fingerprint != lastAcceptedFingerprint
         val stale = !changed && lastAcceptedFingerprint.isNotBlank()
 
         lastMeta = RefreshMeta(
             fingerprint = fingerprint,
             changedFromPrevious = changed,
-            usable = usable,
+            usable = frame.isUsable,
             fallback = false,
-            weak = weak,
+            weak = !frame.isStrong,
             stale = stale,
             reusedLastGood = false
         )
 
-        if (!usable || weak) {
+        if (frame.isStrong) {
+            consecutiveWeakReads = 0
+            consecutiveStaleReads = if (stale) consecutiveStaleReads + 1 else 0
+            adopt(frame.screenState)
+        } else {
             consecutiveWeakReads += 1
             if (stale) consecutiveStaleReads += 1
-            return state
         }
 
-        consecutiveWeakReads = 0
-        consecutiveStaleReads = if (stale) consecutiveStaleReads + 1 else 0
-        adopt(state)
-        return state
+        return frame.screenState
     }
 
     suspend fun ensureStrongGate(
@@ -231,66 +157,55 @@ class KaiObservationGate(
         var lastState = resolve()
         var staleSeen = 0
         var missingSeen = 0
-        val attempts = maxAttempts.coerceAtLeast(1)
 
-        repeat(attempts) { attempt ->
-            val state = requestFreshScreen(timeoutMs = timeoutMs, expectedPackage = expectedPackage)
+        repeat(maxAttempts.coerceAtLeast(1)) { attempt ->
+            val state = requestFreshScreen(timeoutMs, expectedPackage)
             lastState = state
-            val meta = lastMeta
-            val packageMismatch = expectedPackage.isNotBlank() &&
-                !isExpectedPackageMatch(state.packageName, expectedPackage)
-            val passed = when (tier) {
-                GateTier.APP_LAUNCH_SAFE -> {
-                    !state.isOverlayPolluted() &&
-                        state.packageName.isNotBlank() &&
-                        !packageMismatch &&
-                        (allowLauncherSurface || !state.isLauncher())
+
+            val ready = KaiObservationReadiness.evaluate(
+                state = state,
+                expectedPackage = expectedPackage,
+                allowLauncherSurface = allowLauncherSurface,
+                tier = if (tier == GateTier.APP_LAUNCH_SAFE) {
+                    KaiObservationReadiness.Tier.APP_LAUNCH_SAFE
+                } else {
+                    KaiObservationReadiness.Tier.SEMANTIC_ACTION_SAFE
                 }
-                GateTier.SEMANTIC_ACTION_SAFE -> {
-                    !state.isOverlayPolluted() &&
-                        state.packageName.isNotBlank() &&
-                        !state.isWeakObservation() &&
-                        !packageMismatch &&
-                        (allowLauncherSurface || !state.isLauncher())
-                }
+            )
+
+            if (ready.passed) {
+                return GateResult(true, state, ready.reason)
             }
 
-            if (passed) {
-                return GateResult(true, state, "observation_ready")
-            }
-
-            if (meta.stale) staleSeen += 1
+            if (lastMeta.stale) staleSeen += 1
             if (state.packageName.isBlank()) missingSeen += 1
 
             val shouldRetry = when {
-                meta.stale && staleSeen <= staleRetryAttempts -> true
+                lastMeta.stale && staleSeen <= staleRetryAttempts -> true
                 state.packageName.isBlank() && missingSeen <= missingPackageRetryAttempts -> true
-                attempt < attempts - 1 -> true
+                attempt < maxAttempts - 1 -> true
                 else -> false
             }
 
             if (!shouldRetry) {
-                val reason = classifyFailureReason(
-                    state = state,
-                    expectedPackage = expectedPackage,
-                    allowLauncherSurface = allowLauncherSurface,
-                    tier = tier,
-                    stale = meta.stale
-                )
-                return GateResult(false, state, reason)
+                return GateResult(false, state, ready.reason)
             }
 
             delay(140L)
         }
 
-        val reason = classifyFailureReason(
+        val finalReason = KaiObservationReadiness.evaluate(
             state = lastState,
             expectedPackage = expectedPackage,
             allowLauncherSurface = allowLauncherSurface,
-            tier = tier,
-            stale = lastMeta.stale
-        )
-        return GateResult(false, lastState, reason)
+            tier = if (tier == GateTier.APP_LAUNCH_SAFE) {
+                KaiObservationReadiness.Tier.APP_LAUNCH_SAFE
+            } else {
+                KaiObservationReadiness.Tier.SEMANTIC_ACTION_SAFE
+            }
+        ).reason
+
+        return GateResult(false, lastState, finalReason)
     }
 
     suspend fun ensureAuthoritative(
@@ -300,72 +215,64 @@ class KaiObservationGate(
         maxAttempts: Int = 2
     ): ReadinessResult {
         var lastState = resolve()
-        val attempts = maxAttempts.coerceAtLeast(1)
 
-        repeat(attempts) { attempt ->
-            val best = KaiObservationRuntime.getBestAvailable(authoritativeOnly = attempt == 0)
-            if (best.updatedAt > 0L) {
-                val state = buildState(best)
+        repeat(maxAttempts.coerceAtLeast(1)) { attempt ->
+            val obs = KaiLiveObservationRuntime.bestObservation(requireStrong = attempt == 0)
+            if (obs.updatedAt > 0L) {
+                val state = KaiVisionInterpreter.toScreenState(obs)
                 lastState = state
-                val ready = when (tier) {
-                    GateTier.APP_LAUNCH_SAFE -> {
-                        state.packageName.isNotBlank() &&
-                            !state.isOverlayPolluted() &&
-                            (allowLauncherSurface || !state.isLauncher())
+                val ready = KaiObservationReadiness.evaluate(
+                    state = state,
+                    allowLauncherSurface = allowLauncherSurface,
+                    tier = if (tier == GateTier.APP_LAUNCH_SAFE) {
+                        KaiObservationReadiness.Tier.APP_LAUNCH_SAFE
+                    } else {
+                        KaiObservationReadiness.Tier.SEMANTIC_ACTION_SAFE
                     }
-                    GateTier.SEMANTIC_ACTION_SAFE -> {
-                        state.packageName.isNotBlank() &&
-                            !state.isOverlayPolluted() &&
-                            !state.isWeakObservation() &&
-                            (allowLauncherSurface || !state.isLauncher())
-                    }
-                }
-                if (ready) {
+                )
+                if (ready.passed) {
                     adopt(state)
                     lastMeta = RefreshMeta(
-                        fingerprint = fingerprintFor(state.packageName, state.rawDump),
+                        fingerprint = state.semanticFingerprint().take(5000),
                         changedFromPrevious = true,
                         usable = true,
-                        fallback = false,
                         weak = false,
-                        stale = false,
-                        reusedLastGood = false
+                        stale = false
                     )
-                    return ReadinessResult(true, state, "observation_ready", attempt + 1)
+                    return ReadinessResult(true, state, ready.reason, attempt + 1)
                 }
             }
 
-            val fresh = requestFreshScreen(timeoutMs = timeoutMs, expectedPackage = "")
+            val fresh = requestFreshScreen(timeoutMs)
             lastState = fresh
-            val freshReady = when (tier) {
-                GateTier.APP_LAUNCH_SAFE -> {
-                    fresh.packageName.isNotBlank() &&
-                        !fresh.isOverlayPolluted() &&
-                        (allowLauncherSurface || !fresh.isLauncher())
+            val readyFresh = KaiObservationReadiness.evaluate(
+                state = fresh,
+                allowLauncherSurface = allowLauncherSurface,
+                tier = if (tier == GateTier.APP_LAUNCH_SAFE) {
+                    KaiObservationReadiness.Tier.APP_LAUNCH_SAFE
+                } else {
+                    KaiObservationReadiness.Tier.SEMANTIC_ACTION_SAFE
                 }
-                GateTier.SEMANTIC_ACTION_SAFE -> {
-                    fresh.packageName.isNotBlank() &&
-                        !fresh.isOverlayPolluted() &&
-                        !fresh.isWeakObservation() &&
-                        (allowLauncherSurface || !fresh.isLauncher())
-                }
-            }
-            if (freshReady) {
+            )
+            if (readyFresh.passed) {
                 adopt(fresh)
-                return ReadinessResult(true, fresh, "observation_ready_via_fresh", attempt + 1)
+                return ReadinessResult(true, fresh, readyFresh.reason, attempt + 1)
             }
 
-            if (attempt < attempts - 1) delay(160L)
+            if (attempt < maxAttempts - 1) delay(160L)
         }
 
-        val reason = classifyFailureReason(
+        val reason = KaiObservationReadiness.evaluate(
             state = lastState,
-            expectedPackage = "",
             allowLauncherSurface = allowLauncherSurface,
-            tier = tier,
-            stale = lastMeta.stale
-        )
-        return ReadinessResult(false, lastState, reason, attempts)
+            tier = if (tier == GateTier.APP_LAUNCH_SAFE) {
+                KaiObservationReadiness.Tier.APP_LAUNCH_SAFE
+            } else {
+                KaiObservationReadiness.Tier.SEMANTIC_ACTION_SAFE
+            }
+        ).reason
+
+        return ReadinessResult(false, lastState, reason, maxAttempts)
     }
 
     fun markActionProgress(
@@ -375,23 +282,18 @@ class KaiObservationGate(
         afterFingerprint: String,
         reason: String
     ) {
-        val externalChange = isExternalPackageChange(beforePackage, afterPackage)
-        val fingerprintChanged = !sameFingerprint(beforeFingerprint, afterFingerprint)
+        val externalChange = beforePackage.isNotBlank() &&
+            afterPackage.isNotBlank() &&
+            beforePackage != afterPackage
+        val fingerprintChanged = beforeFingerprint.isNotBlank() &&
+            afterFingerprint.isNotBlank() &&
+            beforeFingerprint != afterFingerprint
+
         if (externalChange || fingerprintChanged) {
             consecutiveNoProgressActions = 0
             onLog("action_progress:$reason")
         } else {
             consecutiveNoProgressActions += 1
         }
-    }
-
-    fun isContinuationEligible(state: KaiScreenState, expectedPackage: String): Boolean {
-        if (state.packageName.isBlank()) return false
-        if (state.isOverlayPolluted()) return false
-        if (expectedPackage.isNotBlank() && !isExpectedPackageMatch(state.packageName, expectedPackage)) return false
-        return !state.isSearchLikeSurface() &&
-            !state.isCameraOrMediaOverlaySurface() &&
-            !state.isSheetOrDialogSurface() &&
-            !state.isWeakObservation()
     }
 }
