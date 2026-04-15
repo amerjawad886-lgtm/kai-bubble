@@ -26,6 +26,7 @@ import android.view.accessibility.AccessibilityWindowInfo
 import com.example.reply.agent.KaiAppIdentityRegistry
 import com.example.reply.agent.KaiUiElement
 import com.example.reply.agent.KaiGestureUtils
+import com.example.reply.agent.KaiLiveObservationRuntime
 import com.example.reply.agent.KaiScreenStateParser
 import org.json.JSONArray
 import org.json.JSONObject
@@ -72,6 +73,7 @@ class KaiAccessibilityService : AccessibilityService() {
         const val CMD_LONG_PRESS_XY = "long_press_xy"
         const val CMD_SWIPE_XY = "swipe_xy"
         const val CMD_RESET_TRANSITION_STATE = "reset_transition_state"
+        private const val EVENT_DEBOUNCE_MS = 180L
     }
 
     private data class DumpCandidate(
@@ -101,6 +103,8 @@ class KaiAccessibilityService : AccessibilityService() {
     private var lastPackageChangeAt = 0L
     private var previousExternalPackage: String? = null
     @Volatile private var expectedDumpPackage: String = ""
+    @Volatile private var lastEventPublishAt = 0L
+    private val eventPublishExecutor = java.util.concurrent.Executors.newSingleThreadExecutor()
 
     private val recorderPackageHints = listOf(
         "screenrecorder", "screen_record", "screen.record",
@@ -295,10 +299,53 @@ class KaiAccessibilityService : AccessibilityService() {
 
         if (isIgnorablePackage(pkg)) return
 
-        if (pkg != lastKnownExternalPackage) {
+        val packageChanged = pkg != lastKnownExternalPackage
+        if (packageChanged) {
             previousExternalPackage = lastKnownExternalPackage
             lastKnownExternalPackage = pkg
             lastPackageChangeAt = now
+        }
+
+        // Event-driven observation publishing: meaningful events trigger lightweight observations
+        val eventType = event?.eventType ?: return
+        val shouldPublish = when (eventType) {
+            AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED -> true
+            AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED -> packageChanged
+            AccessibilityEvent.TYPE_VIEW_SCROLLED -> (now - lastEventPublishAt) > 500L
+            else -> false
+        }
+
+        if (shouldPublish && (now - lastEventPublishAt) >= EVENT_DEBOUNCE_MS && !dumpInProgress) {
+            lastEventPublishAt = now
+            val capturedPkg = pkg
+            eventPublishExecutor.execute {
+                publishEventObservation(capturedPkg)
+            }
+        }
+    }
+
+    private fun publishEventObservation(eventPkg: String) {
+        try {
+            val root = getTargetRoot(eventPkg) ?: return
+            val rawPkg = root.packageName?.toString().orEmpty()
+            val effectivePkg = rawPkg.ifBlank { eventPkg }
+            if (effectivePkg.isBlank() || isIgnorablePackage(effectivePkg)) return
+
+            val dump = dumpScreenText(root)
+            if (dump == "(no active window)" || dump == "(empty dump)") return
+            if (isOverlayPolluted(dump)) return
+
+            val semantic = extractSemanticUi(root, effectivePkg, dump)
+
+            KaiLiveObservationRuntime.onEventObservation(
+                pkg = effectivePkg,
+                dump = dump,
+                elements = semantic.elements,
+                screenKind = semantic.screenKind,
+                confidence = semantic.confidence
+            )
+        } catch (e: Exception) {
+            Log.e(TAG, "Event observation publish failed: ${e.message}")
         }
     }
 
@@ -309,6 +356,7 @@ class KaiAccessibilityService : AccessibilityService() {
             unregisterReceiver(commandReceiver)
         } catch (_: Exception) {
         }
+        eventPublishExecutor.shutdownNow()
         super.onDestroy()
     }
 
@@ -322,6 +370,7 @@ class KaiAccessibilityService : AccessibilityService() {
         dumpGeneration++
         dumpInProgress = false
         lastDumpAt = 0L
+        lastEventPublishAt = 0L
     }
 
     private fun norm(text: String): String =

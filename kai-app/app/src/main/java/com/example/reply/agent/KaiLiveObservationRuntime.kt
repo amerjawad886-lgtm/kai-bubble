@@ -25,6 +25,7 @@ object KaiLiveObservationRuntime {
     private const val WATCH_BOOTSTRAP_GAP_MS = 90L
     private const val FRESH_POLL_MS = 45L
     private const val HISTORY_LIMIT = 24
+    private const val POLL_INTERVAL_ADAPTIVE_MS = 1200L
 
     data class ObservationWindow(
         val observations: List<KaiObservation>,
@@ -44,6 +45,8 @@ object KaiLiveObservationRuntime {
     @Volatile private var bridgeRegistered = false
     @Volatile private var storedContext: Context? = null
     @Volatile private var expectedPackageHint: String = ""
+    @Volatile var lastEventDrivenAt: Long = 0L
+        private set
 
     private val bridgeLock = Any()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -55,6 +58,7 @@ object KaiLiveObservationRuntime {
     fun reset() {
         latestObservation = KaiObservation("", "", updatedAt = 0L)
         latestStrongObservation = KaiObservation("", "", updatedAt = 0L)
+        lastEventDrivenAt = 0L
         synchronized(history) { history.clear() }
     }
 
@@ -133,6 +137,11 @@ object KaiLiveObservationRuntime {
         }
     }
 
+    fun onEventObservation(pkg: String, dump: String, elements: List<KaiUiElement>, screenKind: String, confidence: Float) {
+        lastEventDrivenAt = System.currentTimeMillis()
+        onDumpArrived(pkg, dump, elements, screenKind, confidence)
+    }
+
     fun requestImmediateDump(expectedPackage: String = "") {
         val context = storedContext ?: return
         expectedPackageHint = expectedPackage
@@ -172,8 +181,13 @@ object KaiLiveObservationRuntime {
                 }
             }
             while (isActive && isWatching) {
+                val interval = if (hasRecentEventDriven(600L)) {
+                    POLL_INTERVAL_ADAPTIVE_MS
+                } else {
+                    WATCH_INTERVAL_MS
+                }
                 requestImmediateDump(expectedPackageHint)
-                delay(WATCH_INTERVAL_MS)
+                delay(interval)
             }
         }
     }
@@ -211,9 +225,15 @@ object KaiLiveObservationRuntime {
     suspend fun awaitPostOpenStabilization(expectedPackage: String, timeoutMs: Long = 2600L): KaiObservation {
         val deadline = System.currentTimeMillis() + timeoutMs.coerceAtLeast(600L)
         var best = bestObservation(expectedPackage, requireStrong = false)
+        var lastExplicitDump = 0L
 
         while (System.currentTimeMillis() < deadline) {
-            requestImmediateDump(expectedPackage)
+            // Reduce dump request frequency when event-driven observations are arriving
+            val now = System.currentTimeMillis()
+            if (!hasRecentEventDriven(400L) || (now - lastExplicitDump) > 350L) {
+                requestImmediateDump(expectedPackage)
+                lastExplicitDump = now
+            }
             delay(FRESH_POLL_MS)
 
             val candidate = bestObservation(expectedPackage, requireStrong = false)
@@ -279,6 +299,10 @@ object KaiLiveObservationRuntime {
 
     fun hasRecentUsefulObservation(windowMs: Long): Boolean {
         return (System.currentTimeMillis() - latestObservation.updatedAt) < windowMs
+    }
+
+    fun hasRecentEventDriven(windowMs: Long): Boolean {
+        return (System.currentTimeMillis() - lastEventDrivenAt) < windowMs
     }
 
     fun serializeElements(elements: List<KaiUiElement>): String {
