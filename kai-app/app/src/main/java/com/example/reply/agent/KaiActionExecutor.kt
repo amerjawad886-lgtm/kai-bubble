@@ -68,7 +68,25 @@ class KaiActionExecutor(
     }
 
     fun getCanonicalRuntimeState(): KaiScreenState? = canonicalRuntimeState
-    internal fun resolveCanonicalRuntimeState(): KaiScreenState = canonicalRuntimeState ?: KaiLiveObservationRuntime.currentScreenState()
+    internal fun resolveCanonicalRuntimeState(): KaiScreenState {
+        // Prefer genuinely fresh live observations over stale canonical state
+        val liveObs = KaiLiveObservationRuntime.bestObservation(requireStrong = false)
+        val liveAge = System.currentTimeMillis() - liveObs.updatedAt
+        val canonicalAge = if (canonicalRuntimeState != null) {
+            System.currentTimeMillis() - canonicalRuntimeState!!.updatedAt
+        } else {
+            Long.MAX_VALUE
+        }
+
+        if (liveAge < 800L && liveObs.packageName.isNotBlank() && liveAge < canonicalAge) {
+            val liveState = KaiVisionInterpreter.toScreenState(liveObs)
+            if (KaiVisionInterpreter.isUsableState(liveState)) {
+                return liveState
+            }
+        }
+
+        return canonicalRuntimeState ?: KaiLiveObservationRuntime.currentScreenState()
+    }
     fun getLastRefreshMeta(): ScreenRefreshMeta = lastRefreshMeta
     fun getConsecutiveWeakReads(): Int = consecutiveWeakReads
     fun getConsecutiveStaleReads(): Int = consecutiveStaleReads
@@ -79,6 +97,33 @@ class KaiActionExecutor(
     }
 
     suspend fun requestFreshScreen(timeoutMs: Long = 2200L, expectedPackage: String = ""): KaiScreenState {
+        // Check if a very recent event-driven observation is already good enough
+        val liveObs = KaiLiveObservationRuntime.bestObservation(expectedPackage, requireStrong = false)
+        val liveAge = System.currentTimeMillis() - liveObs.updatedAt
+        if (liveAge < 350L && liveObs.packageName.isNotBlank()) {
+            val liveFrame = KaiVisionInterpreter.classify(obs = liveObs, expectedPackage = expectedPackage, allowLauncherSurface = true)
+            if (liveFrame.isUsable && (expectedPackage.isBlank() || liveFrame.expectedPackageMatched)) {
+                val fingerprint = liveFrame.screenState.semanticFingerprint().take(5000)
+                val changed = fingerprint != lastAcceptedFingerprint
+                val stale = !changed && lastAcceptedFingerprint.isNotBlank()
+
+                lastRefreshMeta = ScreenRefreshMeta(
+                    fingerprint = fingerprint,
+                    changedFromPrevious = changed,
+                    usable = true,
+                    fallback = false,
+                    weak = false,
+                    stale = stale,
+                    reusedLastGood = false
+                )
+                consecutiveWeakReads = 0
+                consecutiveStaleReads = if (stale) consecutiveStaleReads + 1 else 0
+                adoptCanonicalRuntimeState(liveFrame.screenState)
+                return liveFrame.screenState
+            }
+        }
+
+        // Fall back to explicit dump request
         val afterTime = System.currentTimeMillis()
         KaiLiveObservationRuntime.requestImmediateDump(expectedPackage)
         val obs = KaiLiveObservationRuntime.awaitFreshObservation(afterTime, timeoutMs, expectedPackage, requireStrong = false)
