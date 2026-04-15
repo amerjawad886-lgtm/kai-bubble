@@ -15,44 +15,47 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import org.json.JSONArray
+import org.json.JSONObject
+import java.util.ArrayDeque
 
 object KaiLiveObservationRuntime {
     private const val TAG = "KaiLiveObs"
-    private const val WATCH_INTERVAL_MS = 500L
+    private const val WATCH_INTERVAL_MS = 420L
     private const val WATCH_BOOTSTRAP_BURST = 3
-    private const val WATCH_BOOTSTRAP_GAP_MS = 110L
-    private const val FRESH_POLL_MS = 55L
+    private const val WATCH_BOOTSTRAP_GAP_MS = 90L
+    private const val FRESH_POLL_MS = 45L
+    private const val HISTORY_LIMIT = 24
 
-    @Volatile
-    var latestObservation: KaiObservation = KaiObservation("", "", updatedAt = 0L)
+    data class ObservationWindow(
+        val observations: List<KaiObservation>,
+        val latest: KaiObservation?,
+        val latestUsable: KaiObservation?,
+        val latestStrong: KaiObservation?,
+        val latestTargetMatched: KaiObservation?,
+        val latestNonLauncher: KaiObservation?
+    )
+
+    @Volatile var latestObservation: KaiObservation = KaiObservation("", "", updatedAt = 0L)
         private set
-
-    @Volatile
-    var latestStrongObservation: KaiObservation = KaiObservation("", "", updatedAt = 0L)
+    @Volatile var latestStrongObservation: KaiObservation = KaiObservation("", "", updatedAt = 0L)
         private set
-
-    @Volatile
-    var isWatching: Boolean = false
+    @Volatile var isWatching: Boolean = false
         private set
-
-    @Volatile
-    private var bridgeRegistered = false
-
-    @Volatile
-    private var storedContext: Context? = null
-
-    @Volatile
-    private var expectedPackageHint: String = ""
+    @Volatile private var bridgeRegistered = false
+    @Volatile private var storedContext: Context? = null
+    @Volatile private var expectedPackageHint: String = ""
 
     private val bridgeLock = Any()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var watchJob: Job? = null
+    private val history = ArrayDeque<KaiObservation>()
 
     fun currentExpectedPackage(): String = expectedPackageHint
 
     fun reset() {
         latestObservation = KaiObservation("", "", updatedAt = 0L)
         latestStrongObservation = KaiObservation("", "", updatedAt = 0L)
+        synchronized(history) { history.clear() }
     }
 
     fun hardReset(stopWatching: Boolean = true) {
@@ -100,19 +103,24 @@ object KaiLiveObservationRuntime {
     }
 
     fun onDumpArrived(pkg: String, dump: String, elements: List<KaiUiElement>, screenKind: String, confidence: Float) {
-        val now = System.currentTimeMillis()
         val obs = KaiObservation(
             packageName = pkg,
             screenPreview = dump,
             elements = elements,
             screenKind = screenKind,
             semanticConfidence = confidence,
-            updatedAt = now
+            updatedAt = System.currentTimeMillis()
         )
         latestObservation = obs
+        synchronized(history) {
+            history.addLast(obs)
+            while (history.size > HISTORY_LIMIT) history.removeFirst()
+        }
+
         val frame = KaiVisionInterpreter.classify(obs, expectedPackageHint, allowLauncherSurface = true)
-        if (frame.isStrong) {
-            latestStrongObservation = obs
+        if (frame.isStrong) latestStrongObservation = obs
+
+        if (frame.isUsable) {
             runCatching {
                 KaiAgentController.onObservationArrived(
                     packageName = frame.screenState.packageName,
@@ -147,16 +155,6 @@ object KaiLiveObservationRuntime {
         context.sendBroadcast(intent)
     }
 
-    suspend fun awaitFreshObservation(afterTime: Long, timeoutMs: Long = 2200L, expectedPackage: String = "", requireStrong: Boolean = false): KaiObservation {
-        val deadline = System.currentTimeMillis() + timeoutMs.coerceAtLeast(300L)
-        while (System.currentTimeMillis() < deadline) {
-            val candidate = bestObservation(expectedPackage, requireStrong)
-            if (candidate.updatedAt > afterTime) return candidate
-            delay(FRESH_POLL_MS)
-        }
-        return bestObservation(expectedPackage, requireStrong)
-    }
-
     fun startWatching(immediateDump: Boolean = true, expectedPackage: String = "") {
         expectedPackageHint = expectedPackage
         if (isWatching && watchJob?.isActive == true) {
@@ -187,47 +185,116 @@ object KaiLiveObservationRuntime {
         watchJob = null
     }
 
-    fun bestObservation(expectedPackage: String = "", requireStrong: Boolean = false): KaiObservation {
-        val candidates = if (requireStrong) listOf(latestStrongObservation) else listOf(latestStrongObservation, latestObservation)
-        val matching = candidates.filter { it.updatedAt > 0L }
-            .filter { KaiVisionInterpreter.packageMatchesExpected(it.packageName, expectedPackage) }
-        if (matching.isNotEmpty()) return matching.maxByOrNull { it.updatedAt } ?: matching.first()
-        val any = candidates.filter { it.updatedAt > 0L }
-        return any.maxByOrNull { it.updatedAt } ?: latestObservation
+    fun observationWindow(expectedPackage: String = ""): ObservationWindow {
+        val items = synchronized(history) { history.toList() }
+        val latest = items.maxByOrNull { it.updatedAt }
+        val usable = items.filter { KaiVisionInterpreter.classify(it, expectedPackage, true).isUsable }.maxByOrNull { it.updatedAt }
+        val strong = items.filter { KaiVisionInterpreter.classify(it, expectedPackage, true).isStrong }.maxByOrNull { it.updatedAt }
+        val matched = items.filter { KaiVisionInterpreter.packageMatchesExpected(it.packageName, expectedPackage) }.maxByOrNull { it.updatedAt }
+        val nonLauncher = items.filter {
+            val state = KaiVisionInterpreter.toScreenState(it)
+            !state.isLauncher() && it.packageName.isNotBlank()
+        }.maxByOrNull { it.updatedAt }
+        return ObservationWindow(items, latest, usable, strong, matched, nonLauncher)
     }
 
+    suspend fun awaitFreshObservation(afterTime: Long, timeoutMs: Long = 2200L, expectedPackage: String = "", requireStrong: Boolean = false): KaiObservation {
+        val deadline = System.currentTimeMillis() + timeoutMs.coerceAtLeast(300L)
+        while (System.currentTimeMillis() < deadline) {
+            val candidate = bestObservation(expectedPackage, requireStrong)
+            if (candidate.updatedAt > afterTime) return candidate
+            delay(FRESH_POLL_MS)
+        }
+        return bestObservation(expectedPackage, requireStrong)
+    }
+
+    suspend fun awaitPostOpenStabilization(expectedPackage: String, timeoutMs: Long = 2600L): KaiObservation {
+        val deadline = System.currentTimeMillis() + timeoutMs.coerceAtLeast(600L)
+        var best = bestObservation(expectedPackage, requireStrong = false)
+
+        while (System.currentTimeMillis() < deadline) {
+            requestImmediateDump(expectedPackage)
+            delay(FRESH_POLL_MS)
+
+            val candidate = bestObservation(expectedPackage, requireStrong = false)
+            if (candidate.updatedAt > best.updatedAt) best = candidate
+
+            val frame = KaiVisionInterpreter.classify(candidate, expectedPackage, allowLauncherSurface = false)
+            if (frame.expectedPackageMatched && frame.isUsable && !frame.screenState.isLauncher()) {
+                return candidate
+            }
+        }
+        return best
+    }
+
+    fun bestObservation(expectedPackage: String = "", requireStrong: Boolean = false): KaiObservation {
+        val window = observationWindow(expectedPackage)
+        val ordered = if (requireStrong) {
+            listOf(window.latestStrong, latestStrongObservation, window.latestTargetMatched, window.latestUsable, window.latest)
+        } else {
+            listOf(window.latestTargetMatched, window.latestUsable, window.latestNonLauncher, window.latestStrong, window.latest, latestObservation)
+        }.filterNotNull()
+
+        return ordered.maxByOrNull { it.updatedAt } ?: KaiObservation("", "", updatedAt = 0L)
+    }
+
+    @JvmOverloads
     fun currentScreenState(expectedPackage: String = "", requireStrong: Boolean = false): KaiScreenState {
         return KaiVisionInterpreter.toScreenState(bestObservation(expectedPackage, requireStrong))
     }
 
-    internal fun parseElementsFromJson(raw: String?): List<KaiUiElement> {
-        if (raw.isNullOrBlank()) return emptyList()
-        return try {
-            val arr = JSONArray(raw)
+    fun parseElementsFromJson(json: String?): List<KaiUiElement> {
+        if (json.isNullOrBlank()) return emptyList()
+        return runCatching {
+            val arr = JSONArray(json)
             buildList {
                 for (i in 0 until arr.length()) {
-                    val o = arr.optJSONObject(i) ?: continue
+                    val obj = arr.optJSONObject(i) ?: continue
                     add(
                         KaiUiElement(
-                            text = o.optString("text"),
-                            contentDescription = o.optString("contentDescription"),
-                            hint = o.optString("hint"),
-                            viewId = o.optString("viewId"),
-                            className = o.optString("className"),
-                            packageName = o.optString("packageName"),
-                            bounds = o.optString("bounds"),
-                            clickable = o.optBoolean("clickable"),
-                            editable = o.optBoolean("editable"),
-                            checked = o.optBoolean("checked"),
-                            selected = o.optBoolean("selected"),
-                            scrollable = o.optBoolean("scrollable"),
-                            roleGuess = o.optString("roleGuess")
+                            text = obj.optString("text"),
+                            contentDescription = obj.optString("contentDescription"),
+                            hint = obj.optString("hint"),
+                            viewId = obj.optString("viewId"),
+                            className = obj.optString("className"),
+                            clickable = obj.optBoolean("clickable"),
+                            editable = obj.optBoolean("editable"),
+                            scrollable = obj.optBoolean("scrollable"),
+                            selected = obj.optBoolean("selected"),
+                            checked = obj.optBoolean("checked"),
+                            bounds = obj.optString("bounds"),
+                            depth = obj.optInt("depth"),
+                            packageName = obj.optString("packageName"),
+                            roleGuess = obj.optString("roleGuess", "unknown")
                         )
                     )
                 }
             }
-        } catch (_: Exception) {
-            emptyList()
+        }.getOrDefault(emptyList())
+    }
+
+    fun serializeElements(elements: List<KaiUiElement>): String {
+        val arr = JSONArray()
+        elements.forEach { element ->
+            arr.put(
+                JSONObject().apply {
+                    put("text", element.text)
+                    put("contentDescription", element.contentDescription)
+                    put("hint", element.hint)
+                    put("viewId", element.viewId)
+                    put("className", element.className)
+                    put("clickable", element.clickable)
+                    put("editable", element.editable)
+                    put("scrollable", element.scrollable)
+                    put("selected", element.selected)
+                    put("checked", element.checked)
+                    put("bounds", element.bounds)
+                    put("depth", element.depth)
+                    put("packageName", element.packageName)
+                    put("roleGuess", element.roleGuess)
+                }
+            )
         }
+        return arr.toString()
     }
 }

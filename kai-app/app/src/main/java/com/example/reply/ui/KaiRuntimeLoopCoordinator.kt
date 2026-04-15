@@ -22,8 +22,8 @@ object KaiRuntimeLoopCoordinator {
 
     private fun preflight(context: Context) {
         val appContext = context.applicationContext
-        KaiVoice.resetTransientStateForNewRun()
-        OpenAIClient.resetTransientStateForNewRun()
+        runCatching { KaiVoice.resetTransientStateForNewRun() }
+        runCatching { OpenAIClient.resetTransientStateForNewRun() }
         KaiAgentController.resetTransientStateForNewRun()
         KaiAgentController.ensureRuntimeObservationBridge(appContext)
         KaiBubbleManager.releaseAllSuppression()
@@ -40,7 +40,7 @@ object KaiRuntimeLoopCoordinator {
         onFinished: (KaiLoopResult) -> Unit
     ): KaiAgentLoopEngine? {
         val now = System.currentTimeMillis()
-        if (now - lastStartTs < 500L) {
+        if (now - lastStartTs < 450L) {
             appendLog("system", "Ignored duplicate loop start")
             return null
         }
@@ -77,9 +77,6 @@ object KaiRuntimeLoopCoordinator {
     }
 
     fun cancelLoop(engine: KaiAgentLoopEngine?) {
-        try {
-            engine?.cancel()
-        } catch (_: Exception) {
-        }
+        runCatching { engine?.cancel() }
     }
 }
