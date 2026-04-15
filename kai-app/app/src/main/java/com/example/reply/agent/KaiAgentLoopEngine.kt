@@ -99,7 +99,7 @@ class KaiAgentLoopEngine(
 
             KaiLiveObservationRuntime.ensureBridge(appContext)
             KaiLiveObservationRuntime.startWatching(immediateDump = true)
-            executor.resetRuntimeState(clearLastGoodScreen = false)
+            executor.resetRuntimeState(clearLastGoodScreen = true)
             executor.resetObservationTransitionStateForRun()
 
             val startupGateTier =
@@ -131,17 +131,28 @@ class KaiAgentLoopEngine(
             var noProgressCycles = 0
             var lastDecision: KaiExecutionDecisionAuthority.RuntimeDecision? = null
             var lastOpenAppOutcome: KaiOpenAppOutcome? = null
+            var appEntryJustCompleted = false
 
             repeat(6) {
                 ensureActiveOrThrow()
 
                 val stageSnapshot = KaiTaskStageEngine.evaluate(userPrompt, currentState, lastOpenAppOutcome)
+
+                // After app entry just completed, use a gentler gate tier so the
+                // still-settling app screen doesn't block continuation.
+                val cycleGateTier = when {
+                    !stageSnapshot.appEntryComplete -> startupGateTier
+                    appEntryJustCompleted -> KaiActionExecutor.ObservationGateTier.APP_LAUNCH_SAFE
+                    else -> KaiActionExecutor.ObservationGateTier.SEMANTIC_ACTION_SAFE
+                }
+                appEntryJustCompleted = false
+
                 val cycleGate = executor.ensureStrongObservationGate(
                     expectedPackage = if (stageSnapshot.appEntryComplete) currentState.packageName else "",
                     timeoutMs = 2200L,
                     maxAttempts = 2,
                     allowLauncherSurface = true,
-                    tier = if (stageSnapshot.appEntryComplete) KaiActionExecutor.ObservationGateTier.SEMANTIC_ACTION_SAFE else startupGateTier
+                    tier = cycleGateTier
                 )
 
                 currentState = cycleGate.state
@@ -166,6 +177,7 @@ class KaiAgentLoopEngine(
                 currentState = result.screenState ?: executor.resolveCanonicalRuntimeState()
                 executor.adoptCanonicalRuntimeState(currentState)
                 lastOpenAppOutcome = result.openAppOutcome ?: lastOpenAppOutcome
+                if (step.isOpenAppStep() && result.success) appEntryJustCompleted = true
 
                 val progress = KaiExecutionDecisionAuthority.hasMeaningfulProgress(beforeState, currentState)
                 repeatedNoProgressSteps = if (progress || result.success) 0 else repeatedNoProgressSteps + 1

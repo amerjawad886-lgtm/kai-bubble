@@ -124,11 +124,11 @@ class KaiActionExecutor(
         repeat(maxAttempts.coerceAtLeast(1)) { attempt ->
             val state = requestFreshScreen(timeoutMs, expectedPackage)
             lastState = state
-            val ready = KaiObservationReadiness.evaluate(
+            val ready = KaiVisionInterpreter.evaluateReadiness(
                 state = state,
                 expectedPackage = expectedPackage,
                 allowLauncherSurface = allowLauncherSurface,
-                tier = if (tier == ObservationGateTier.APP_LAUNCH_SAFE) KaiObservationReadiness.Tier.APP_LAUNCH_SAFE else KaiObservationReadiness.Tier.SEMANTIC_ACTION_SAFE
+                requireStrong = tier != ObservationGateTier.APP_LAUNCH_SAFE
             )
             if (ready.passed) return ObservationGateResult(true, state, ready.reason)
 
@@ -158,10 +158,10 @@ class KaiActionExecutor(
             if (obs.updatedAt > 0L) {
                 val state = KaiVisionInterpreter.toScreenState(obs)
                 lastState = state
-                val ready = KaiObservationReadiness.evaluate(
+                val ready = KaiVisionInterpreter.evaluateReadiness(
                     state = state,
                     allowLauncherSurface = allowLauncherSurface,
-                    tier = if (tier == ObservationGateTier.APP_LAUNCH_SAFE) KaiObservationReadiness.Tier.APP_LAUNCH_SAFE else KaiObservationReadiness.Tier.SEMANTIC_ACTION_SAFE
+                    requireStrong = tier != ObservationGateTier.APP_LAUNCH_SAFE
                 )
                 if (ready.passed) {
                     adoptCanonicalRuntimeState(state)
@@ -170,10 +170,10 @@ class KaiActionExecutor(
             }
             val fresh = requestFreshScreen(timeoutMs)
             lastState = fresh
-            val readyFresh = KaiObservationReadiness.evaluate(
+            val readyFresh = KaiVisionInterpreter.evaluateReadiness(
                 state = fresh,
                 allowLauncherSurface = allowLauncherSurface,
-                tier = if (tier == ObservationGateTier.APP_LAUNCH_SAFE) KaiObservationReadiness.Tier.APP_LAUNCH_SAFE else KaiObservationReadiness.Tier.SEMANTIC_ACTION_SAFE
+                requireStrong = tier != ObservationGateTier.APP_LAUNCH_SAFE
             )
             if (readyFresh.passed) {
                 adoptCanonicalRuntimeState(fresh)

@@ -11,6 +11,24 @@ object KaiVisionInterpreter {
         val reason: String
     )
 
+    data class ReadinessResult(val passed: Boolean, val reason: String)
+
+    fun evaluateReadiness(
+        state: KaiScreenState,
+        expectedPackage: String = "",
+        allowLauncherSurface: Boolean = false,
+        requireStrong: Boolean = true
+    ): ReadinessResult = when {
+        state.packageName.isBlank() -> ReadinessResult(false, "missing_package")
+        state.isOverlayPolluted() -> ReadinessResult(false, "overlay_pollution")
+        !packageMatchesExpected(state.packageName, expectedPackage) -> ReadinessResult(false, "wrong_package")
+        !allowLauncherSurface && state.isLauncher() -> ReadinessResult(false, "launcher_surface")
+        requireStrong && !isStrongState(state, expectedPackage, allowLauncherSurface) ->
+            ReadinessResult(false, if (state.isWeakObservation()) "weak_observation" else "observation_not_ready")
+        !isUsableState(state) -> ReadinessResult(false, "observation_not_usable")
+        else -> ReadinessResult(true, "observation_ready")
+    }
+
     fun toScreenState(obs: KaiObservation): KaiScreenState {
         return KaiScreenStateParser.fromDump(
             packageName = obs.packageName,

@@ -736,12 +736,11 @@ object KaiLiveSurfacePolicy {
     }
 
     fun isUsableForSemanticAction(state: KaiScreenState, expectedPackage: String = ""): Boolean {
-        val readiness = KaiObservationReadiness.evaluate(
+        return KaiVisionInterpreter.evaluateReadiness(
             state = state,
             expectedPackage = expectedPackage,
             allowLauncherSurface = false,
-            tier = KaiObservationReadiness.Tier.SEMANTIC_ACTION_SAFE
-        )
-        return readiness.passed
+            requireStrong = true
+        ).passed
     }
 }
