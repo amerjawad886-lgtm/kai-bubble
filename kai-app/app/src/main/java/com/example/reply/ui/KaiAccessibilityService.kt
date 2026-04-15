@@ -291,7 +291,8 @@ class KaiAccessibilityService : AccessibilityService() {
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        val pkg = event?.packageName?.toString().orEmpty()
+        val safeEvent = event ?: return
+        val pkg = safeEvent.packageName?.toString().orEmpty()
         if (pkg.isBlank()) return
 
         val now = System.currentTimeMillis()
@@ -304,7 +305,7 @@ class KaiAccessibilityService : AccessibilityService() {
             lastPackageChangeAt = now
         }
 
-        val eventType = event.eventType
+        val eventType = safeEvent.eventType
         val meaningfulEvent = when (eventType) {
             AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED -> true
             AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED -> packageChanged
