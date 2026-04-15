@@ -90,7 +90,7 @@ class KaiAgentLoopEngine(
         suspend fun finishLoop(success: Boolean, message: String, executedSteps: Int, observation: String, notes: String): KaiLoopResult {
             pushAgentState(if (success) "idle" else "error", observation, message, "stop", notes)
             KaiAgentController.finishActionLoopSession(message)
-            executor.resetRuntimeState(clearLastGoodScreen = false)
+            executor.resetRuntimeState(clearLastGoodScreen = true)
             return KaiLoopResult(success, message, executedSteps)
         }
 
@@ -116,7 +116,11 @@ class KaiAgentLoopEngine(
                 maxAttempts = 3
             )
 
-            var currentState = startup.state
+            var currentState = if (startup.passed) {
+                startup.state
+            } else {
+                executor.resolveCanonicalRuntimeState()
+            }
             executor.adoptCanonicalRuntimeState(currentState)
             executor.clearStartupFingerprintBaseline()
 
@@ -133,7 +137,7 @@ class KaiAgentLoopEngine(
             var lastOpenAppOutcome: KaiOpenAppOutcome? = null
             var appEntryJustCompleted = false
 
-            repeat(6) {
+            repeat(10) {
                 ensureActiveOrThrow()
 
                 val stageSnapshot = KaiTaskStageEngine.evaluate(userPrompt, currentState, lastOpenAppOutcome)

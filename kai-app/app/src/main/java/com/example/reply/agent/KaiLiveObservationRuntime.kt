@@ -70,8 +70,10 @@ object KaiLiveObservationRuntime {
     }
 
     fun softCleanupAfterRun() {
+        // Keep the latest live history across runs so the next run can start from
+        // whatever the accessibility layer is already seeing. We only clear the
+        // request-scoped expectation.
         expectedPackageHint = ""
-        reset()
     }
 
     fun ensureBridge(context: Context) {
@@ -181,12 +183,14 @@ object KaiLiveObservationRuntime {
                 }
             }
             while (isActive && isWatching) {
-                val interval = if (hasRecentEventDriven(600L)) {
+                val interval = if (hasRecentEventDriven(700L)) {
                     POLL_INTERVAL_ADAPTIVE_MS
                 } else {
                     WATCH_INTERVAL_MS
                 }
-                requestImmediateDump(expectedPackageHint)
+                if (!hasRecentEventDriven(450L)) {
+                    requestImmediateDump(expectedPackageHint)
+                }
                 delay(interval)
             }
         }
@@ -214,12 +218,23 @@ object KaiLiveObservationRuntime {
 
     suspend fun awaitFreshObservation(afterTime: Long, timeoutMs: Long = 2200L, expectedPackage: String = "", requireStrong: Boolean = false): KaiObservation {
         val deadline = System.currentTimeMillis() + timeoutMs.coerceAtLeast(300L)
+        var lastDumpRequestAt = 0L
+        var best = bestObservation(expectedPackage, requireStrong)
+
         while (System.currentTimeMillis() < deadline) {
+            val now = System.currentTimeMillis()
             val candidate = bestObservation(expectedPackage, requireStrong)
+            if (candidate.updatedAt > best.updatedAt) best = candidate
             if (candidate.updatedAt > afterTime) return candidate
+
+            val shouldRequestDump = !hasRecentEventDriven(450L) && (now - lastDumpRequestAt) > 320L
+            if (shouldRequestDump) {
+                requestImmediateDump(expectedPackage)
+                lastDumpRequestAt = now
+            }
             delay(FRESH_POLL_MS)
         }
-        return bestObservation(expectedPackage, requireStrong)
+        return best
     }
 
     suspend fun awaitPostOpenStabilization(expectedPackage: String, timeoutMs: Long = 2600L): KaiObservation {
@@ -250,10 +265,13 @@ object KaiLiveObservationRuntime {
     fun bestObservation(expectedPackage: String = "", requireStrong: Boolean = false): KaiObservation {
         val window = observationWindow(expectedPackage)
         val ordered = if (requireStrong) {
-            listOf(window.latestStrong, latestStrongObservation, window.latestTargetMatched, window.latestUsable, window.latest)
+            listOf(window.latestTargetMatched, window.latestStrong, latestStrongObservation, window.latestUsable, window.latest)
         } else {
             listOf(window.latestTargetMatched, window.latestUsable, window.latestNonLauncher, window.latestStrong, window.latest, latestObservation)
-        }.filterNotNull()
+        }
+            .filterNotNull()
+            .filter { it.updatedAt > 0L }
+            .filter { it.packageName.isNotBlank() || it.screenPreview.isNotBlank() }
 
         return ordered.maxByOrNull { it.updatedAt } ?: KaiObservation("", "", updatedAt = 0L)
     }

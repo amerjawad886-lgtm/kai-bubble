@@ -297,30 +297,30 @@ class KaiAccessibilityService : AccessibilityService() {
         val now = System.currentTimeMillis()
         lastWindowEventAt = now
 
-        if (isIgnorablePackage(pkg)) return
-
         val packageChanged = pkg != lastKnownExternalPackage
-        if (packageChanged) {
+        if (!isIgnorablePackage(pkg) && packageChanged) {
             previousExternalPackage = lastKnownExternalPackage
             lastKnownExternalPackage = pkg
             lastPackageChangeAt = now
         }
 
-        // Event-driven observation publishing: meaningful events trigger lightweight observations
-        val eventType = event?.eventType ?: return
-        val shouldPublish = when (eventType) {
+        val eventType = event.eventType
+        val meaningfulEvent = when (eventType) {
             AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED -> true
             AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED -> packageChanged
-            AccessibilityEvent.TYPE_VIEW_SCROLLED -> (now - lastEventPublishAt) > 500L
+            AccessibilityEvent.TYPE_VIEW_CLICKED -> true
+            AccessibilityEvent.TYPE_VIEW_SCROLLED -> (now - lastEventPublishAt) > 450L
             else -> false
         }
 
-        if (shouldPublish && (now - lastEventPublishAt) >= EVENT_DEBOUNCE_MS && !dumpInProgress) {
-            lastEventPublishAt = now
-            val capturedPkg = pkg
-            eventPublishExecutor.execute {
-                publishEventObservation(capturedPkg)
-            }
+        if (!meaningfulEvent) return
+        if ((now - lastEventPublishAt) < EVENT_DEBOUNCE_MS) return
+        if (dumpInProgress) return
+
+        lastEventPublishAt = now
+        val capturedPkg = pkg
+        eventPublishExecutor.execute {
+            publishEventObservation(capturedPkg)
         }
     }
 
@@ -336,6 +336,7 @@ class KaiAccessibilityService : AccessibilityService() {
             if (isOverlayPolluted(dump)) return
 
             val semantic = extractSemanticUi(root, effectivePkg, dump)
+            if (semantic.elements.isEmpty() && dump.length < 12) return
 
             KaiLiveObservationRuntime.onEventObservation(
                 pkg = effectivePkg,
@@ -361,8 +362,8 @@ class KaiAccessibilityService : AccessibilityService() {
     }
 
     private fun resetTransitionMemory() {
-        // Kai Live reset: clear transient dump state only. Do not resurrect stale external package as truth.
-        previousExternalPackage = lastKnownExternalPackage
+        previousExternalPackage = null
+        lastKnownExternalPackage = null
         lastWindowEventAt = 0L
         lastPackageChangeAt = 0L
         expectedDumpPackage = ""
@@ -527,11 +528,9 @@ class KaiAccessibilityService : AccessibilityService() {
     }
 
     private fun captureBestDump(timeoutMs: Long, expectedPackage: String = ""): DumpCandidate {
-        val budget = timeoutMs.coerceIn(900L, 4200L)
+        val budget = timeoutMs.coerceIn(600L, 2200L)
         val startedAt = System.currentTimeMillis()
         var best: DumpCandidate? = null
-        var bestChanged: DumpCandidate? = null
-        var bestPackageBearing: DumpCandidate? = null
 
         while (System.currentTimeMillis() - startedAt < budget) {
             val root = getTargetRoot(expectedPackage)
@@ -555,55 +554,27 @@ class KaiAccessibilityService : AccessibilityService() {
                 semanticConfidence = semantic.confidence
             )
 
-            if (best == null || candidate.score > best!!.score) best = candidate
-            if (candidate.packageName.isNotBlank() && (bestPackageBearing == null || candidate.score > bestPackageBearing!!.score)) {
-                bestPackageBearing = candidate
-            }
-            if (candidate.fingerprint != lastDeliveredFingerprint && (bestChanged == null || candidate.score > bestChanged!!.score)) {
-                bestChanged = candidate
+            if (best == null || candidate.score > best!!.score) {
+                best = candidate
             }
 
-            val strongEnough =
-                candidate.packageName.isNotBlank() &&
-                    !isWeakDumpCandidate(candidate) &&
-                    candidate.score >= 300 &&
-                    candidate.fingerprint != lastDeliveredFingerprint
+            val packageAcceptable = expectedPackage.isBlank() || packageMatchesExpected(candidate.packageName, expectedPackage)
+            val strongEnough = candidate.packageName.isNotBlank() &&
+                packageAcceptable &&
+                !isWeakDumpCandidate(candidate) &&
+                candidate.score >= 220
 
-            val packageAcceptable =
-                expectedPackage.isBlank() || packageMatchesExpected(candidate.packageName, expectedPackage)
-
-            if (strongEnough && packageAcceptable) {
+            if (strongEnough) {
                 return candidate
             }
 
             try {
-                Thread.sleep(95L)
+                Thread.sleep(110L)
             } catch (_: Exception) {
             }
         }
 
-        val expectedStrong = listOf(bestPackageBearing, bestChanged, best)
-            .filterNotNull()
-            .firstOrNull { shouldPreferCandidateForExpectedPackage(it, expectedPackage) }
-        if (expectedStrong != null) {
-            return expectedStrong
-        }
-
-        val prioritized = listOf(bestPackageBearing, bestChanged, best).firstOrNull { it != null }
-        if (prioritized != null && !isWeakDumpCandidate(prioritized) &&
-            (expectedPackage.isBlank() || packageMatchesExpected(prioritized.packageName, expectedPackage))) {
-            return prioritized
-        }
-
-        val recovered = reacquirePackageBearingDump(
-            timeoutMs = (budget / 3L).coerceIn(260L, 900L),
-            expectedPackage = expectedPackage
-        )
-        if (recovered != null && !isWeakDumpCandidate(recovered)) {
-            return recovered
-        }
-
-        return prioritized ?: DumpCandidate(
+        return best ?: DumpCandidate(
             root = null,
             packageName = "",
             dump = "(no active window)",
@@ -682,7 +653,7 @@ class KaiAccessibilityService : AccessibilityService() {
         if (expectedDumpPackage.isNotBlank() && packageMatchesExpected(packageName, expectedDumpPackage)) score += 260
         if (packageName == lastKnownExternalPackage && isRecentPackageTransition()) score += 90
 
-        if (fingerprint != lastDeliveredFingerprint) score += 120 else score -= 180
+        if (fingerprint != lastDeliveredFingerprint) score += 120 else score -= 35
         if (isLauncherPackage(packageName)) score -= 30
 
         if (clean.isBlank()) score -= 650
@@ -1454,7 +1425,17 @@ class KaiAccessibilityService : AccessibilityService() {
         val normalizedResolved = norm(resolvedName)
         val canonicalPackages = KaiAppIdentityRegistry.packageCandidatesForKey(appKey)
 
-        // First choice: direct package launch (most reliable)
+        // If Kai's own app is foreground, go Home first so the target app can become
+        // the active window for observation immediately after launch.
+        val activePkg = rootInActiveWindow?.packageName?.toString().orEmpty()
+        if (activePkg == packageName || activePkg == "com.example.reply") {
+            runCatching { performGlobalAction(GLOBAL_ACTION_HOME) }
+            try {
+                Thread.sleep(160L)
+            } catch (_: Exception) {
+            }
+        }
+
         val directPackageCandidates = linkedSetOf(
             query.trim(),
             resolvedName.trim(),
@@ -1467,13 +1448,12 @@ class KaiAccessibilityService : AccessibilityService() {
             val directIntent = pm.getLaunchIntentForPackage(candidate)
             if (directIntent != null) {
                 Log.d(TAG, "openInstalledApp: direct launch candidate=$candidate")
-                directIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                directIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED)
                 startActivity(directIntent)
                 return true
             }
         }
 
-        // Fallback: find best matching installed app package.
         val apps = pm.getInstalledApplications(PackageManager.GET_META_DATA)
         val match = apps
             .asSequence()
@@ -1506,17 +1486,21 @@ class KaiAccessibilityService : AccessibilityService() {
             val intent = pm.getLaunchIntentForPackage(match.packageName)
             if (intent != null) {
                 Log.d(TAG, "openInstalledApp: best installed match=${match.packageName}")
-                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED)
                 startActivity(intent)
                 return true
             }
         }
 
-        // Last-resort fallback: tap launcher icon if visible, but do not treat this as proof of success.
-        val clickOk = clickByVisibleText(query)
-        Log.d(TAG, "openInstalledApp: clickByVisibleText('$query') => $clickOk")
+        // Last fallback: only click the launcher icon when we are actually on launcher.
+        val launcherVisible = isLauncherPackage(currentVisibleLauncherPackage())
+        if (launcherVisible) {
+            val clickOk = clickByVisibleText(query)
+            Log.d(TAG, "openInstalledApp: clickByVisibleText('$query') => $clickOk")
+            return clickOk
+        }
 
-        return clickOk
+        return false
     }
 
     private fun scroll(dir: String, times: Int): Boolean {

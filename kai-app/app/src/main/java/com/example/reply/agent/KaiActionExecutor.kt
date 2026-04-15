@@ -69,23 +69,19 @@ class KaiActionExecutor(
 
     fun getCanonicalRuntimeState(): KaiScreenState? = canonicalRuntimeState
     internal fun resolveCanonicalRuntimeState(): KaiScreenState {
-        // Prefer genuinely fresh live observations over stale canonical state
         val liveObs = KaiLiveObservationRuntime.bestObservation(requireStrong = false)
         val liveAge = System.currentTimeMillis() - liveObs.updatedAt
-        val canonicalAge = if (canonicalRuntimeState != null) {
-            System.currentTimeMillis() - canonicalRuntimeState!!.updatedAt
-        } else {
-            Long.MAX_VALUE
+        val liveState = KaiVisionInterpreter.toScreenState(liveObs)
+        val liveUsable = liveObs.updatedAt > 0L && liveObs.packageName.isNotBlank() && KaiVisionInterpreter.isUsableState(liveState)
+
+        val canonical = canonicalRuntimeState
+        val canonicalAge = if (canonical != null) System.currentTimeMillis() - canonical.updatedAt else Long.MAX_VALUE
+
+        if (liveUsable && (canonical == null || liveAge <= canonicalAge || canonical.packageName.isBlank())) {
+            return liveState
         }
 
-        if (liveAge < 800L && liveObs.packageName.isNotBlank() && liveAge < canonicalAge) {
-            val liveState = KaiVisionInterpreter.toScreenState(liveObs)
-            if (KaiVisionInterpreter.isUsableState(liveState)) {
-                return liveState
-            }
-        }
-
-        return canonicalRuntimeState ?: KaiLiveObservationRuntime.currentScreenState()
+        return canonical ?: liveState
     }
     fun getLastRefreshMeta(): ScreenRefreshMeta = lastRefreshMeta
     fun getConsecutiveWeakReads(): Int = consecutiveWeakReads
@@ -97,60 +93,78 @@ class KaiActionExecutor(
     }
 
     suspend fun requestFreshScreen(timeoutMs: Long = 2200L, expectedPackage: String = ""): KaiScreenState {
-        // Check if a very recent event-driven observation is already good enough
-        val liveObs = KaiLiveObservationRuntime.bestObservation(expectedPackage, requireStrong = false)
-        val liveAge = System.currentTimeMillis() - liveObs.updatedAt
-        if (liveAge < 350L && liveObs.packageName.isNotBlank()) {
-            val liveFrame = KaiVisionInterpreter.classify(obs = liveObs, expectedPackage = expectedPackage, allowLauncherSurface = true)
-            if (liveFrame.isUsable && (expectedPackage.isBlank() || liveFrame.expectedPackageMatched)) {
-                val fingerprint = liveFrame.screenState.semanticFingerprint().take(5000)
-                val changed = fingerprint != lastAcceptedFingerprint
-                val stale = !changed && lastAcceptedFingerprint.isNotBlank()
-
-                lastRefreshMeta = ScreenRefreshMeta(
-                    fingerprint = fingerprint,
-                    changedFromPrevious = changed,
-                    usable = true,
-                    fallback = false,
-                    weak = false,
-                    stale = stale,
-                    reusedLastGood = false
-                )
-                consecutiveWeakReads = 0
-                consecutiveStaleReads = if (stale) consecutiveStaleReads + 1 else 0
-                adoptCanonicalRuntimeState(liveFrame.screenState)
-                return liveFrame.screenState
-            }
+        fun acceptLive(obs: KaiObservation, freshnessMs: Long): KaiScreenState? {
+            val age = System.currentTimeMillis() - obs.updatedAt
+            if (obs.updatedAt <= 0L || age > freshnessMs || obs.packageName.isBlank()) return null
+            val frame = KaiVisionInterpreter.classify(
+                obs = obs,
+                expectedPackage = expectedPackage,
+                allowLauncherSurface = true
+            )
+            if (!frame.isUsable) return null
+            if (expectedPackage.isNotBlank() && !frame.expectedPackageMatched) return null
+            return frame.screenState
         }
 
-        // Fall back to explicit dump request
+        val immediate = acceptLive(KaiLiveObservationRuntime.bestObservation(expectedPackage, requireStrong = false), 500L)
+        if (immediate != null) {
+            val fingerprint = immediate.semanticFingerprint().take(5000)
+            val changed = fingerprint != lastAcceptedFingerprint
+            val stale = !changed && lastAcceptedFingerprint.isNotBlank()
+            lastRefreshMeta = ScreenRefreshMeta(
+                fingerprint = fingerprint,
+                changedFromPrevious = changed,
+                usable = true,
+                fallback = false,
+                weak = false,
+                stale = stale,
+                reusedLastGood = false
+            )
+            consecutiveWeakReads = 0
+            consecutiveStaleReads = if (stale) consecutiveStaleReads + 1 else 0
+            adoptCanonicalRuntimeState(immediate)
+            return immediate
+        }
+
         val afterTime = System.currentTimeMillis()
         KaiLiveObservationRuntime.requestImmediateDump(expectedPackage)
         val obs = KaiLiveObservationRuntime.awaitFreshObservation(afterTime, timeoutMs, expectedPackage, requireStrong = false)
         val frame = KaiVisionInterpreter.classify(obs = obs, expectedPackage = expectedPackage, allowLauncherSurface = true)
-        val fingerprint = frame.screenState.semanticFingerprint().take(5000)
+
+        var chosenState = frame.screenState
+        var usable = frame.isUsable
+
+        if (!usable) {
+            val fallbackLive = acceptLive(KaiLiveObservationRuntime.bestObservation(expectedPackage, requireStrong = false), 900L)
+            if (fallbackLive != null) {
+                chosenState = fallbackLive
+                usable = true
+            }
+        }
+
+        val fingerprint = chosenState.semanticFingerprint().take(5000)
         val changed = fingerprint != lastAcceptedFingerprint
         val stale = !changed && lastAcceptedFingerprint.isNotBlank()
 
         lastRefreshMeta = ScreenRefreshMeta(
             fingerprint = fingerprint,
             changedFromPrevious = changed,
-            usable = frame.isUsable,
-            fallback = false,
-            weak = !frame.isUsable,
+            usable = usable,
+            fallback = !frame.isUsable && usable,
+            weak = !usable,
             stale = stale,
             reusedLastGood = false
         )
 
-        if (frame.isUsable) {
+        if (usable) {
             consecutiveWeakReads = 0
             consecutiveStaleReads = if (stale) consecutiveStaleReads + 1 else 0
-            adoptCanonicalRuntimeState(frame.screenState)
+            adoptCanonicalRuntimeState(chosenState)
         } else {
             consecutiveWeakReads += 1
             if (stale) consecutiveStaleReads += 1
         }
-        return frame.screenState
+        return chosenState
     }
 
     suspend fun ensureStrongObservationGate(
@@ -288,37 +302,79 @@ class KaiActionExecutor(
             return KaiActionExecutionResult(false, "open_app_missing_target", currentState, openAppOutcome = KaiOpenAppOutcome.OPEN_FAILED)
         }
 
-        if (targetPackage.isNotBlank() && currentState.matchesExpectedPackage(targetPackage) && !currentState.isLauncher() && KaiVisionInterpreter.isUsableState(currentState)) {
+        if (targetPackage.isNotBlank() &&
+            currentState.matchesExpectedPackage(targetPackage) &&
+            !currentState.isLauncher() &&
+            KaiVisionInterpreter.isUsableState(currentState)
+        ) {
             return KaiActionExecutionResult(true, "open_app_already_in_target", currentState, openAppOutcome = KaiOpenAppOutcome.TARGET_READY)
         }
 
-        sendKaiCmdSuppressed(KaiAccessibilityService.CMD_OPEN_APP, text = targetHint.ifBlank { rawTarget }, expectedPackage = targetPackage, preDelayMs = 40L, postDelayMs = 220L)
+        // When a new run starts from Kai's own UI or from a blank state, clear the foreground
+        // surface first so the launcher or target app can become the active root.
+        if (currentState.packageName.isBlank() || currentState.packageName == context.packageName) {
+            sendKaiCmdSuppressed(
+                KaiAccessibilityService.CMD_HOME,
+                expectedPackage = "",
+                preDelayMs = 15L,
+                postDelayMs = 180L
+            )
+        }
+
+        sendKaiCmdSuppressed(
+            KaiAccessibilityService.CMD_OPEN_APP,
+            text = targetHint.ifBlank { rawTarget },
+            expectedPackage = targetPackage,
+            preDelayMs = 40L,
+            postDelayMs = 260L
+        )
 
         val beforeFingerprint = currentState.semanticFingerprint()
-        var sawTransition = false
+        var bestState = currentState
+        var sawMeaningfulProgress = false
 
-        repeat(3) {
-            val after = requestFreshScreen(timeoutMs = 1400L, expectedPackage = targetPackage)
+        repeat(4) { attempt ->
+            val after = requestFreshScreen(
+                timeoutMs = 1400L + (attempt * 250L),
+                expectedPackage = targetPackage
+            )
+            bestState = after
+
             val targetMatched = when {
                 targetPackage.isNotBlank() -> after.matchesExpectedPackage(targetPackage)
                 targetHint.isNotBlank() -> after.likelyMatchesAppHint(targetHint)
                 else -> false
             }
             val usable = KaiVisionInterpreter.isUsableState(after)
-            val progress = KaiExecutionDecisionAuthority.hasMeaningfulProgress(currentState, after) || beforeFingerprint != after.semanticFingerprint()
+            val progress = KaiExecutionDecisionAuthority.hasMeaningfulProgress(currentState, after) ||
+                beforeFingerprint != after.semanticFingerprint()
+
+            if (progress && after.packageName.isNotBlank()) {
+                sawMeaningfulProgress = true
+            }
 
             if (targetMatched && usable && !after.isLauncher()) {
                 softResetObservationState()
                 markActionProgress(currentState.packageName, after.packageName, beforeFingerprint, after.semanticFingerprint(), "open_app")
-                return KaiActionExecutionResult(true, "open_app_target_visible_usable", after, openAppOutcome = KaiOpenAppOutcome.USABLE_INTERMEDIATE_IN_TARGET_APP)
+                return KaiActionExecutionResult(
+                    true,
+                    if (after.isKaiLiveStrong(targetPackage)) "open_app_target_ready" else "open_app_target_visible_usable",
+                    after,
+                    openAppOutcome = if (after.isKaiLiveStrong(targetPackage)) {
+                        KaiOpenAppOutcome.TARGET_READY
+                    } else {
+                        KaiOpenAppOutcome.USABLE_INTERMEDIATE_IN_TARGET_APP
+                    }
+                )
             }
 
-            if (progress && after.packageName.isNotBlank() && !after.isLauncher()) sawTransition = true
             delay(120L)
         }
 
-        val stabilizedObs = KaiLiveObservationRuntime.awaitPostOpenStabilization(targetPackage, timeoutMs = 2600L)
+        val stabilizedObs = KaiLiveObservationRuntime.awaitPostOpenStabilization(targetPackage, timeoutMs = 3200L)
         val stabilized = KaiVisionInterpreter.toScreenState(stabilizedObs)
+        bestState = stabilized
+
         val stabilizedMatch = when {
             targetPackage.isNotBlank() -> stabilized.matchesExpectedPackage(targetPackage)
             targetHint.isNotBlank() -> stabilized.likelyMatchesAppHint(targetHint)
@@ -337,19 +393,20 @@ class KaiActionExecutor(
             )
         }
 
-        if (targetPackage.isNotBlank() && stabilized.packageName.isNotBlank() && !stabilized.isLauncher() && !stabilized.matchesExpectedPackage(targetPackage)) {
-            return KaiActionExecutionResult(false, "open_app_wrong_package_after_launch", stabilized, openAppOutcome = KaiOpenAppOutcome.WRONG_PACKAGE_CONFIRMED)
+        if (sawMeaningfulProgress && bestState.packageName.isNotBlank() && !bestState.isLauncher()) {
+            return KaiActionExecutionResult(
+                false,
+                "open_app_transition_in_progress",
+                bestState,
+                openAppOutcome = KaiOpenAppOutcome.OPEN_TRANSITION_IN_PROGRESS
+            )
         }
 
         return KaiActionExecutionResult(
             false,
-            if (sawTransition) "open_app_transition_unconfirmed" else "open_app_not_confirmed",
-            stabilized,
-            openAppOutcome = when {
-                stabilized.packageName.isBlank() || stabilized.isLauncher() -> KaiOpenAppOutcome.OPEN_FAILED
-                stabilizedMatch -> KaiOpenAppOutcome.USABLE_INTERMEDIATE_IN_TARGET_APP
-                else -> KaiOpenAppOutcome.OPEN_TRANSITION_IN_PROGRESS
-            }
+            "open_app_failed",
+            bestState,
+            openAppOutcome = KaiOpenAppOutcome.OPEN_FAILED
         )
     }
 
