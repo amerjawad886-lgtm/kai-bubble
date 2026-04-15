@@ -1197,11 +1197,11 @@ fun KaiScreenState.isKaiLiveStrong(expectedPackage: String = "", allowLauncherSu
     return KaiVisionInterpreter.isStrongState(this, expectedPackage, allowLauncherSurface)
 }
 
-fun KaiScreenState.currentSurfaceHealth(expectedPackage: String = "", allowLauncherSurface: Boolean = false): KaiObservationReadiness.Result {
-    return KaiObservationReadiness.evaluate(
+fun KaiScreenState.currentSurfaceHealth(expectedPackage: String = "", allowLauncherSurface: Boolean = false): KaiVisionInterpreter.ReadinessResult {
+    return KaiVisionInterpreter.evaluateReadiness(
         state = this,
         expectedPackage = expectedPackage,
         allowLauncherSurface = allowLauncherSurface,
-        tier = KaiObservationReadiness.Tier.SEMANTIC_ACTION_SAFE
+        requireStrong = true
     )
 }
