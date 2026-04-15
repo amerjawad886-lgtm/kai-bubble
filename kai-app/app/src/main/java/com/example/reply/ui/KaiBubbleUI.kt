@@ -69,7 +69,7 @@ import androidx.compose.ui.unit.sp
 import com.example.reply.R
 import com.example.reply.agent.KaiAgentController
 import com.example.reply.agent.KaiAgentLoopEngine
-import com.example.reply.agent.KaiObservationRuntime
+import com.example.reply.agent.KaiLiveObservationRuntime
 import com.example.reply.data.supabase.KaiMemoryRepository
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -97,7 +97,7 @@ fun KaiBubbleUI(
     var bubbleLoop by remember { mutableStateOf(false) }
 
     var pendingAgentSilentDump by remember { mutableStateOf(false) }
-    var eyeWatching by remember { mutableStateOf(KaiObservationRuntime.isWatching) }
+    var eyeWatching by remember { mutableStateOf(KaiLiveObservationRuntime.isWatching) }
     var agentRunning by remember { mutableStateOf(KaiAgentController.isRunning()) }
     var recognizerErrorCount by remember { mutableIntStateOf(0) }
 
@@ -127,7 +127,7 @@ fun KaiBubbleUI(
             bubbleLoop -> "Talk mode"
             agentRunning -> "Monitoring"
             eyeWatching -> {
-                if (KaiObservationRuntime.hasRecentAuthoritative(2200L)) "Watching"
+                if (KaiLiveObservationRuntime.hasRecentAuthoritative(2200L)) "Watching"
                 else "Watching…"
             }
             else -> "Ready"
@@ -135,8 +135,8 @@ fun KaiBubbleUI(
     }
 
     LaunchedEffect(Unit) {
-        KaiObservationRuntime.ensureBridge(context.applicationContext)
-        eyeWatching = KaiObservationRuntime.isWatching
+        KaiLiveObservationRuntime.ensureBridge(context.applicationContext)
+        eyeWatching = KaiLiveObservationRuntime.isWatching
         statusText = computedIdleStatus()
     }
 
@@ -182,24 +182,24 @@ fun KaiBubbleUI(
     fun requestFreshDump(delayMs: Long = 120L) {
         scope.launch {
             delay(delayMs)
-            KaiObservationRuntime.requestImmediateDump()
+            KaiLiveObservationRuntime.requestImmediateDump()
         }
     }
 
     fun startEyeWatching() {
-        KaiObservationRuntime.ensureBridge(context.applicationContext)
-        if (!KaiObservationRuntime.isWatching) {
-            KaiObservationRuntime.startWatching(immediateDump = true)
+        KaiLiveObservationRuntime.ensureBridge(context.applicationContext)
+        if (!KaiLiveObservationRuntime.isWatching) {
+            KaiLiveObservationRuntime.startWatching(immediateDump = true)
         } else {
-            KaiObservationRuntime.requestImmediateDump()
+            KaiLiveObservationRuntime.requestImmediateDump()
         }
-        eyeWatching = KaiObservationRuntime.isWatching
+        eyeWatching = KaiLiveObservationRuntime.isWatching
         statusText = computedIdleStatus()
         appendToMainChat("Kai eye watching ON", "system")
     }
 
     fun stopEyeWatching() {
-        KaiObservationRuntime.stopWatching()
+        KaiLiveObservationRuntime.stopWatching()
         eyeWatching = false
         statusText = computedIdleStatus()
         appendToMainChat("Kai eye watching OFF", "system")
@@ -327,7 +327,7 @@ fun KaiBubbleUI(
 
     fun softResetBubbleRuntime() {
         pendingAgentSilentDump = false
-        eyeWatching = KaiObservationRuntime.isWatching
+        eyeWatching = KaiLiveObservationRuntime.isWatching
         KaiBubbleManager.releaseAllSuppression()
         KaiBubbleManager.softResetUiState()
         KaiAgentController.finishActionLoopSession()
@@ -421,7 +421,7 @@ fun KaiBubbleUI(
             customPrompt = customPromptText,
             onRequestDump = {
                 pendingAgentSilentDump = true
-                KaiObservationRuntime.requestImmediateDump()
+                KaiLiveObservationRuntime.requestImmediateDump()
             },
             onInsight = { insight ->
                 statusText = "Monitoring"
@@ -444,11 +444,11 @@ fun KaiBubbleUI(
         actionRunToken += 1
         val myRunToken = actionRunToken
 
-        KaiObservationRuntime.ensureBridge(context.applicationContext)
-        if (!KaiObservationRuntime.hasRecentUsefulObservation(1800L)) {
-            KaiObservationRuntime.requestImmediateDump()
+        KaiLiveObservationRuntime.ensureBridge(context.applicationContext)
+        if (!KaiLiveObservationRuntime.hasRecentUsefulObservation(1800L)) {
+            KaiLiveObservationRuntime.requestImmediateDump()
         }
-        eyeWatching = KaiObservationRuntime.isWatching
+        eyeWatching = KaiLiveObservationRuntime.isWatching
 
         if (KaiAgentController.isRunning()) {
             agentRunning = false
@@ -648,10 +648,10 @@ fun KaiBubbleUI(
 
     LaunchedEffect(Unit) {
         while (true) {
-            if (pendingAgentSilentDump && KaiObservationRuntime.hasRecentUsefulObservation(1800L)) {
+            if (pendingAgentSilentDump && KaiLiveObservationRuntime.hasRecentUsefulObservation(1800L)) {
                 pendingAgentSilentDump = false
             }
-            eyeWatching = KaiObservationRuntime.isWatching
+            eyeWatching = KaiLiveObservationRuntime.isWatching
             agentRunning = KaiAgentController.isRunning()
             statusText = computedIdleStatus()
             delay(280L)

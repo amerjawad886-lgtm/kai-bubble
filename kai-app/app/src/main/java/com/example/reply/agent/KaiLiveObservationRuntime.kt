@@ -273,6 +273,14 @@ object KaiLiveObservationRuntime {
         }.getOrDefault(emptyList())
     }
 
+    fun hasRecentAuthoritative(windowMs: Long): Boolean {
+        return (System.currentTimeMillis() - latestStrongObservation.updatedAt) < windowMs
+    }
+
+    fun hasRecentUsefulObservation(windowMs: Long): Boolean {
+        return (System.currentTimeMillis() - latestObservation.updatedAt) < windowMs
+    }
+
     fun serializeElements(elements: List<KaiUiElement>): String {
         val arr = JSONArray()
         elements.forEach { element ->

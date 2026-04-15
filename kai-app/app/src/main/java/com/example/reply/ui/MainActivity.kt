@@ -22,7 +22,7 @@ import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
-import com.example.reply.agent.KaiObservationRuntime
+import com.example.reply.agent.KaiLiveObservationRuntime
 import com.example.reply.ui.theme.ContrastAwareReplyTheme
 
 class MainActivity : ComponentActivity() {
@@ -92,9 +92,9 @@ class MainActivity : ComponentActivity() {
 
 
     private fun ensureRuntimeBridge() {
-        KaiObservationRuntime.ensureBridge(applicationContext)
+        KaiLiveObservationRuntime.ensureBridge(applicationContext)
         if (modeState.isNotBlank() || KaiBubbleManager.isShowing()) {
-            KaiObservationRuntime.requestImmediateDump()
+            KaiLiveObservationRuntime.requestImmediateDump()
         }
     }
 
