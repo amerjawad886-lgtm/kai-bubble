@@ -160,14 +160,24 @@ object KaiLiveObservationRuntime {
             while (history.size > HISTORY_LIMIT) history.removeFirst()
         }
 
+        // Capture hint locally before classification to avoid a race where a concurrent
+        // requestImmediateDump() overwrites expectedPackageHint mid-evaluation.
+        val localHint = expectedPackageHint
+
         val frame = KaiVisionInterpreter.classify(
             obs = obs,
-            expectedPackage = expectedPackageHint,
+            expectedPackage = localHint,
             allowLauncherSurface = true
         )
 
         if (frame.isStrong) {
             latestStrongObservation = obs
+        }
+
+        // Clear the per-request hint once the dump it was associated with has arrived,
+        // so it does not contaminate the next step's classification.
+        if (localHint.isNotBlank()) {
+            expectedPackageHint = ""
         }
 
         if (frame.isUsable) {
@@ -242,7 +252,9 @@ object KaiLiveObservationRuntime {
         watchJob?.cancel()
 
         watchJob = scope.launch {
-            if (immediateDump) {
+            // Bootstrap burst: seed the history with fresh dumps unless event-driven
+            // observation is already live (in which case extra dumps are redundant noise).
+            if (immediateDump && !hasRecentEventDriven(400L)) {
                 repeat(WATCH_BOOTSTRAP_BURST) { index ->
                     if (!isActive || !isWatching) return@repeat
                     requestImmediateDump(expectedPackageHint)
@@ -253,6 +265,7 @@ object KaiLiveObservationRuntime {
             }
 
             while (isActive && isWatching) {
+                // Event-driven observation is authoritative; dump-polling is fallback only.
                 val interval = if (hasRecentEventDriven(700L)) {
                     POLL_INTERVAL_ADAPTIVE_MS
                 } else {
@@ -335,6 +348,10 @@ object KaiLiveObservationRuntime {
     ): KaiObservation {
         val window = observationWindow(expectedPackage)
 
+        // Priority: strong > target-matched > usable > non-launcher > raw latest.
+        // The global latestStrongObservation is only used as a last resort when the
+        // live history window has no strong candidate — callers that need freshness
+        // guarantees should use awaitFreshObservation() instead.
         val best = when {
             requireStrong && window.latestStrong != null -> window.latestStrong
             expectedPackage.isNotBlank() && window.latestTargetMatched != null -> {
@@ -385,14 +402,14 @@ object KaiLiveObservationRuntime {
 
     suspend fun awaitPostOpenStabilization(
         expectedPackage: String,
+        dispatchTime: Long = System.currentTimeMillis(),
         timeoutMs: Long = 2400L
     ): KaiOpenAppOutcome {
         val startedAt = System.currentTimeMillis()
-        val baseline = System.currentTimeMillis()
 
         while (System.currentTimeMillis() - startedAt < timeoutMs) {
             val obs = awaitFreshObservation(
-                afterTime = baseline,
+                afterTime = dispatchTime,
                 timeoutMs = 220L,
                 expectedPackage = expectedPackage,
                 requireStrong = false

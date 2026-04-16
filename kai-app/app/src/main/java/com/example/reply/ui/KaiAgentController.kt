@@ -464,13 +464,21 @@ object KaiAgentController {
         setGoal(clean)
 
         KaiLiveObservationRuntime.ensureBridge(appContext)
+        // Clear stale observation history so the new run starts from a clean truth boundary.
+        KaiLiveObservationRuntime.hardReset(stopWatching = false)
         KaiLiveObservationRuntime.startWatching(immediateDump = true)
 
         activeLoopJob = scope.launch {
             try {
                 withContext(Dispatchers.Main) { onLog("system", "Agent loop starting…") }
 
-                val currentState = KaiLiveObservationRuntime.currentScreenState()
+                // Await a real initial observation before planning — not a stale cache hit.
+                val runStartTime = System.currentTimeMillis()
+                val initialObs = KaiLiveObservationRuntime.awaitFreshObservation(
+                    afterTime = runStartTime - 1500L,
+                    timeoutMs = 2200L
+                )
+                val currentState = KaiVisionInterpreter.toScreenState(initialObs)
                 markActionLoopObserved(currentState)
 
                 withContext(Dispatchers.Main) { onLog("system", "Planning…") }
@@ -490,35 +498,168 @@ object KaiAgentController {
                     return@launch
                 }
 
-                var executedSteps = 0
+                // Two distinct success counters — these must never be confused:
+                //   verifiedSteps    = steps confirmed by fresh world-state observation
+                //   anyWorldStateSuccess = at least one step proved the world changed
+                var verifiedSteps = 0
+                var noProgressCycles = 0
+                var weakReadStreak = 0
+                var anyWorldStateSuccess = false
 
-                for (step in plan.steps) {
+                for ((stepIndex, step) in plan.steps.withIndex()) {
                     if (!isActive) break
 
                     val cmd = step.normalizedCommand()
                     val payload = step.semanticPayload().ifBlank { step.note }
                     withContext(Dispatchers.Main) {
-                        onLog("system", "Step ${executedSteps + 1}: $cmd → $payload")
+                        onLog("system", "Step ${stepIndex + 1}/${plan.steps.size}: $cmd → $payload")
                     }
 
+                    // wait steps are time-only — no world-state verification needed.
                     if (cmd == "wait") {
                         delay(step.waitMs.coerceIn(300L, 5000L))
-                    } else {
-                        dispatchStepCommand(appContext, step)
-                        delay(step.waitMs.coerceIn(300L, 5000L))
+                        verifiedSteps++
+                        continue
                     }
 
-                    executedSteps++
-                    KaiLiveObservationRuntime.requestImmediateDump()
-                    delay(300L)
+                    // ── 1. Capture world-state BEFORE dispatch ─────────────────────────────
+                    val beforeObs = KaiLiveObservationRuntime.bestObservation(
+                        expectedPackage = step.expectedPackage
+                    )
+                    val beforeState = KaiVisionInterpreter.toScreenState(beforeObs)
+
+                    // ── 2. DISPATCH — this proves only that the command was sent (dispatch_success).
+                    //       It proves nothing about the world changing.
+                    val dispatchTime = System.currentTimeMillis()
+                    dispatchStepCommand(appContext, step)
+
+                    // ── 3. AWAIT fresh world-state observation post-dispatch ────────────────
+                    val result: KaiActionExecutionResult
+                    val afterState: KaiScreenState
+
+                    if (step.isOpenAppStep()) {
+                        // open_app: world_state_success requires verified package arrival,
+                        // launcher exit, and a usable/strong surface — not just startActivity().
+                        val expectedPkg = step.expectedPackage.ifBlank {
+                            KaiAppIdentityRegistry.primaryPackageForKey(
+                                KaiAppIdentityRegistry.resolveAppKey(step.text)
+                            )
+                        }
+                        withContext(Dispatchers.Main) {
+                            onLog("system", "Awaiting app open: expected_pkg=$expectedPkg")
+                        }
+                        val openOutcome = KaiLiveObservationRuntime.awaitPostOpenStabilization(
+                            expectedPackage = expectedPkg,
+                            dispatchTime = dispatchTime,
+                            timeoutMs = step.timeoutMs.coerceIn(3000L, 8000L)
+                        )
+                        val freshObs = KaiLiveObservationRuntime.bestObservation(expectedPackage = expectedPkg)
+                        afterState = KaiVisionInterpreter.toScreenState(freshObs)
+                        // dispatch_success is always true (intent was sent); world_state_success
+                        // requires the observation to confirm arrival.
+                        result = KaiActionExecutionResult(
+                            success = openOutcome == KaiOpenAppOutcome.TARGET_READY ||
+                                      openOutcome == KaiOpenAppOutcome.USABLE_INTERMEDIATE_IN_TARGET_APP,
+                            message = "open_app_outcome:$openOutcome",
+                            screenState = afterState,
+                            openAppOutcome = openOutcome
+                        )
+                        withContext(Dispatchers.Main) {
+                            onLog("system", "App open world-state: $openOutcome")
+                        }
+                    } else {
+                        // All other steps: a fresh observation timestamped after dispatch is the
+                        // minimum evidence that the world responded.
+                        val freshObs = KaiLiveObservationRuntime.awaitFreshObservation(
+                            afterTime = dispatchTime,
+                            timeoutMs = step.waitMs.coerceIn(1200L, 6000L),
+                            expectedPackage = step.expectedPackage
+                        )
+                        afterState = KaiVisionInterpreter.toScreenState(freshObs)
+                        val freshArrived = freshObs.updatedAt > dispatchTime
+                        result = KaiActionExecutionResult(
+                            success = freshArrived,
+                            message = if (freshArrived) "world_state_observed" else "no_fresh_observation",
+                            screenState = afterState
+                        )
+                    }
+
+                    // ── 4. EVALUATE — world-state decision via before/after evidence ────────
+                    val observationWeak = !KaiVisionInterpreter.isUsableState(afterState)
+                    if (observationWeak) weakReadStreak++ else weakReadStreak = 0
+
+                    val telemetry = KaiExecutionDecisionAuthority.RuntimeTelemetry(
+                        noProgressCycles = noProgressCycles,
+                        weakReadStreak = weakReadStreak,
+                        observationWeak = observationWeak,
+                        observationFallback = !result.success,
+                        observationReusedLastGood = !result.success &&
+                            afterState.semanticFingerprint() == beforeState.semanticFingerprint()
+                    )
+
+                    val decision = KaiExecutionDecisionAuthority.evaluateStepOutcome(
+                        step = step,
+                        before = beforeState,
+                        after = afterState,
+                        result = result,
+                        repeatedNoProgressSteps = noProgressCycles,
+                        recoverablePathExists = true,
+                        telemetry = telemetry
+                    )
+
+                    val progressMade = KaiExecutionDecisionAuthority.hasMeaningfulProgress(beforeState, afterState)
+                    if (progressMade) noProgressCycles = 0 else noProgressCycles++
+
+                    withContext(Dispatchers.Main) {
+                        onLog("system", "Step ${stepIndex + 1} → ${decision.directive.name} [${decision.reason}]")
+                    }
+
+                    // ── 5. ACT on decision ─────────────────────────────────────────────────
+                    when (decision.directive) {
+                        KaiExecutionDecisionAuthority.RuntimeDirective.CONTINUE -> {
+                            verifiedSteps++
+                            anyWorldStateSuccess = true
+                            markActionLoopObserved(afterState)
+                        }
+                        KaiExecutionDecisionAuthority.RuntimeDirective.STOP_SUCCESS -> {
+                            verifiedSteps++
+                            anyWorldStateSuccess = true
+                            markActionLoopObserved(afterState)
+                            val msg = "Goal verified after step ${stepIndex + 1}/${plan.steps.size}. ${plan.summary}"
+                            withContext(Dispatchers.Main) {
+                                finishActionLoopSession(msg)
+                                onFinished(KaiLoopResult(true, msg, verifiedSteps))
+                            }
+                            return@launch
+                        }
+                        KaiExecutionDecisionAuthority.RuntimeDirective.STOP_FAILURE -> {
+                            val msg = "Step ${stepIndex + 1} hard-stopped: ${decision.reason}"
+                            withContext(Dispatchers.Main) {
+                                finishActionLoopSession(msg)
+                                onFinished(KaiLoopResult(false, msg, verifiedSteps))
+                            }
+                            return@launch
+                        }
+                        KaiExecutionDecisionAuthority.RuntimeDirective.RECOVER,
+                        KaiExecutionDecisionAuthority.RuntimeDirective.REPLAN -> {
+                            withContext(Dispatchers.Main) {
+                                onLog("system", "Step ${stepIndex + 1} unverified: ${decision.reason}")
+                            }
+                            if (!step.optional) noProgressCycles++
+                        }
+                    }
                 }
 
-                KaiLiveObservationRuntime.requestImmediateDump()
-                val msg = "Completed $executedSteps steps: ${plan.summary}"
-
+                // ── 6. Final result — success only if world-state was actually verified ────
+                val totalSteps = plan.steps.size
+                val msg = if (anyWorldStateSuccess) {
+                    "World-state verified $verifiedSteps/$totalSteps steps. ${plan.summary}"
+                } else {
+                    "Commands dispatched but world-state not confirmed for any step. ${plan.summary}"
+                }
                 withContext(Dispatchers.Main) {
                     finishActionLoopSession(msg)
-                    onFinished(KaiLoopResult(true, msg, executedSteps))
+                    onFinished(KaiLoopResult(anyWorldStateSuccess, msg, verifiedSteps))
                 }
             } catch (_: CancellationException) {
                 withContext(Dispatchers.Main) {
