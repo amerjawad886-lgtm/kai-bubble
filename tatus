@@ -1,0 +1,5 @@
+[33md806920[m[33m ([m[1;36mHEAD[m[33m -> [m[1;32mmain[m[33m, [m[1;31morigin/main[m[33m, [m[1;31morigin/HEAD[m[33m)[m fix: delete KaiObservationReadiness, fix multi-step continuation and second-run stability (#10)
+[33m949c6c1[m fix: migrate UI/service layer from deleted KaiObservationRuntime to KaiLiveObservationRuntime (#9)
+[33m4212849[m Kai Live Phase 1: core runtime rewrite (loop, executor, authority, live observation)
+[33mdaa8e53[m fix: resolve post-open observation instability causing replan loops and stop failures (#8)
+[33md36b727[m fix: correct Java home for Codespaces environment

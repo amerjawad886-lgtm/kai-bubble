@@ -62,7 +62,10 @@ class KaiAgentLoopEngine(
         }
     }
 
-    private suspend fun runLoop(userPrompt: String, runId: String): KaiLoopResult {
+    private suspend fun runLoop(
+        userPrompt: String,
+        runId: String
+    ): KaiLoopResult {
         val appContext = context.applicationContext
         val executor = KaiActionExecutor(appContext) { text ->
             scope.launch(Dispatchers.Main.immediate) { onLog("system", text) }
@@ -74,7 +77,13 @@ class KaiAgentLoopEngine(
             if (!ctx.isActive) throw CancellationException("Agent loop cancelled")
         }
 
-        suspend fun pushAgentState(state: String, observation: String = "", decision: String = "", action: String = "", notes: String = "") {
+        suspend fun pushAgentState(
+            state: String,
+            observation: String = "",
+            decision: String = "",
+            action: String = "",
+            notes: String = ""
+        ) {
             runCatching {
                 agentStateRepo.upsertState(
                     id = "main_agent",
@@ -87,8 +96,20 @@ class KaiAgentLoopEngine(
             }
         }
 
-        suspend fun finishLoop(success: Boolean, message: String, executedSteps: Int, observation: String, notes: String): KaiLoopResult {
-            pushAgentState(if (success) "idle" else "error", observation, message, "stop", notes)
+        suspend fun finishLoop(
+            success: Boolean,
+            message: String,
+            executedSteps: Int,
+            observation: String,
+            notes: String
+        ): KaiLoopResult {
+            pushAgentState(
+                state = if (success) "idle" else "error",
+                observation = observation,
+                decision = message,
+                action = "stop",
+                notes = notes
+            )
             KaiAgentController.finishActionLoopSession(message)
             executor.resetRuntimeState(clearLastGoodScreen = true)
             return KaiLoopResult(success, message, executedSteps)
@@ -119,12 +140,24 @@ class KaiAgentLoopEngine(
             var currentState = if (startup.passed) {
                 startup.state
             } else {
-                executor.resolveCanonicalRuntimeState()
+                KaiVisualInterpreter.resolveTruth(
+                    allowLauncherSurface = true,
+                    canonicalState = executor.getCanonicalRuntimeState(),
+                    requireStrong = false
+                ).state
             }
+
             executor.adoptCanonicalRuntimeState(currentState)
             executor.clearStartupFingerprintBaseline()
 
-            pushAgentState("planning", currentState.rawDump, userPrompt, "loop_start", "Kai Live v1 agent loop started")
+            pushAgentState(
+                state = "planning",
+                observation = currentState.rawDump,
+                decision = userPrompt,
+                action = "loop_start",
+                notes = "Kai Live agent loop started"
+            )
+
             withContext(Dispatchers.Main) {
                 onStatus("Planning")
                 onLog("system", "Agent loop started")
@@ -137,13 +170,24 @@ class KaiAgentLoopEngine(
             var lastOpenAppOutcome: KaiOpenAppOutcome? = null
             var appEntryJustCompleted = false
 
-            repeat(10) {
+            repeat(10) { cycle ->
                 ensureActiveOrThrow()
 
-                val stageSnapshot = KaiTaskStageEngine.evaluate(userPrompt, currentState, lastOpenAppOutcome)
+                val visualTruth = KaiVisualInterpreter.resolveTruth(
+                    expectedPackage = currentState.packageName,
+                    allowLauncherSurface = true,
+                    requireStrong = false,
+                    canonicalState = executor.getCanonicalRuntimeState()
+                )
+                currentState = visualTruth.state
+                executor.adoptCanonicalRuntimeState(currentState)
 
-                // After app entry just completed, use a gentler gate tier so the
-                // still-settling app screen doesn't block continuation.
+                val stageSnapshot = KaiTaskStageEngine.evaluate(
+                    userPrompt = userPrompt,
+                    currentState = currentState,
+                    openAppOutcome = lastOpenAppOutcome
+                )
+
                 val cycleGateTier = when {
                     !stageSnapshot.appEntryComplete -> startupGateTier
                     appEntryJustCompleted -> KaiActionExecutor.ObservationGateTier.APP_LAUNCH_SAFE
@@ -164,80 +208,160 @@ class KaiAgentLoopEngine(
                 KaiAgentController.markActionLoopObserved(currentState)
 
                 if (stageSnapshot.finalGoalComplete) {
-                    return@withContext finishLoop(true, "Final goal committed by stage engine.", totalSteps, currentState.rawDump, "stage_success")
+                    return@withContext finishLoop(
+                        success = true,
+                        message = "Final goal committed by stage engine.",
+                        executedSteps = totalSteps,
+                        observation = currentState.rawDump,
+                        notes = "stage_success"
+                    )
                 }
 
-                val step = KaiTaskStageEngine.buildContinuationStep(stageSnapshot, userPrompt, currentState)
-                    ?: return@withContext finishLoop(false, "No continuation step could be built.", totalSteps, currentState.rawDump, "missing_continuation_step")
+                val step = KaiTaskStageEngine.buildContinuationStep(
+                    stageSnapshot = stageSnapshot,
+                    userPrompt = userPrompt,
+                    currentState = currentState
+                ) ?: return@withContext finishLoop(
+                    success = false,
+                    message = "No continuation step could be built.",
+                    executedSteps = totalSteps,
+                    observation = currentState.rawDump,
+                    notes = "missing_continuation_step"
+                )
 
                 withContext(Dispatchers.Main) {
                     onStatus("Executing")
-                    onLog("system", "Step ${totalSteps + 1}: ${step.cmd} → ${step.semanticPayload().ifBlank { step.note.ifBlank { step.selectorRole } }}")
+                    onLog(
+                        "system",
+                        "Step ${totalSteps + 1}: ${step.cmd} → ${
+                            step.semanticPayload().ifBlank { step.note.ifBlank { step.selectorRole } }
+                        }"
+                    )
                 }
 
                 val beforeState = currentState
                 val result = executor.executeStep(step, beforeState)
                 totalSteps += 1
-                currentState = result.screenState ?: executor.resolveCanonicalRuntimeState()
+
+                currentState = result.screenState ?: KaiVisualInterpreter.resolveTruth(
+                    expectedPackage = step.expectedPackage.ifBlank { beforeState.packageName },
+                    allowLauncherSurface = true,
+                    requireStrong = false,
+                    canonicalState = executor.getCanonicalRuntimeState()
+                ).state
+
                 executor.adoptCanonicalRuntimeState(currentState)
                 lastOpenAppOutcome = result.openAppOutcome ?: lastOpenAppOutcome
-                if (step.isOpenAppStep() && result.success) appEntryJustCompleted = true
 
-                val progress = KaiExecutionDecisionAuthority.hasMeaningfulProgress(beforeState, currentState)
-                repeatedNoProgressSteps = if (progress || result.success) 0 else repeatedNoProgressSteps + 1
-
-                val decision = KaiExecutionDecisionAuthority.evaluateStepOutcome(
-                    step, beforeState, currentState, result, repeatedNoProgressSteps, false,
-                    KaiExecutionDecisionAuthority.RuntimeTelemetry(
-                        noProgressCycles = noProgressCycles,
-                        weakReadStreak = executor.getConsecutiveWeakReads(),
-                        staleReadStreak = executor.getConsecutiveStaleReads(),
-                        observationWeak = executor.getLastRefreshMeta().weak,
-                        observationFallback = executor.getLastRefreshMeta().fallback,
-                        observationReusedLastGood = executor.getLastRefreshMeta().reusedLastGood
-                    )
-                )
-                lastDecision = decision
-
-                pushAgentState(
-                    state = when (decision.directive) {
-                        KaiExecutionDecisionAuthority.RuntimeDirective.CONTINUE -> "executing"
-                        KaiExecutionDecisionAuthority.RuntimeDirective.RECOVER -> "recovering"
-                        KaiExecutionDecisionAuthority.RuntimeDirective.REPLAN -> "planning"
-                        KaiExecutionDecisionAuthority.RuntimeDirective.STOP_SUCCESS -> "idle"
-                        KaiExecutionDecisionAuthority.RuntimeDirective.STOP_FAILURE -> "error"
-                    },
-                    observation = currentState.rawDump,
-                    decision = decision.reason,
-                    action = step.cmd,
-                    notes = result.message
-                )
-
-                when (decision.directive) {
-                    KaiExecutionDecisionAuthority.RuntimeDirective.STOP_SUCCESS -> return@withContext finishLoop(true, decision.reason, totalSteps, currentState.rawDump, "directive_success")
-                    KaiExecutionDecisionAuthority.RuntimeDirective.STOP_FAILURE -> return@withContext finishLoop(false, decision.reason, totalSteps, currentState.rawDump, "directive_failure")
-                    KaiExecutionDecisionAuthority.RuntimeDirective.REPLAN,
-                    KaiExecutionDecisionAuthority.RuntimeDirective.RECOVER -> noProgressCycles += 1
-                    KaiExecutionDecisionAuthority.RuntimeDirective.CONTINUE -> noProgressCycles = 0
+                if (step.isOpenAppStep() &&
+                    result.openAppOutcome != null &&
+                    result.openAppOutcome != KaiOpenAppOutcome.OPEN_FAILED &&
+                    result.openAppOutcome != KaiOpenAppOutcome.WRONG_PACKAGE_CONFIRMED
+                ) {
+                    appEntryJustCompleted = true
                 }
 
-                val cycleHealth = KaiExecutionDecisionAuthority.evaluateCycleHealth(
-                    lastDecision,
-                    KaiExecutionDecisionAuthority.RuntimeTelemetry(
-                        noProgressCycles = noProgressCycles,
-                        weakReadStreak = executor.getConsecutiveWeakReads(),
-                        staleReadStreak = executor.getConsecutiveStaleReads(),
-                        observationWeak = executor.getLastRefreshMeta().weak,
-                        observationFallback = executor.getLastRefreshMeta().fallback,
-                        observationReusedLastGood = executor.getLastRefreshMeta().reusedLastGood
-                    )
+                val telemetry = KaiExecutionDecisionAuthority.RuntimeTelemetry(
+                    noProgressCycles = noProgressCycles,
+                    weakReadStreak = executor.getConsecutiveWeakReads(),
+                    staleReadStreak = executor.getConsecutiveStaleReads(),
+                    observationWeak = !executor.getLastRefreshMeta().usable,
+                    observationFallback = executor.getLastRefreshMeta().fallback,
+                    observationReusedLastGood = executor.getLastRefreshMeta().reusedLastGood,
+                    loopSafetyLimitReached = cycle >= 9
                 )
-                if (cycleHealth.directive == KaiExecutionDecisionAuthority.RuntimeDirective.STOP_FAILURE) {
-                    return@withContext finishLoop(false, cycleHealth.reason, totalSteps, currentState.rawDump, "cycle_stop_failure")
+
+                val decision = KaiExecutionDecisionAuthority.evaluateStepOutcome(
+                    step = step,
+                    before = beforeState,
+                    after = currentState,
+                    result = result,
+                    repeatedNoProgressSteps = repeatedNoProgressSteps,
+                    recoverablePathExists = true,
+                    telemetry = telemetry
+                )
+
+                lastDecision = decision
+
+                when (decision.directive) {
+                    KaiExecutionDecisionAuthority.RuntimeDirective.CONTINUE -> {
+                        val progressed = KaiExecutionDecisionAuthority.hasMeaningfulProgress(
+                            before = beforeState,
+                            after = currentState
+                        )
+
+                        repeatedNoProgressSteps = if (progressed) 0 else repeatedNoProgressSteps + 1
+                        noProgressCycles = if (progressed) 0 else noProgressCycles + 1
+
+                        pushAgentState(
+                            state = "executing",
+                            observation = currentState.rawDump,
+                            decision = decision.reason,
+                            action = step.cmd,
+                            notes = "continue | source=${executor.getLastRefreshMeta().source}"
+                        )
+                    }
+
+                    KaiExecutionDecisionAuthority.RuntimeDirective.RECOVER -> {
+                        val recovery = executor.attemptRecoveryForStep(step, currentState)
+                        currentState = recovery.screenState ?: currentState
+                        executor.adoptCanonicalRuntimeState(currentState)
+                        repeatedNoProgressSteps += 1
+                        noProgressCycles += 1
+
+                        pushAgentState(
+                            state = "recovering",
+                            observation = currentState.rawDump,
+                            decision = decision.reason,
+                            action = "recover:${step.cmd}",
+                            notes = recovery.message
+                        )
+                    }
+
+                    KaiExecutionDecisionAuthority.RuntimeDirective.REPLAN -> {
+                        repeatedNoProgressSteps += 1
+                        noProgressCycles += 1
+
+                        pushAgentState(
+                            state = "replanning",
+                            observation = currentState.rawDump,
+                            decision = decision.reason,
+                            action = "replan",
+                            notes = "cycle=$cycle"
+                        )
+                    }
+
+                    KaiExecutionDecisionAuthority.RuntimeDirective.STOP_SUCCESS -> {
+                        return@withContext finishLoop(
+                            success = true,
+                            message = decision.reason,
+                            executedSteps = totalSteps,
+                            observation = currentState.rawDump,
+                            notes = "authority_stop_success"
+                        )
+                    }
+
+                    KaiExecutionDecisionAuthority.RuntimeDirective.STOP_FAILURE -> {
+                        return@withContext finishLoop(
+                            success = false,
+                            message = decision.reason,
+                            executedSteps = totalSteps,
+                            observation = currentState.rawDump,
+                            notes = "authority_stop_failure"
+                        )
+                    }
                 }
             }
 
-            finishLoop(false, "Agent loop stopped without final commit.", totalSteps, currentState.rawDump, "loop_exhausted")
+            val finalReason = lastDecision?.reason ?: "loop_budget_exhausted"
+
+            finishLoop(
+                success = false,
+                message = finalReason,
+                executedSteps = totalSteps,
+                observation = currentState.rawDump,
+                notes = "loop_budget_exhausted"
+            )
         }
     }
 }

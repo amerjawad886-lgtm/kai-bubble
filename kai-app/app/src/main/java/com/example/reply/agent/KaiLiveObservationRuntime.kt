@@ -20,6 +20,7 @@ import java.util.ArrayDeque
 
 object KaiLiveObservationRuntime {
     private const val TAG = "KaiLiveObs"
+
     private const val WATCH_INTERVAL_MS = 420L
     private const val WATCH_BOOTSTRAP_BURST = 3
     private const val WATCH_BOOTSTRAP_GAP_MS = 90L
@@ -36,16 +37,29 @@ object KaiLiveObservationRuntime {
         val latestNonLauncher: KaiObservation?
     )
 
-    @Volatile var latestObservation: KaiObservation = KaiObservation("", "", updatedAt = 0L)
+    @Volatile
+    var latestObservation: KaiObservation = KaiObservation("", "", updatedAt = 0L)
         private set
-    @Volatile var latestStrongObservation: KaiObservation = KaiObservation("", "", updatedAt = 0L)
+
+    @Volatile
+    var latestStrongObservation: KaiObservation = KaiObservation("", "", updatedAt = 0L)
         private set
-    @Volatile var isWatching: Boolean = false
+
+    @Volatile
+    var isWatching: Boolean = false
         private set
-    @Volatile private var bridgeRegistered = false
-    @Volatile private var storedContext: Context? = null
-    @Volatile private var expectedPackageHint: String = ""
-    @Volatile var lastEventDrivenAt: Long = 0L
+
+    @Volatile
+    private var bridgeRegistered = false
+
+    @Volatile
+    private var storedContext: Context? = null
+
+    @Volatile
+    private var expectedPackageHint: String = ""
+
+    @Volatile
+    var lastEventDrivenAt: Long = 0L
         private set
 
     private val bridgeLock = Any()
@@ -70,9 +84,6 @@ object KaiLiveObservationRuntime {
     }
 
     fun softCleanupAfterRun() {
-        // Keep the latest live history across runs so the next run can start from
-        // whatever the accessibility layer is already seeing. We only clear the
-        // request-scoped expectation.
         expectedPackageHint = ""
     }
 
@@ -80,19 +91,37 @@ object KaiLiveObservationRuntime {
         val appCtx = context.applicationContext
         storedContext = appCtx
         if (bridgeRegistered) return
+
         synchronized(bridgeLock) {
             if (bridgeRegistered) return
+
             val receiver = object : BroadcastReceiver() {
                 override fun onReceive(c: Context?, i: Intent?) {
                     if (i?.action != KaiAccessibilityService.ACTION_KAI_DUMP_RESULT) return
-                    val dump = i.getStringExtra(KaiAccessibilityService.EXTRA_DUMP).orEmpty()
-                    val pkg = i.getStringExtra(KaiAccessibilityService.EXTRA_PACKAGE).orEmpty()
-                    val elements = parseElementsFromJson(i.getStringExtra(KaiAccessibilityService.EXTRA_ELEMENTS_JSON))
-                    val screenKind = i.getStringExtra(KaiAccessibilityService.EXTRA_SCREEN_KIND).orEmpty()
-                    val confidence = i.getFloatExtra(KaiAccessibilityService.EXTRA_SEMANTIC_CONFIDENCE, 0f)
-                    onDumpArrived(pkg, dump, elements, screenKind, confidence)
+
+                    val dump =
+                        i.getStringExtra(KaiAccessibilityService.EXTRA_DUMP).orEmpty()
+                    val pkg =
+                        i.getStringExtra(KaiAccessibilityService.EXTRA_PACKAGE).orEmpty()
+                    val elements =
+                        parseElementsFromJson(
+                            i.getStringExtra(KaiAccessibilityService.EXTRA_ELEMENTS_JSON)
+                        )
+                    val screenKind =
+                        i.getStringExtra(KaiAccessibilityService.EXTRA_SCREEN_KIND).orEmpty()
+                    val confidence =
+                        i.getFloatExtra(KaiAccessibilityService.EXTRA_SEMANTIC_CONFIDENCE, 0f)
+
+                    onDumpArrived(
+                        pkg = pkg,
+                        dump = dump,
+                        elements = elements,
+                        screenKind = screenKind,
+                        confidence = confidence
+                    )
                 }
             }
+
             try {
                 val filter = IntentFilter(KaiAccessibilityService.ACTION_KAI_DUMP_RESULT)
                 if (Build.VERSION.SDK_INT >= 33) {
@@ -108,7 +137,13 @@ object KaiLiveObservationRuntime {
         }
     }
 
-    fun onDumpArrived(pkg: String, dump: String, elements: List<KaiUiElement>, screenKind: String, confidence: Float) {
+    fun onDumpArrived(
+        pkg: String,
+        dump: String,
+        elements: List<KaiUiElement>,
+        screenKind: String,
+        confidence: Float
+    ) {
         val obs = KaiObservation(
             packageName = pkg,
             screenPreview = dump,
@@ -117,14 +152,23 @@ object KaiLiveObservationRuntime {
             semanticConfidence = confidence,
             updatedAt = System.currentTimeMillis()
         )
+
         latestObservation = obs
+
         synchronized(history) {
             history.addLast(obs)
             while (history.size > HISTORY_LIMIT) history.removeFirst()
         }
 
-        val frame = KaiVisionInterpreter.classify(obs, expectedPackageHint, allowLauncherSurface = true)
-        if (frame.isStrong) latestStrongObservation = obs
+        val frame = KaiVisionInterpreter.classify(
+            obs = obs,
+            expectedPackage = expectedPackageHint,
+            allowLauncherSurface = true
+        )
+
+        if (frame.isStrong) {
+            latestStrongObservation = obs
+        }
 
         if (frame.isUsable) {
             runCatching {
@@ -139,14 +183,27 @@ object KaiLiveObservationRuntime {
         }
     }
 
-    fun onEventObservation(pkg: String, dump: String, elements: List<KaiUiElement>, screenKind: String, confidence: Float) {
+    fun onEventObservation(
+        pkg: String,
+        dump: String,
+        elements: List<KaiUiElement>,
+        screenKind: String,
+        confidence: Float
+    ) {
         lastEventDrivenAt = System.currentTimeMillis()
-        onDumpArrived(pkg, dump, elements, screenKind, confidence)
+        onDumpArrived(
+            pkg = pkg,
+            dump = dump,
+            elements = elements,
+            screenKind = screenKind,
+            confidence = confidence
+        )
     }
 
     fun requestImmediateDump(expectedPackage: String = "") {
         val context = storedContext ?: return
         expectedPackageHint = expectedPackage
+
         val intent = Intent(KaiAccessibilityService.ACTION_KAI_COMMAND).apply {
             setPackage(context.packageName)
             putExtra(KaiAccessibilityService.EXTRA_CMD, KaiAccessibilityService.CMD_DUMP)
@@ -154,6 +211,7 @@ object KaiLiveObservationRuntime {
                 putExtra(KaiAccessibilityService.EXTRA_EXPECTED_PACKAGE, expectedPackage)
             }
         }
+
         context.sendBroadcast(intent)
     }
 
@@ -161,36 +219,50 @@ object KaiLiveObservationRuntime {
         val context = storedContext ?: return
         val intent = Intent(KaiAccessibilityService.ACTION_KAI_COMMAND).apply {
             setPackage(context.packageName)
-            putExtra(KaiAccessibilityService.EXTRA_CMD, KaiAccessibilityService.CMD_RESET_TRANSITION_STATE)
+            putExtra(
+                KaiAccessibilityService.EXTRA_CMD,
+                KaiAccessibilityService.CMD_RESET_TRANSITION_STATE
+            )
         }
         context.sendBroadcast(intent)
     }
 
-    fun startWatching(immediateDump: Boolean = true, expectedPackage: String = "") {
+    fun startWatching(
+        immediateDump: Boolean = true,
+        expectedPackage: String = ""
+    ) {
         expectedPackageHint = expectedPackage
+
         if (isWatching && watchJob?.isActive == true) {
             if (immediateDump) requestImmediateDump(expectedPackage)
             return
         }
+
         isWatching = true
         watchJob?.cancel()
+
         watchJob = scope.launch {
             if (immediateDump) {
                 repeat(WATCH_BOOTSTRAP_BURST) { index ->
                     if (!isActive || !isWatching) return@repeat
                     requestImmediateDump(expectedPackageHint)
-                    if (index < WATCH_BOOTSTRAP_BURST - 1) delay(WATCH_BOOTSTRAP_GAP_MS)
+                    if (index < WATCH_BOOTSTRAP_BURST - 1) {
+                        delay(WATCH_BOOTSTRAP_GAP_MS)
+                    }
                 }
             }
+
             while (isActive && isWatching) {
                 val interval = if (hasRecentEventDriven(700L)) {
                     POLL_INTERVAL_ADAPTIVE_MS
                 } else {
                     WATCH_INTERVAL_MS
                 }
+
                 if (!hasRecentEventDriven(450L)) {
                     requestImmediateDump(expectedPackageHint)
                 }
+
                 delay(interval)
             }
         }
@@ -203,148 +275,201 @@ object KaiLiveObservationRuntime {
         watchJob = null
     }
 
+    fun hasRecentEventDriven(windowMs: Long = 700L): Boolean {
+        val at = lastEventDrivenAt
+        if (at <= 0L) return false
+        return System.currentTimeMillis() - at <= windowMs
+    }
+
+    fun hasRecentAuthoritative(windowMs: Long = 1200L): Boolean {
+        val obs = latestStrongObservation
+        if (obs.updatedAt <= 0L) return false
+        return System.currentTimeMillis() - obs.updatedAt <= windowMs
+    }
+
+    fun hasRecentUsefulObservation(windowMs: Long = 1200L): Boolean {
+        val obs = latestObservation
+        if (obs.updatedAt <= 0L) return false
+        val frame = KaiVisionInterpreter.classify(obs, expectedPackageHint, allowLauncherSurface = true)
+        if (!frame.isUsable) return false
+        return System.currentTimeMillis() - obs.updatedAt <= windowMs
+    }
+
     fun observationWindow(expectedPackage: String = ""): ObservationWindow {
         val items = synchronized(history) { history.toList() }
+
         val latest = items.maxByOrNull { it.updatedAt }
-        val usable = items.filter { KaiVisionInterpreter.classify(it, expectedPackage, true).isUsable }.maxByOrNull { it.updatedAt }
-        val strong = items.filter { KaiVisionInterpreter.classify(it, expectedPackage, true).isStrong }.maxByOrNull { it.updatedAt }
-        val matched = items.filter { KaiVisionInterpreter.packageMatchesExpected(it.packageName, expectedPackage) }.maxByOrNull { it.updatedAt }
-        val nonLauncher = items.filter {
-            val state = KaiVisionInterpreter.toScreenState(it)
-            !state.isLauncher() && it.packageName.isNotBlank()
-        }.maxByOrNull { it.updatedAt }
-        return ObservationWindow(items, latest, usable, strong, matched, nonLauncher)
+
+        val usable = items
+            .filter { KaiVisionInterpreter.classify(it, expectedPackage, true).isUsable }
+            .maxByOrNull { it.updatedAt }
+
+        val strong = items
+            .filter { KaiVisionInterpreter.classify(it, expectedPackage, true).isStrong }
+            .maxByOrNull { it.updatedAt }
+
+        val matched = items
+            .filter { KaiVisionInterpreter.packageMatchesExpected(it.packageName, expectedPackage) }
+            .maxByOrNull { it.updatedAt }
+
+        val nonLauncher = items
+            .filter {
+                val state = KaiVisionInterpreter.toScreenState(it)
+                !state.isLauncher() && it.packageName.isNotBlank()
+            }
+            .maxByOrNull { it.updatedAt }
+
+        return ObservationWindow(
+            observations = items,
+            latest = latest,
+            latestUsable = usable,
+            latestStrong = strong,
+            latestTargetMatched = matched,
+            latestNonLauncher = nonLauncher
+        )
     }
 
-    suspend fun awaitFreshObservation(afterTime: Long, timeoutMs: Long = 2200L, expectedPackage: String = "", requireStrong: Boolean = false): KaiObservation {
-        val deadline = System.currentTimeMillis() + timeoutMs.coerceAtLeast(300L)
-        var lastDumpRequestAt = 0L
+    fun bestObservation(
+        expectedPackage: String = "",
+        requireStrong: Boolean = false
+    ): KaiObservation {
+        val window = observationWindow(expectedPackage)
+
+        val best = when {
+            requireStrong && window.latestStrong != null -> window.latestStrong
+            expectedPackage.isNotBlank() && window.latestTargetMatched != null -> {
+                if (requireStrong) window.latestStrong ?: window.latestTargetMatched
+                else window.latestTargetMatched
+            }
+            requireStrong && latestStrongObservation.updatedAt > 0L -> latestStrongObservation
+            window.latestUsable != null -> window.latestUsable
+            window.latestNonLauncher != null -> window.latestNonLauncher
+            window.latest != null -> window.latest
+            else -> latestObservation.takeIf { it.updatedAt > 0L }
+        }
+
+        return best ?: KaiObservation("", "", updatedAt = 0L)
+    }
+
+    fun currentScreenState(
+        expectedPackage: String = "",
+        requireStrong: Boolean = false
+    ): KaiScreenState {
+        return KaiVisionInterpreter.toScreenState(
+            bestObservation(expectedPackage = expectedPackage, requireStrong = requireStrong)
+        )
+    }
+
+    suspend fun awaitFreshObservation(
+        afterTime: Long,
+        timeoutMs: Long = 2200L,
+        expectedPackage: String = "",
+        requireStrong: Boolean = false
+    ): KaiObservation {
+        val startedAt = System.currentTimeMillis()
         var best = bestObservation(expectedPackage, requireStrong)
 
-        while (System.currentTimeMillis() < deadline) {
-            val now = System.currentTimeMillis()
+        while (System.currentTimeMillis() - startedAt < timeoutMs) {
             val candidate = bestObservation(expectedPackage, requireStrong)
-            if (candidate.updatedAt > best.updatedAt) best = candidate
-            if (candidate.updatedAt > afterTime) return candidate
-
-            val shouldRequestDump = !hasRecentEventDriven(450L) && (now - lastDumpRequestAt) > 320L
-            if (shouldRequestDump) {
-                requestImmediateDump(expectedPackage)
-                lastDumpRequestAt = now
-            }
-            delay(FRESH_POLL_MS)
-        }
-        return best
-    }
-
-    suspend fun awaitPostOpenStabilization(expectedPackage: String, timeoutMs: Long = 2600L): KaiObservation {
-        val deadline = System.currentTimeMillis() + timeoutMs.coerceAtLeast(600L)
-        var best = bestObservation(expectedPackage, requireStrong = false)
-        var lastExplicitDump = 0L
-
-        while (System.currentTimeMillis() < deadline) {
-            // Reduce dump request frequency when event-driven observations are arriving
-            val now = System.currentTimeMillis()
-            if (!hasRecentEventDriven(400L) || (now - lastExplicitDump) > 350L) {
-                requestImmediateDump(expectedPackage)
-                lastExplicitDump = now
-            }
-            delay(FRESH_POLL_MS)
-
-            val candidate = bestObservation(expectedPackage, requireStrong = false)
-            if (candidate.updatedAt > best.updatedAt) best = candidate
-
-            val frame = KaiVisionInterpreter.classify(candidate, expectedPackage, allowLauncherSurface = false)
-            if (frame.expectedPackageMatched && frame.isUsable && !frame.screenState.isLauncher()) {
+            if (candidate.updatedAt > afterTime) {
                 return candidate
             }
+            if (candidate.updatedAt > best.updatedAt) {
+                best = candidate
+            }
+            delay(FRESH_POLL_MS)
         }
+
         return best
     }
 
-    fun bestObservation(expectedPackage: String = "", requireStrong: Boolean = false): KaiObservation {
-        val window = observationWindow(expectedPackage)
-        val ordered = if (requireStrong) {
-            listOf(window.latestTargetMatched, window.latestStrong, latestStrongObservation, window.latestUsable, window.latest)
-        } else {
-            listOf(window.latestTargetMatched, window.latestUsable, window.latestNonLauncher, window.latestStrong, window.latest, latestObservation)
+    suspend fun awaitPostOpenStabilization(
+        expectedPackage: String,
+        timeoutMs: Long = 2400L
+    ): KaiOpenAppOutcome {
+        val startedAt = System.currentTimeMillis()
+        val baseline = System.currentTimeMillis()
+
+        while (System.currentTimeMillis() - startedAt < timeoutMs) {
+            val obs = awaitFreshObservation(
+                afterTime = baseline,
+                timeoutMs = 220L,
+                expectedPackage = expectedPackage,
+                requireStrong = false
+            )
+
+            val frame = KaiVisionInterpreter.classify(
+                obs = obs,
+                expectedPackage = expectedPackage,
+                allowLauncherSurface = true
+            )
+            val state = frame.screenState
+
+            if (!frame.expectedPackageMatched) {
+                delay(65L)
+                continue
+            }
+
+            if (frame.isStrong && !state.isLauncher()) {
+                return KaiOpenAppOutcome.TARGET_READY
+            }
+
+            if (frame.isUsable && !state.isLauncher()) {
+                return KaiOpenAppOutcome.USABLE_INTERMEDIATE_IN_TARGET_APP
+            }
+
+            if (!hasRecentEventDriven(280L)) {
+                requestImmediateDump(expectedPackage)
+            }
+
+            delay(70L)
         }
-            .filterNotNull()
-            .filter { it.updatedAt > 0L }
-            .filter { it.packageName.isNotBlank() || it.screenPreview.isNotBlank() }
 
-        return ordered.maxByOrNull { it.updatedAt } ?: KaiObservation("", "", updatedAt = 0L)
+        val finalObs = bestObservation(expectedPackage = expectedPackage, requireStrong = false)
+        val finalFrame = KaiVisionInterpreter.classify(
+            obs = finalObs,
+            expectedPackage = expectedPackage,
+            allowLauncherSurface = true
+        )
+        val finalState = finalFrame.screenState
+
+        return when {
+            finalFrame.isStrong && !finalState.isLauncher() -> KaiOpenAppOutcome.TARGET_READY
+            finalFrame.isUsable && finalFrame.expectedPackageMatched && !finalState.isLauncher() ->
+                KaiOpenAppOutcome.USABLE_INTERMEDIATE_IN_TARGET_APP
+            else -> KaiOpenAppOutcome.OPEN_FAILED
+        }
     }
 
-    @JvmOverloads
-    fun currentScreenState(expectedPackage: String = "", requireStrong: Boolean = false): KaiScreenState {
-        return KaiVisionInterpreter.toScreenState(bestObservation(expectedPackage, requireStrong))
-    }
-
-    fun parseElementsFromJson(json: String?): List<KaiUiElement> {
+    private fun parseElementsFromJson(json: String?): List<KaiUiElement> {
         if (json.isNullOrBlank()) return emptyList()
+
         return runCatching {
-            val arr = JSONArray(json)
+            val array = JSONArray(json)
             buildList {
-                for (i in 0 until arr.length()) {
-                    val obj = arr.optJSONObject(i) ?: continue
+                for (i in 0 until array.length()) {
+                    val obj = array.optJSONObject(i) ?: continue
                     add(
                         KaiUiElement(
                             text = obj.optString("text"),
                             contentDescription = obj.optString("contentDescription"),
-                            hint = obj.optString("hint"),
                             viewId = obj.optString("viewId"),
                             className = obj.optString("className"),
+                            packageName = obj.optString("packageName"),
+                            role = obj.optString("role"),
                             clickable = obj.optBoolean("clickable"),
                             editable = obj.optBoolean("editable"),
-                            scrollable = obj.optBoolean("scrollable"),
-                            selected = obj.optBoolean("selected"),
+                            checkable = obj.optBoolean("checkable"),
                             checked = obj.optBoolean("checked"),
-                            bounds = obj.optString("bounds"),
-                            depth = obj.optInt("depth"),
-                            packageName = obj.optString("packageName"),
-                            roleGuess = obj.optString("roleGuess", "unknown")
+                            enabled = obj.optBoolean("enabled", true),
+                            selected = obj.optBoolean("selected"),
+                            focused = obj.optBoolean("focused"),
+                            password = obj.optBoolean("password"),
+                            bounds = obj.optString("bounds")
                         )
                     )
                 }
             }
         }.getOrDefault(emptyList())
-    }
-
-    fun hasRecentAuthoritative(windowMs: Long): Boolean {
-        return (System.currentTimeMillis() - latestStrongObservation.updatedAt) < windowMs
-    }
-
-    fun hasRecentUsefulObservation(windowMs: Long): Boolean {
-        return (System.currentTimeMillis() - latestObservation.updatedAt) < windowMs
-    }
-
-    fun hasRecentEventDriven(windowMs: Long): Boolean {
-        return (System.currentTimeMillis() - lastEventDrivenAt) < windowMs
-    }
-
-    fun serializeElements(elements: List<KaiUiElement>): String {
-        val arr = JSONArray()
-        elements.forEach { element ->
-            arr.put(
-                JSONObject().apply {
-                    put("text", element.text)
-                    put("contentDescription", element.contentDescription)
-                    put("hint", element.hint)
-                    put("viewId", element.viewId)
-                    put("className", element.className)
-                    put("clickable", element.clickable)
-                    put("editable", element.editable)
-                    put("scrollable", element.scrollable)
-                    put("selected", element.selected)
-                    put("checked", element.checked)
-                    put("bounds", element.bounds)
-                    put("depth", element.depth)
-                    put("packageName", element.packageName)
-                    put("roleGuess", element.roleGuess)
-                }
-            )
-        }
-        return arr.toString()
     }
 }

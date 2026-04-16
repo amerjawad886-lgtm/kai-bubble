@@ -23,6 +23,8 @@ import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import com.example.reply.agent.KaiLiveObservationRuntime
+import com.example.reply.agent.KaiLiveVisionRuntime
+import com.example.reply.agent.KaiScreenCaptureBridge
 import com.example.reply.ui.theme.ContrastAwareReplyTheme
 
 class MainActivity : ComponentActivity() {
@@ -30,6 +32,19 @@ class MainActivity : ComponentActivity() {
     private val micPermission = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { }
+
+    private val screenCapturePermission = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        val ok = KaiScreenCaptureBridge.onPermissionGranted(
+            context = this,
+            resultCode = result.resultCode,
+            data = result.data
+        )
+        if (ok) {
+            KaiLiveVisionRuntime.refreshFromCapture()
+        }
+    }
 
     private var modeState by mutableStateOf("")
 
@@ -48,7 +63,8 @@ class MainActivity : ComponentActivity() {
 
         modeState = extractMode(intent)
 
-                ensureRuntimeBridge()
+        ensureRuntimeBridge()
+        ensureVisionCapture()
 
         applyFullScreenBars()
 
@@ -88,13 +104,29 @@ class MainActivity : ComponentActivity() {
         super.onResume()
         ensureRuntimeBridge()
         applyFullScreenBars()
+
+        if (KaiScreenCaptureBridge.isReady()) {
+            KaiLiveVisionRuntime.refreshFromCapture()
+        }
     }
 
+    override fun onDestroy() {
+        super.onDestroy()
+    }
 
     private fun ensureRuntimeBridge() {
         KaiLiveObservationRuntime.ensureBridge(applicationContext)
         if (modeState.isNotBlank() || KaiBubbleManager.isShowing()) {
             KaiLiveObservationRuntime.requestImmediateDump()
+        }
+    }
+
+    private fun ensureVisionCapture() {
+        if (!KaiScreenCaptureBridge.isReady()) {
+            val intent = KaiScreenCaptureBridge.createCaptureIntent(this)
+            screenCapturePermission.launch(intent)
+        } else {
+            KaiLiveVisionRuntime.refreshFromCapture()
         }
     }
 
