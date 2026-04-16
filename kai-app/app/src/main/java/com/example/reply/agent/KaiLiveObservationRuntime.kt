@@ -441,7 +441,7 @@ object KaiLiveObservationRuntime {
         }
     }
 
-    private fun parseElementsFromJson(json: String?): List<KaiUiElement> {
+    fun parseElementsFromJson(json: String?): List<KaiUiElement> {
         if (json.isNullOrBlank()) return emptyList()
 
         return runCatching {
@@ -453,19 +453,18 @@ object KaiLiveObservationRuntime {
                         KaiUiElement(
                             text = obj.optString("text"),
                             contentDescription = obj.optString("contentDescription"),
+                            hint = obj.optString("hint"),
                             viewId = obj.optString("viewId"),
                             className = obj.optString("className"),
-                            packageName = obj.optString("packageName"),
-                            role = obj.optString("role"),
                             clickable = obj.optBoolean("clickable"),
                             editable = obj.optBoolean("editable"),
-                            checkable = obj.optBoolean("checkable"),
-                            checked = obj.optBoolean("checked"),
-                            enabled = obj.optBoolean("enabled", true),
+                            scrollable = obj.optBoolean("scrollable"),
                             selected = obj.optBoolean("selected"),
-                            focused = obj.optBoolean("focused"),
-                            password = obj.optBoolean("password"),
-                            bounds = obj.optString("bounds")
+                            checked = obj.optBoolean("checked"),
+                            bounds = obj.optString("bounds"),
+                            depth = obj.optInt("depth", 0),
+                            packageName = obj.optString("packageName"),
+                            roleGuess = obj.optString("roleGuess").ifBlank { "unknown" }
                         )
                     )
                 }

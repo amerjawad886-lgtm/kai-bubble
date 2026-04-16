@@ -522,7 +522,7 @@ class KaiActionExecutor(
     ): KaiActionExecutionResult {
         sendKaiCmdSuppressed(
             cmd = KaiAccessibilityService.CMD_SCROLL,
-            dir = step.direction.ifBlank { "down" },
+            dir = step.dir.ifBlank { "down" },
             times = step.times.coerceIn(1, 4),
             expectedPackage = step.expectedPackage.ifBlank { currentState.packageName },
             preDelayMs = 20L,

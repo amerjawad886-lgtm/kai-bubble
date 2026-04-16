@@ -1187,21 +1187,3 @@ object KaiScreenStateParser {
         }
     }
 }
-
-fun KaiScreenState.isKaiLiveUsable(expectedPackage: String = ""): Boolean {
-    if (expectedPackage.isNotBlank() && !matchesExpectedPackage(expectedPackage)) return false
-    return KaiVisionInterpreter.isUsableState(this)
-}
-
-fun KaiScreenState.isKaiLiveStrong(expectedPackage: String = "", allowLauncherSurface: Boolean = false): Boolean {
-    return KaiVisionInterpreter.isStrongState(this, expectedPackage, allowLauncherSurface)
-}
-
-fun KaiScreenState.currentSurfaceHealth(expectedPackage: String = "", allowLauncherSurface: Boolean = false): KaiVisionInterpreter.ReadinessResult {
-    return KaiVisionInterpreter.evaluateReadiness(
-        state = this,
-        expectedPackage = expectedPackage,
-        allowLauncherSurface = allowLauncherSurface,
-        requireStrong = true
-    )
-}
