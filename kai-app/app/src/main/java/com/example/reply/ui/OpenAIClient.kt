@@ -69,6 +69,7 @@ object OpenAIClient {
         KaiTask.ACTION_PLANNING -> 0.2
         KaiTask.TTS -> 0.2
         KaiTask.BRAIN -> 0.4
+        KaiTask.VISION_STATUS -> 0.1
     }
 
     private fun systemPrompt(languageHint: String, task: KaiTask): String {
@@ -97,6 +98,12 @@ object OpenAIClient {
             KaiTask.TTS -> """
                 - Keep output short and voice-friendly.
                 - Avoid verbose formatting.
+            """.trimIndent()
+            KaiTask.VISION_STATUS -> """
+                - Summarize screen/vision state briefly and operationally.
+                - Prefer compact diagnostics over prose.
+                - Do not invent semantic understanding that the runtime has not proven.
+                - Keep it short, factual, and execution-oriented.
             """.trimIndent()
         }
 

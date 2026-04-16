@@ -27,15 +27,21 @@ class KaiScreenCaptureService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        when (intent?.action ?: ACTION_START) {
+        val action = intent?.action ?: ACTION_START
+        when (action) {
             ACTION_STOP -> {
                 stopSelfSafely()
                 return START_NOT_STICKY
             }
 
             ACTION_START -> {
+                if (intent == null) {
+                    stopSelfSafely()
+                    return START_NOT_STICKY
+                }
+
                 val resultCode = intent.getIntExtra(EXTRA_RESULT_CODE, 0)
-                val projectionData = intent.getParcelableExtra<Intent>(EXTRA_PROJECTION_DATA)
+                val projectionData: Intent? = intent.getParcelableExtra(EXTRA_PROJECTION_DATA)
 
                 if (resultCode == 0 || projectionData == null) {
                     stopSelfSafely()

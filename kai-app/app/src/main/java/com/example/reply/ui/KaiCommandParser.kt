@@ -136,8 +136,33 @@ object KaiCommandParser {
         return false
     }
 
+    private fun looksLikeAppName(target: String): Boolean {
+        val value = norm(target)
+        if (value.isBlank()) return false
+        if (value.length <= 1) return false
+
+        if (KaiAppIdentityRegistry.resolveAppKey(target).isNotBlank()) return true
+
+        val directAliasHit = appAliases.values.flatten().any { alias ->
+            val candidate = norm(alias)
+            value == candidate || value.contains(candidate) || candidate.contains(value)
+        }
+        if (directAliasHit) return true
+
+        // Accept short clean noun-like names when they don't look like full questions/actions.
+        val tokenCount = value.split(" ").count { it.isNotBlank() }
+        val looksCommandy =
+            openVerbs.any { value.contains(norm(it)) } ||
+            clickVerbs.any { value.contains(norm(it)) } ||
+            typeVerbs.any { value.contains(norm(it)) } ||
+            scrollVerbs.any { value.contains(norm(it)) } ||
+            askPrefixes.any { value.startsWith(norm(it)) }
+
+        return !looksCommandy && tokenCount in 1..3
+    }
+
     private fun extractTimes(text: String): Int {
-        Regex("""(\d{1,2})""").find(text)?.value?.toIntOrNull()?.let {
+        Regex("""\b(\d{1,2})\b""").find(text)?.value?.toIntOrNull()?.let {
             return it.coerceIn(1, 10)
         }
         val lower = norm(text)
@@ -191,7 +216,7 @@ object KaiCommandParser {
         val appHit = findAppAliasIn(text)
         val uiHit = findUiElementAliasIn(text)
         if (openVerbPresent && appHit != null && uiHit != null) return true
-        if (containsAny(lower, "افتح" ,"open") && containsAny(lower, "ثم", "then", "وبعدين", "بعدها")) return true
+        if (containsAny(lower, "افتح", "open") && containsAny(lower, "ثم", "then", "وبعدين", "بعدها")) return true
         return false
     }
 
