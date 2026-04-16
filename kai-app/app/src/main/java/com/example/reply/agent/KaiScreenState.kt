@@ -206,6 +206,14 @@ data class KaiScreenState(
         return false
     }
 
+    fun isKaiLiveStrong(expectedPackage: String = "", allowLauncherSurface: Boolean = false): Boolean {
+        return KaiVisionInterpreter.isStrongState(
+            state = this,
+            expectedPackage = expectedPackage,
+            allowLauncherSurface = allowLauncherSurface
+        )
+    }
+
     fun isWeakObservation(): Boolean {
         if (packageName.isBlank() && !hasSemanticStructure()) return true
         if (rawDump.isBlank()) return true
