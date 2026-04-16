@@ -442,7 +442,9 @@ fun KaiBubbleUI(
         val myRunToken = actionRunToken
 
         KaiLiveObservationRuntime.ensureBridge(context.applicationContext)
-        if (!KaiLiveObservationRuntime.hasRecentUsefulObservation(1800L)) {
+        if (!KaiLiveObservationRuntime.isWatching) {
+            KaiLiveObservationRuntime.startWatching(immediateDump = true)
+        } else if (!KaiLiveObservationRuntime.hasRecentUsefulObservation(1800L)) {
             KaiLiveObservationRuntime.requestImmediateDump()
         }
         eyeWatching = KaiLiveObservationRuntime.isWatching
@@ -580,8 +582,12 @@ fun KaiBubbleUI(
                         }
                     }
 
+                    is KaiParsedCommand.ActionGoal -> {
+                        triggerBubbleAction(command.prompt)
+                    }
+
                     is KaiParsedCommand.OpenApp -> {
-                        triggerBubbleAction("open ${command.appName}".trim())
+                        triggerBubbleAction(raw.trim())
                     }
 
                     is KaiParsedCommand.SaveMemory -> {

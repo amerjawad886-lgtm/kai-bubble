@@ -77,7 +77,7 @@ object KaiExecutionDecisionAuthority {
     ): RuntimeDecision {
         val progress = hasMeaningfulProgress(before, after) && !telemetry.observationReusedLastGood
         val evidence = expectedEvidenceSatisfied(step, after)
-        val unusable = telemetry.observationFallback || telemetry.observationReusedLastGood
+        val unusable = telemetry.observationWeak || telemetry.observationFallback || telemetry.observationReusedLastGood
 
         if (step.isOpenAppStep()) {
             return when (result.openAppOutcome) {

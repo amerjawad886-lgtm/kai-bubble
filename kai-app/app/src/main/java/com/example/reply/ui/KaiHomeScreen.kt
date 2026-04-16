@@ -92,6 +92,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.reply.R
 import com.example.reply.agent.KaiAgentController
+import com.example.reply.agent.KaiLiveObservationRuntime
 import com.example.reply.data.supabase.KaiChatRepository
 import com.example.reply.data.supabase.KaiMemoryRepository
 import kotlinx.coroutines.Dispatchers
@@ -614,6 +615,13 @@ fun KaiHomeScreen(
 
         stopAgentLoop()
 
+        KaiLiveObservationRuntime.ensureBridge(context.applicationContext)
+        if (!KaiLiveObservationRuntime.isWatching) {
+            KaiLiveObservationRuntime.startWatching(immediateDump = true)
+        } else {
+            KaiLiveObservationRuntime.requestImmediateDump()
+        }
+
         if (KaiAgentController.isRunning()) {
             push(MsgRole.SYSTEM, "Monitoring carried into action loop")
         }
@@ -623,6 +631,7 @@ fun KaiHomeScreen(
 
         customPromptText = clean
         isExecutingAction = true
+        isAnalyzing = true
 
         push(MsgRole.USER, clean)
 
@@ -639,6 +648,8 @@ fun KaiHomeScreen(
             },
             onFinished = { result ->
                 if (myRunToken != agentRunToken) return@startDirectActionLoop
+                isExecutingAction = false
+                isAnalyzing = false
                 softAgentRefreshAfterRun()
                 push(MsgRole.SYSTEM, result.finalMessage)
                 if (voiceLoop && !KaiVoice.speakingNow()) restartVoiceLoop(620L)
@@ -710,7 +721,7 @@ fun KaiHomeScreen(
                 val running = KaiAgentController.toggleContinuousAnalysis(
                     userGoal = "Observe the current screen quietly and build written context.",
                     customPrompt = customPromptText,
-                    onRequestDump = { },
+                    onRequestDump = { requestFreshDump(0L) },
                     onInsight = { insight -> push(MsgRole.KAI, insight) }
                 )
                 push(MsgRole.SYSTEM, if (running) "Agent active" else "Agent off")
@@ -761,9 +772,14 @@ fun KaiHomeScreen(
                 }
             }
 
+            is KaiParsedCommand.ActionGoal -> {
+                push(MsgRole.USER, raw)
+                triggerMakeAction(cmd.prompt)
+            }
+
             is KaiParsedCommand.OpenApp -> {
                 push(MsgRole.USER, raw)
-                triggerMakeAction("open ${cmd.appName}".trim())
+                triggerMakeAction(raw.trim())
             }
 
             is KaiParsedCommand.SaveMemory -> {

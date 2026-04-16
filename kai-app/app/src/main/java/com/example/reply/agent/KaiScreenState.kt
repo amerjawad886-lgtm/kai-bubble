@@ -206,6 +206,13 @@ data class KaiScreenState(
         return false
     }
 
+    fun isStableUsableAppSurface(expectedPackage: String = ""): Boolean {
+        if (!KaiVisionInterpreter.isUsableState(this)) return false
+        if (expectedPackage.isNotBlank() && !matchesExpectedPackage(expectedPackage)) return false
+        if (isLauncher()) return false
+        return packageName.isNotBlank()
+    }
+
     fun isKaiLiveStrong(expectedPackage: String = "", allowLauncherSurface: Boolean = false): Boolean {
         return KaiVisionInterpreter.isStrongState(
             state = this,

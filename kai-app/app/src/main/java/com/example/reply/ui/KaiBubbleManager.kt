@@ -79,8 +79,14 @@ object KaiBubbleManager {
         }
     }
 
+    private fun recalculateTopOffset(context: Context) {
+        topOffsetPx = (getScreenHeight(context) * 0.01f).toInt().coerceAtLeast(8)
+        if (lastY < topOffsetPx) lastY = topOffsetPx
+    }
+
     fun show(context: Context, onReady: (() -> Unit)? = null) {
         val appContext = context.applicationContext
+        recalculateTopOffset(appContext)
         val wm = appContext.getSystemService(Context.WINDOW_SERVICE) as WindowManager
         windowManager = wm
 
@@ -156,6 +162,7 @@ object KaiBubbleManager {
             strongSuppressionCounter = 0
             lastX = 0
             lastY = topOffsetPx
+            pendingUiApply = false
         }
     }
 
@@ -370,11 +377,8 @@ object KaiBubbleManager {
     }
 
     private fun createDefaultLayoutParams(context: Context): WindowManager.LayoutParams {
-        // FIX: Use 1% of screen height instead of 4.5% to place the island near the top edge.
-        // Old value (0.045f) produced ~86px on a 1920px screen, visibly pushing it down.
-        // Floor is 8px to avoid clipping into the status bar notch area.
-        topOffsetPx = (getScreenHeight(context) * 0.01f).toInt().coerceAtLeast(8)
-        lastY = topOffsetPx
+        recalculateTopOffset(context)
+        if (lastY == 0) lastY = topOffsetPx
 
         return WindowManager.LayoutParams(
             OVERLAY_WIDTH_PX,
@@ -387,7 +391,7 @@ object KaiBubbleManager {
         ).apply {
             gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
             x = 0
-            y = topOffsetPx
+            y = clampY(lastY)
             softInputMode = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING
 
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {

@@ -43,6 +43,8 @@ class MainActivity : ComponentActivity() {
         )
         if (ok) {
             KaiLiveVisionRuntime.refreshFromCapture()
+        } else {
+            KaiLiveVisionRuntime.reset()
         }
     }
 
@@ -63,7 +65,8 @@ class MainActivity : ComponentActivity() {
 
         modeState = extractMode(intent)
 
-        ensureRuntimeBridge()
+        // نربط observation runtime فقط، بدون dump lifecycle noise من MainActivity.
+        KaiLiveObservationRuntime.ensureBridge(applicationContext)
 
         applyFullScreenBars()
 
@@ -74,6 +77,11 @@ class MainActivity : ComponentActivity() {
             SideEffect {
                 applyFullScreenBars(view)
                 disableViewClickSounds(view)
+
+                // إن كانت الرؤية البصرية جاهزة أصلًا، حدّث حالتها فقط.
+                if (KaiScreenCaptureBridge.isReady()) {
+                    KaiLiveVisionRuntime.refreshFromCapture()
+                }
             }
 
             ContrastAwareReplyTheme {
@@ -90,18 +98,20 @@ class MainActivity : ComponentActivity() {
         setIntent(intent)
         modeState = extractMode(intent)
 
-        ensureRuntimeBridge()
+        KaiLiveObservationRuntime.ensureBridge(applicationContext)
         applyFullScreenBars()
     }
 
     override fun onStart() {
         super.onStart()
-        ensureRuntimeBridge()
+        KaiLiveObservationRuntime.ensureBridge(applicationContext)
     }
 
     override fun onResume() {
         super.onResume()
-        ensureRuntimeBridge()
+        if (KaiScreenCaptureBridge.isReady()) {
+            KaiLiveVisionRuntime.refreshFromCapture()
+        }
         applyFullScreenBars()
     }
 
@@ -109,16 +119,9 @@ class MainActivity : ComponentActivity() {
         super.onDestroy()
     }
 
-    private fun ensureRuntimeBridge() {
-        KaiLiveObservationRuntime.ensureBridge(applicationContext)
-        if (modeState.isNotBlank() || KaiBubbleManager.isShowing()) {
-            KaiLiveObservationRuntime.requestImmediateDump()
-        }
-    }
-
     /**
-     * Request screen capture permission explicitly.
-     * Called only from the live-vision entry path (eye button), NOT on app startup.
+     * يبدأ MediaProjection فقط عند الطلب الصريح من مسار العين/الرؤية،
+     * وليس من startup lifecycle.
      */
     fun requestVisionCapture() {
         if (!KaiScreenCaptureBridge.isReady()) {

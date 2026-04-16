@@ -199,41 +199,87 @@ class KaiAccessibilityService : AccessibilityService() {
                                 CMD_CLICK_TEXT -> if (text.isNotBlank()) {
                                     val ok = clickByVisibleText(text)
                                     Log.d(TAG, "clickByVisibleText('$text') => $ok")
+                                    if (ok) scheduleObservationRefresh(
+                                        expectedPackage = expectedPackage.ifBlank { lastKnownExternalPackage.orEmpty() },
+                                        bursts = 2,
+                                        gapMs = 170L
+                                    )
                                 }
 
                                 CMD_LONG_PRESS_TEXT -> if (text.isNotBlank()) {
                                     val ok = longPressByVisibleText(text, holdMs)
                                     Log.d(TAG, "longPressByVisibleText('$text') => $ok")
+                                    if (ok) scheduleObservationRefresh(
+                                        expectedPackage = expectedPackage.ifBlank { lastKnownExternalPackage.orEmpty() },
+                                        bursts = 2,
+                                        gapMs = 170L
+                                    )
                                 }
 
                                 CMD_OPEN_APP -> if (text.isNotBlank()) {
+                                    val resolvedKey = KaiAppIdentityRegistry.resolveAppKey(text)
+                                    val resolvedExpected = expectedPackage.ifBlank {
+                                        KaiAppIdentityRegistry.primaryPackageForKey(resolvedKey)
+                                    }
                                     val ok = openInstalledApp(text)
                                     Log.d(TAG, "openInstalledApp('$text') => $ok")
+                                    if (ok) {
+                                        scheduleObservationRefresh(
+                                            expectedPackage = resolvedExpected,
+                                            bursts = 4,
+                                            gapMs = 190L
+                                        )
+                                    }
                                 }
 
                                 CMD_INPUT_TEXT, CMD_TYPE -> if (text.isNotBlank()) {
                                     val ok = inputTextIntoFocusedField(text)
                                     Log.d(TAG, "inputTextIntoFocusedField('$text') => $ok")
+                                    if (ok) scheduleObservationRefresh(
+                                        expectedPackage = expectedPackage.ifBlank { lastKnownExternalPackage.orEmpty() },
+                                        bursts = 2,
+                                        gapMs = 160L
+                                    )
                                 }
 
                                 CMD_SCROLL -> {
                                     val ok = scroll(dir, times)
                                     Log.d(TAG, "scroll('$dir', $times) => $ok")
+                                    if (ok) scheduleObservationRefresh(
+                                        expectedPackage = expectedPackage.ifBlank { lastKnownExternalPackage.orEmpty() },
+                                        bursts = 2,
+                                        gapMs = 220L
+                                    )
                                 }
 
                                 CMD_TAP_XY -> {
                                     val ok = dispatchTapAt(x, y)
                                     Log.d(TAG, "tap_xy => $ok")
+                                    if (ok) scheduleObservationRefresh(
+                                        expectedPackage = expectedPackage.ifBlank { lastKnownExternalPackage.orEmpty() },
+                                        bursts = 2,
+                                        gapMs = 170L
+                                    )
                                 }
 
                                 CMD_LONG_PRESS_XY -> {
                                     val ok = dispatchLongPressAt(x, y, holdMs)
                                     Log.d(TAG, "long_press_xy => $ok")
+                                    if (ok) scheduleObservationRefresh(
+                                        expectedPackage = expectedPackage.ifBlank { lastKnownExternalPackage.orEmpty() },
+                                        bursts = 2,
+                                        gapMs = 180L
+                                    )
                                 }
 
                                 CMD_SWIPE_XY -> {
                                     val ok = dispatchSwipe(x, y, endX, endY, holdMs)
                                     Log.d(TAG, "swipe_xy => $ok")
+                                    if (ok) scheduleObservationRefresh(
+                                        expectedPackage = expectedPackage.ifBlank { lastKnownExternalPackage.orEmpty() },
+                                        bursts = 2,
+                                        gapMs = 220L
+                                    )
                                 }
                             }
                         } catch (e: Exception) {
@@ -349,6 +395,46 @@ class KaiAccessibilityService : AccessibilityService() {
     }
 
     override fun onInterrupt() {}
+
+
+    private fun scheduleObservationRefresh(
+        expectedPackage: String = "",
+        bursts: Int = 2,
+        gapMs: Long = 180L
+    ) {
+        val count = bursts.coerceIn(1, 5)
+        repeat(count) { index ->
+            main.postDelayed({
+                if (dumpInProgress) return@postDelayed
+                val captureGen = dumpGeneration
+                Thread {
+                    dumpInProgress = true
+                    expectedDumpPackage = expectedPackage
+                    try {
+                        val candidate = captureBestDump(
+                            timeoutMs = 900L + (index * 180L),
+                            expectedPackage = expectedPackage
+                        )
+                        if (dumpGeneration == captureGen) {
+                            lastDeliveredFingerprint = candidate.fingerprint
+                        }
+                        sendDumpToApp(
+                            dump = candidate.dump,
+                            packageName = candidate.packageName,
+                            elements = candidate.elements,
+                            screenKind = candidate.screenKind,
+                            semanticConfidence = candidate.semanticConfidence
+                        )
+                    } catch (e: Exception) {
+                        Log.e(TAG, "scheduleObservationRefresh failed: ${e.message}", e)
+                    } finally {
+                        expectedDumpPackage = ""
+                        dumpInProgress = false
+                    }
+                }.start()
+            }, (index + 1L) * gapMs)
+        }
+    }
 
     override fun onDestroy() {
         try {
