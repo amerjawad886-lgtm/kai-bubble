@@ -92,7 +92,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.reply.R
 import com.example.reply.agent.KaiAgentController
-import com.example.reply.agent.KaiAgentLoopEngine
 import com.example.reply.data.supabase.KaiChatRepository
 import com.example.reply.data.supabase.KaiMemoryRepository
 import kotlinx.coroutines.Dispatchers
@@ -215,7 +214,6 @@ fun KaiHomeScreen(
     var lastListenStartAt by remember { mutableLongStateOf(0L) }
     var recognizerErrorCount by remember { mutableIntStateOf(0) }
 
-    var agentLoopEngine by remember { mutableStateOf<KaiAgentLoopEngine?>(null) }
     var agentRunToken by remember { mutableIntStateOf(0) }
     var restartVoiceJob by remember { mutableStateOf<Job?>(null) }
     var restartVoiceGuard by remember { mutableStateOf(false) }
@@ -358,8 +356,7 @@ fun KaiHomeScreen(
 
     fun stopAgentLoop(notify: Boolean = false) {
         agentRunToken += 1
-        KaiRuntimeLoopCoordinator.cancelLoop(agentLoopEngine)
-        agentLoopEngine = null
+        KaiAgentController.cancelDirectActionLoop()
         clearTransientUiState()
         if (notify) push(MsgRole.SYSTEM, "Agent loop cancelled")
     }
@@ -506,8 +503,7 @@ fun KaiHomeScreen(
         cancelRestartVoiceLoop()
         hardStopSpeech()
         stopListening()
-        try { agentLoopEngine?.cancel() } catch (_: Exception) {}
-        agentLoopEngine = null
+        KaiAgentController.cancelDirectActionLoop()
         KaiAgentController.finishActionLoopSession("Manual soft reset")
         KaiBubbleManager.releaseAllSuppression()
         KaiBubbleManager.softResetUiState()
@@ -627,46 +623,27 @@ fun KaiHomeScreen(
 
         customPromptText = clean
         isExecutingAction = true
-        isAnalyzing = true
 
-        val engine = KaiRuntimeLoopCoordinator.startLoop(
+        push(MsgRole.USER, clean)
+
+        KaiAgentController.startDirectActionLoop(
             context = context.applicationContext,
             prompt = clean,
-            appendLog = { role, text ->
+            onLog = { role, text ->
+                if (myRunToken != agentRunToken) return@startDirectActionLoop
                 when (role) {
                     "system" -> push(MsgRole.SYSTEM, text)
                     "user" -> push(MsgRole.USER, text)
                     else -> push(MsgRole.KAI, text)
                 }
             },
-            onPhase = { phase ->
-                if (myRunToken != agentRunToken) return@startLoop
-                when (phase) {
-                    KaiRuntimePhase.PLANNING,
-                    KaiRuntimePhase.OBSERVING -> {
-                        isAnalyzing = true
-                        isExecutingAction = false
-                    }
-                    KaiRuntimePhase.EXECUTING -> {
-                        isAnalyzing = false
-                        isExecutingAction = true
-                    }
-                    else -> {
-                        isAnalyzing = false
-                        isExecutingAction = false
-                    }
-                }
-            },
             onFinished = { result ->
-                if (myRunToken != agentRunToken) return@startLoop
-                agentLoopEngine = null
+                if (myRunToken != agentRunToken) return@startDirectActionLoop
                 softAgentRefreshAfterRun()
                 push(MsgRole.SYSTEM, result.finalMessage)
                 if (voiceLoop && !KaiVoice.speakingNow()) restartVoiceLoop(620L)
             }
         )
-
-        agentLoopEngine = engine
     }
 
     fun toggleTalk() {
@@ -945,7 +922,7 @@ fun KaiHomeScreen(
 
         onDispose {
             try { context.unregisterReceiver(appendReceiver) } catch (_: Exception) {}
-            try { agentLoopEngine?.cancel() } catch (_: Exception) {}
+            KaiAgentController.cancelDirectActionLoop()
             KaiBubbleManager.releaseAllSuppression()
         }
     }

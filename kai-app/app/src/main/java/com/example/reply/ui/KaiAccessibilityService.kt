@@ -1,6 +1,3 @@
-// Shrink pass: command surface kept stable for compatibility with the rewritten executor.
-// The service remains large because it owns Android accessibility IO, dump capture, and gesture dispatch.
-
 package com.example.reply.ui
 
 import android.accessibilityservice.AccessibilityService
@@ -587,63 +584,6 @@ class KaiAccessibilityService : AccessibilityService() {
         )
     }
 
-    private fun reacquirePackageBearingDump(timeoutMs: Long, expectedPackage: String): DumpCandidate? {
-        val startedAt = System.currentTimeMillis()
-        var best: DumpCandidate? = null
-
-        while (System.currentTimeMillis() - startedAt < timeoutMs) {
-            val root = getTargetRoot(expectedPackage)
-            val rawPkg = root?.packageName?.toString().orEmpty()
-            val previewDump = dumpScreenText(root)
-            val pkg = resolveEffectivePackage(rawPkg, previewDump, expectedPackage)
-
-            if (pkg.isBlank() || (expectedPackage.isNotBlank() && !packageMatchesExpected(pkg, expectedPackage))) {
-                try {
-                    Thread.sleep(85L)
-                } catch (_: Exception) {
-                }
-                continue
-            }
-
-            val fingerprint = fingerprintFor(pkg, previewDump)
-            val semantic = extractSemanticUi(root, pkg, previewDump)
-            val score = scoreDumpQuality(pkg, previewDump, fingerprint) +
-                (semantic.elements.size.coerceAtMost(24) * 4) +
-                (semantic.confidence * 90f).toInt()
-
-            val candidate = DumpCandidate(
-                root = root,
-                packageName = pkg,
-                dump = previewDump,
-                score = score,
-                fingerprint = fingerprint,
-                elements = semantic.elements,
-                screenKind = semantic.screenKind,
-                semanticConfidence = semantic.confidence
-            )
-
-            if (best == null || candidate.score > best!!.score) best = candidate
-            if (candidate.score >= 250 && candidate.fingerprint != lastDeliveredFingerprint && !isWeakDumpCandidate(candidate)) {
-                return candidate
-            }
-
-            try {
-                Thread.sleep(70L)
-            } catch (_: Exception) {
-            }
-        }
-
-        return best
-    }
-
-
-
-    private fun shouldPreferCandidateForExpectedPackage(candidate: DumpCandidate, expectedPackage: String): Boolean {
-        if (expectedPackage.isBlank()) return false
-        if (!packageMatchesExpected(candidate.packageName, expectedPackage)) return false
-        if (isWeakDumpCandidate(candidate)) return false
-        return candidate.semanticConfidence >= 0.28f || candidate.elements.size >= 2 || candidate.dump.lines().size >= 2
-    }
     private fun scoreDumpQuality(packageName: String, dump: String, fingerprint: String): Int {
         var score = 0
         val clean = dump.trim()
@@ -1042,75 +982,6 @@ class KaiAccessibilityService : AccessibilityService() {
 
     private fun roleLikeList(classNorm: String): Boolean {
         return containsAny(classNorm, "recyclerview", "listview", "collection", "grid")
-    }
-
-    private fun isCameraOrMediaOverlaySurface(
-        isInstagram: Boolean,
-        hasMediaOverlay: Boolean,
-        hasComposerInput: Boolean
-    ): Boolean {
-        return isInstagram && hasMediaOverlay && !hasComposerInput
-    }
-
-    private fun isSearchLikeSurface(
-        hasSearch: Boolean,
-        hasInput: Boolean,
-        hasComposerInput: Boolean,
-        hasRealSend: Boolean
-    ): Boolean {
-        if (!hasSearch) return false
-        if (hasComposerInput && hasRealSend) return false
-        return hasInput || hasSearch
-    }
-
-    private fun isStrictVerifiedDmThreadSurface(
-        isInstagram: Boolean,
-        hasComposerInput: Boolean,
-        hasRealSend: Boolean,
-        hasMediaOverlay: Boolean,
-        hasSearch: Boolean
-    ): Boolean {
-        if (!isInstagram) return false
-        if (hasMediaOverlay && !hasComposerInput) return false
-        if (hasSearch && !hasRealSend) return false
-        return hasComposerInput && hasRealSend
-    }
-
-    private fun isStrictVerifiedNotesEditorSurface(
-        isNotes: Boolean,
-        hasNotesTitle: Boolean,
-        hasNotesBody: Boolean,
-        hasNotesSearch: Boolean
-    ): Boolean {
-        if (!isNotes) return false
-        if (hasNotesSearch && !(hasNotesTitle || hasNotesBody)) return false
-        return hasNotesTitle || hasNotesBody
-    }
-
-    private fun inferScreenKind(
-        packageName: String,
-        dump: String,
-        elements: List<KaiUiElement>
-    ): String {
-        return KaiScreenStateParser.fromDump(
-            packageName = packageName,
-            dump = dump,
-            elements = elements
-        ).screenKind
-    }
-
-    private fun inferSemanticConfidence(
-        dump: String,
-        elements: List<KaiUiElement>,
-        screenKind: String
-    ): Float {
-        var score = 0f
-        if (dump.isNotBlank() && !dump.equals("(no active window)", true) && !dump.equals("(empty dump)", true)) score += 0.2f
-        if (elements.isNotEmpty()) score += 0.34f
-        if (elements.count { it.clickable || it.editable } >= 3) score += 0.18f
-        if (elements.any { it.roleGuess != "unknown" }) score += 0.18f
-        if (screenKind != "unknown") score += 0.1f
-        return score.coerceIn(0f, 1f)
     }
 
     private fun serializeElements(elements: List<KaiUiElement>): String {
