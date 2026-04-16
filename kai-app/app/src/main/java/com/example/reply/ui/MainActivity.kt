@@ -64,7 +64,6 @@ class MainActivity : ComponentActivity() {
         modeState = extractMode(intent)
 
         ensureRuntimeBridge()
-        ensureVisionCapture()
 
         applyFullScreenBars()
 
@@ -104,10 +103,6 @@ class MainActivity : ComponentActivity() {
         super.onResume()
         ensureRuntimeBridge()
         applyFullScreenBars()
-
-        if (KaiScreenCaptureBridge.isReady()) {
-            KaiLiveVisionRuntime.refreshFromCapture()
-        }
     }
 
     override fun onDestroy() {
@@ -121,7 +116,11 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun ensureVisionCapture() {
+    /**
+     * Request screen capture permission explicitly.
+     * Called only from the live-vision entry path (eye button), NOT on app startup.
+     */
+    fun requestVisionCapture() {
         if (!KaiScreenCaptureBridge.isReady()) {
             val intent = KaiScreenCaptureBridge.createCaptureIntent(this)
             screenCapturePermission.launch(intent)

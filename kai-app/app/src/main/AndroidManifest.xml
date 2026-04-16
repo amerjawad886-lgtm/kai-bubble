@@ -17,6 +17,10 @@
         tools:targetApi="34" />
 
     <uses-permission
+        android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION"
+        tools:targetApi="34" />
+
+    <uses-permission
         android:name="android.permission.POST_NOTIFICATIONS"
         tools:targetApi="33" />
 
@@ -55,6 +59,12 @@
             android:name=".ui.KaiService"
             android:exported="false"
             android:foregroundServiceType="microphone"
+            tools:targetApi="34" />
+
+        <service
+            android:name=".ui.KaiScreenCaptureService"
+            android:exported="false"
+            android:foregroundServiceType="mediaProjection"
             tools:targetApi="34" />
 
         <service

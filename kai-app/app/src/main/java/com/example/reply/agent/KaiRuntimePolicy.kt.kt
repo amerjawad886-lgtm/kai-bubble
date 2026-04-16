@@ -1,7 +1,3 @@
-// Shrink pass: kept the public policy surface stable, with this file intentionally
-// remaining the central surface-classification + recovery map after the REWRITE phase.
-// The heavier architectural changes were moved into KaiExecutionAuthority/KaiAgentLoopEngine.
-
 package com.example.reply.agent
 
 import kotlin.math.abs
@@ -725,9 +721,6 @@ object KaiRecoveryPolicy {
         return RecoveryDecision(false)
     }
 }
-
-// Execution authority and stage engine were extracted to KaiExecutionAuthority.kt
-
 
 object KaiLiveSurfacePolicy {
     fun isUsableForOpenApp(state: KaiScreenState, expectedPackage: String = ""): Boolean {

@@ -68,7 +68,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.reply.R
 import com.example.reply.agent.KaiAgentController
-import com.example.reply.agent.KaiAgentLoopEngine
 import com.example.reply.agent.KaiLiveObservationRuntime
 import com.example.reply.data.supabase.KaiMemoryRepository
 import kotlinx.coroutines.Dispatchers
@@ -110,7 +109,6 @@ fun KaiBubbleUI(
     var actionRunToken by remember { mutableIntStateOf(0) }
     var recognizerEpoch by remember { mutableIntStateOf(0) }
 
-    var agentLoopEngine by remember { mutableStateOf<KaiAgentLoopEngine?>(null) }
     var restartListenJob by remember { mutableStateOf<Job?>(null) }
     var restartListenGuard by remember { mutableStateOf(false) }
     var needsBubbleRecognizerRestart by remember { mutableStateOf(false) }
@@ -339,8 +337,7 @@ fun KaiBubbleUI(
 
     fun cancelCurrentActionLoop(reason: String? = null) {
         actionRunToken += 1
-        KaiRuntimeLoopCoordinator.cancelLoop(agentLoopEngine)
-        agentLoopEngine = null
+        KaiAgentController.cancelDirectActionLoop()
         softResetBubbleRuntime()
         if (reason != null) appendToMainChat(reason, "system")
     }
@@ -455,32 +452,25 @@ fun KaiBubbleUI(
             appendToMainChat("Monitoring paused before action loop", "system")
         }
 
-        agentLoopEngine?.cancel()
-        agentLoopEngine = null
-
-        KaiBubbleManager.releaseAllSuppression()
-        KaiBubbleManager.softResetUiState()
+        KaiAgentController.cancelDirectActionLoop()
 
         loopRunning = true
-        statusText = "Agent planning"
+        statusText = "Agent working"
         customPromptText = clean
         expanded = true
         promptComposerOpen = true
 
-        val engine = KaiRuntimeLoopCoordinator.startLoop(
+        appendToMainChat(clean, "user")
+
+        KaiAgentController.startDirectActionLoop(
             context = context.applicationContext,
             prompt = clean,
-            appendLog = { role, text -> appendToMainChat(text, role) },
-            onPhase = { phase ->
-                if (myRunToken != actionRunToken) return@startLoop
-                statusText = when (phase) {
-                    KaiRuntimePhase.CANCELLED -> "Agent cancelled"
-                    else -> "Agent working"
-                }
+            onLog = { role, text ->
+                if (myRunToken != actionRunToken) return@startDirectActionLoop
+                appendToMainChat(text, role)
             },
             onFinished = { result ->
-                if (myRunToken != actionRunToken) return@startLoop
-                agentLoopEngine = null
+                if (myRunToken != actionRunToken) return@startDirectActionLoop
                 softResetBubbleRuntime()
                 appendToMainChat(result.finalMessage, "system")
                 expanded = true
@@ -488,8 +478,6 @@ fun KaiBubbleUI(
                 if (bubbleLoop) restartBubbleListening(700L)
             }
         )
-
-        agentLoopEngine = engine
     }
 
     LaunchedEffect(promptComposerOpen, expanded, loopRunning) {
@@ -499,10 +487,7 @@ fun KaiBubbleUI(
     DisposableEffect(Unit) {
         onDispose {
             cancelPendingRestart()
-            try {
-                agentLoopEngine?.cancel()
-            } catch (_: Exception) {
-            }
+            KaiAgentController.cancelDirectActionLoop()
             KaiBubbleManager.setInputModeEnabled(false)
             KaiBubbleManager.softResetUiState()
         }

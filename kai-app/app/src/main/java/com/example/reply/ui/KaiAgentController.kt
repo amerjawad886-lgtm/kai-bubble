@@ -2,9 +2,14 @@
 package com.example.reply.agent
 
 import android.content.Context
+import android.content.Intent
 import android.util.Log
 import com.example.reply.ai.KaiTask
+import com.example.reply.ui.KaiAccessibilityService
+import com.example.reply.ui.KaiBubbleManager
+import com.example.reply.ui.KaiVoice
 import com.example.reply.ui.OpenAIClient
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -418,27 +423,192 @@ object KaiAgentController {
         }
     }
 
-    fun startUnifiedActionLoop(
-        context: android.content.Context,
+    @Volatile
+    private var activeLoopJob: Job? = null
+
+    fun isActionLoopActive(): Boolean = activeLoopJob?.isActive == true
+
+    fun cancelDirectActionLoop() {
+        activeLoopJob?.cancel()
+        activeLoopJob = null
+        KaiBubbleManager.releaseAllSuppression()
+        KaiBubbleManager.softResetUiState()
+        finishActionLoopSession("Cancelled")
+    }
+
+    fun startDirectActionLoop(
+        context: Context,
         prompt: String,
         onLog: (role: String, text: String) -> Unit,
-        onStatus: (String) -> Unit = {},
         onFinished: (KaiLoopResult) -> Unit
-    ): KaiAgentLoopEngine {
+    ) {
+        cancelDirectActionLoop()
+
         val clean = prompt.trim()
-        ensureRuntimeObservationBridge(context.applicationContext)
+        if (clean.isBlank()) {
+            onFinished(KaiLoopResult(false, "Empty prompt.", 0))
+            return
+        }
+
+        val appContext = context.applicationContext
+
+        runCatching { KaiVoice.resetTransientStateForNewRun() }
+        runCatching { OpenAIClient.resetTransientStateForNewRun() }
+        resetTransientStateForNewRun()
+        ensureRuntimeObservationBridge(appContext)
+        KaiBubbleManager.releaseAllSuppression()
+        if (KaiBubbleManager.isShowing()) KaiBubbleManager.softResetUiState()
 
         startActionLoopSession(clean)
         setCustomPrompt(clean)
         setGoal(clean)
 
-        val engine = KaiAgentLoopEngine(
-            context = context.applicationContext,
-            onLog = onLog,
-            onStatus = onStatus
-        )
-        engine.start(clean, onFinished)
-        return engine
+        KaiLiveObservationRuntime.ensureBridge(appContext)
+        KaiLiveObservationRuntime.startWatching(immediateDump = true)
+
+        activeLoopJob = scope.launch {
+            try {
+                withContext(Dispatchers.Main) { onLog("system", "Agent loop starting…") }
+
+                val currentState = KaiLiveObservationRuntime.currentScreenState()
+                markActionLoopObserved(currentState)
+
+                withContext(Dispatchers.Main) { onLog("system", "Planning…") }
+
+                val plan = buildActionPlan(
+                    userPrompt = clean,
+                    currentScreenState = currentState
+                )
+
+                withContext(Dispatchers.Main) { onLog("system", "Plan: ${plan.summary}") }
+
+                if (plan.steps.isEmpty()) {
+                    withContext(Dispatchers.Main) {
+                        finishActionLoopSession("No actionable steps planned.")
+                        onFinished(KaiLoopResult(false, "No actionable steps planned.", 0))
+                    }
+                    return@launch
+                }
+
+                var executedSteps = 0
+
+                for (step in plan.steps) {
+                    if (!isActive) break
+
+                    val cmd = step.normalizedCommand()
+                    val payload = step.semanticPayload().ifBlank { step.note }
+                    withContext(Dispatchers.Main) {
+                        onLog("system", "Step ${executedSteps + 1}: $cmd → $payload")
+                    }
+
+                    if (cmd == "wait") {
+                        delay(step.waitMs.coerceIn(300L, 5000L))
+                    } else {
+                        dispatchStepCommand(appContext, step)
+                        delay(step.waitMs.coerceIn(300L, 5000L))
+                    }
+
+                    executedSteps++
+                    KaiLiveObservationRuntime.requestImmediateDump()
+                    delay(300L)
+                }
+
+                KaiLiveObservationRuntime.requestImmediateDump()
+                val msg = "Completed $executedSteps steps: ${plan.summary}"
+
+                withContext(Dispatchers.Main) {
+                    finishActionLoopSession(msg)
+                    onFinished(KaiLoopResult(true, msg, executedSteps))
+                }
+            } catch (_: CancellationException) {
+                withContext(Dispatchers.Main) {
+                    finishActionLoopSession("Agent loop cancelled.")
+                    onFinished(KaiLoopResult(false, "Agent loop cancelled.", 0))
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Direct action loop error: ${e.message}", e)
+                val msg = "Error: ${e.message}"
+                withContext(Dispatchers.Main) {
+                    finishActionLoopSession(msg)
+                    onFinished(KaiLoopResult(false, msg, 0))
+                }
+            } finally {
+                activeLoopJob = null
+                KaiLiveObservationRuntime.softCleanupAfterRun()
+                KaiBubbleManager.releaseAllSuppression()
+                KaiBubbleManager.softResetUiState()
+            }
+        }
+    }
+
+    private fun dispatchStepCommand(context: Context, step: KaiActionStep) {
+        val cmd = step.normalizedCommand()
+        val intent = Intent(KaiAccessibilityService.ACTION_KAI_COMMAND).apply {
+            setPackage(context.packageName)
+        }
+
+        when (cmd) {
+            "open_app" -> {
+                intent.putExtra(KaiAccessibilityService.EXTRA_CMD, KaiAccessibilityService.CMD_OPEN_APP)
+                intent.putExtra(KaiAccessibilityService.EXTRA_TEXT, step.text)
+            }
+            "click_text", "click_best_match", "open_best_list_item" -> {
+                intent.putExtra(KaiAccessibilityService.EXTRA_CMD, KaiAccessibilityService.CMD_CLICK_TEXT)
+                intent.putExtra(KaiAccessibilityService.EXTRA_TEXT, step.semanticPayload())
+            }
+            "long_press_text" -> {
+                intent.putExtra(KaiAccessibilityService.EXTRA_CMD, KaiAccessibilityService.CMD_LONG_PRESS_TEXT)
+                intent.putExtra(KaiAccessibilityService.EXTRA_TEXT, step.semanticPayload())
+                intent.putExtra(KaiAccessibilityService.EXTRA_HOLD_MS, step.holdMs)
+            }
+            "input_text", "focus_best_input", "input_into_best_field" -> {
+                intent.putExtra(KaiAccessibilityService.EXTRA_CMD, KaiAccessibilityService.CMD_INPUT_TEXT)
+                intent.putExtra(KaiAccessibilityService.EXTRA_TEXT, step.text)
+            }
+            "press_primary_action" -> {
+                intent.putExtra(KaiAccessibilityService.EXTRA_CMD, KaiAccessibilityService.CMD_CLICK_TEXT)
+                intent.putExtra(KaiAccessibilityService.EXTRA_TEXT, step.text.ifBlank { "submit" })
+            }
+            "scroll" -> {
+                intent.putExtra(KaiAccessibilityService.EXTRA_CMD, KaiAccessibilityService.CMD_SCROLL)
+                intent.putExtra(KaiAccessibilityService.EXTRA_DIR, step.dir.ifBlank { "down" })
+                intent.putExtra(KaiAccessibilityService.EXTRA_TIMES, step.times.coerceIn(1, 10))
+            }
+            "tap_xy" -> {
+                intent.putExtra(KaiAccessibilityService.EXTRA_CMD, KaiAccessibilityService.CMD_TAP_XY)
+                step.x?.let { intent.putExtra(KaiAccessibilityService.EXTRA_X, it) }
+                step.y?.let { intent.putExtra(KaiAccessibilityService.EXTRA_Y, it) }
+            }
+            "long_press_xy" -> {
+                intent.putExtra(KaiAccessibilityService.EXTRA_CMD, KaiAccessibilityService.CMD_LONG_PRESS_XY)
+                step.x?.let { intent.putExtra(KaiAccessibilityService.EXTRA_X, it) }
+                step.y?.let { intent.putExtra(KaiAccessibilityService.EXTRA_Y, it) }
+                intent.putExtra(KaiAccessibilityService.EXTRA_HOLD_MS, step.holdMs)
+            }
+            "swipe_xy" -> {
+                intent.putExtra(KaiAccessibilityService.EXTRA_CMD, KaiAccessibilityService.CMD_SWIPE_XY)
+                step.x?.let { intent.putExtra(KaiAccessibilityService.EXTRA_X, it) }
+                step.y?.let { intent.putExtra(KaiAccessibilityService.EXTRA_Y, it) }
+                step.endX?.let { intent.putExtra(KaiAccessibilityService.EXTRA_END_X, it) }
+                step.endY?.let { intent.putExtra(KaiAccessibilityService.EXTRA_END_Y, it) }
+                intent.putExtra(KaiAccessibilityService.EXTRA_HOLD_MS, step.holdMs)
+            }
+            "back" -> {
+                intent.putExtra(KaiAccessibilityService.EXTRA_CMD, KaiAccessibilityService.CMD_BACK)
+            }
+            "home" -> {
+                intent.putExtra(KaiAccessibilityService.EXTRA_CMD, KaiAccessibilityService.CMD_HOME)
+            }
+            "recents" -> {
+                intent.putExtra(KaiAccessibilityService.EXTRA_CMD, KaiAccessibilityService.CMD_RECENTS)
+            }
+            "verify_state", "read_screen", "wait_for_text" -> {
+                intent.putExtra(KaiAccessibilityService.EXTRA_CMD, KaiAccessibilityService.CMD_DUMP)
+            }
+            else -> return
+        }
+
+        context.sendBroadcast(intent)
     }
 
     private fun inferPrimaryAppHint(prompt: String): String =
