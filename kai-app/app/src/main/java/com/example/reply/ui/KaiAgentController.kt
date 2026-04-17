@@ -50,7 +50,6 @@ object KaiAgentController {
         get() = KaiAgentSessionState.snapshot
         set(value) { KaiAgentSessionState.snapshot = value }
 
-    fun getSnapshot(): KaiAgentSnapshot = snapshot
     fun getLatestObservation(): KaiObservation = KaiLiveObservationRuntime.bestObservation()
 
     fun getLatestScreenState(): KaiScreenState =
