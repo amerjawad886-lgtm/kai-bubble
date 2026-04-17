@@ -20,10 +20,13 @@ import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import android.view.accessibility.AccessibilityWindowInfo
+import com.example.reply.agent.KaiAccessibilitySnapshotBridge
 import com.example.reply.agent.KaiAppIdentityRegistry
 import com.example.reply.agent.KaiUiElement
 import com.example.reply.agent.KaiGestureUtils
 import com.example.reply.agent.KaiLiveObservationRuntime
+import com.example.reply.agent.KaiLiveVisionRuntime
+import com.example.reply.agent.KaiScreenState
 import com.example.reply.agent.KaiScreenStateParser
 import org.json.JSONArray
 import org.json.JSONObject
@@ -31,7 +34,7 @@ import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.max
 
-class KaiAccessibilityService : AccessibilityService() {
+class KaiAccessibilityService : AccessibilityService(), KaiAccessibilitySnapshotBridge.Provider {
 
     companion object {
         private const val TAG = "KaiAccessibility"
@@ -331,6 +334,8 @@ class KaiAccessibilityService : AccessibilityService() {
             @Suppress("DEPRECATION")
             registerReceiver(commandReceiver, IntentFilter(ACTION_KAI_COMMAND))
         }
+
+        KaiAccessibilitySnapshotBridge.register(this)
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
@@ -382,6 +387,15 @@ class KaiAccessibilityService : AccessibilityService() {
             val semantic = extractSemanticUi(root, effectivePkg, dump)
             if (semantic.elements.isEmpty() && dump.length < 12) return
 
+            // Primary: feed package hint to live vision runtime so the visual
+            // world-state can correlate visual transitions with app focus.
+            KaiLiveVisionRuntime.onPackageFocusChanged(
+                packageName = effectivePkg,
+                screenClass = semantic.screenKind
+            )
+
+            // Legacy: still publish to the old observation runtime until it
+            // is removed in the final batch of the live-vision migration.
             KaiLiveObservationRuntime.onEventObservation(
                 pkg = effectivePkg,
                 dump = dump,
@@ -391,6 +405,37 @@ class KaiAccessibilityService : AccessibilityService() {
             )
         } catch (e: Exception) {
             Log.e(TAG, "Event observation publish failed: ${e.message}")
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // KaiAccessibilitySnapshotBridge.Provider
+    //
+    // On-demand snapshot for UI targeting only. NOT a continuous truth source.
+    // World-state truth lives in KaiLiveVisionRuntime / KaiVisualWorldState.
+    // ------------------------------------------------------------------
+
+    override fun captureSnapshot(expectedPackage: String): KaiScreenState? {
+        return try {
+            val root = getTargetRoot(expectedPackage) ?: return null
+            val rawPkg = root.packageName?.toString().orEmpty()
+            val effectivePkg = rawPkg.ifBlank { expectedPackage.trim() }
+            if (effectivePkg.isBlank() || isIgnorablePackage(effectivePkg)) return null
+
+            val dump = dumpScreenText(root)
+            if (dump == "(no active window)") return null
+
+            val semantic = extractSemanticUi(root, effectivePkg, dump)
+            KaiScreenStateParser.fromDump(
+                packageName = effectivePkg,
+                dump = dump,
+                elements = semantic.elements,
+                screenKindHint = semantic.screenKind,
+                semanticConfidence = semantic.confidence
+            )
+        } catch (e: Exception) {
+            Log.e(TAG, "captureSnapshot failed: ${e.message}")
+            null
         }
     }
 
@@ -437,6 +482,7 @@ class KaiAccessibilityService : AccessibilityService() {
     }
 
     override fun onDestroy() {
+        KaiAccessibilitySnapshotBridge.unregister(this)
         try {
             unregisterReceiver(commandReceiver)
         } catch (_: Exception) {
