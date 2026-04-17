@@ -1,4 +1,3 @@
-
 package com.example.reply.agent
 
 import android.content.Context
@@ -53,7 +52,11 @@ object KaiAgentController {
 
     fun getSnapshot(): KaiAgentSnapshot = snapshot
     fun getLatestObservation(): KaiObservation = KaiLiveObservationRuntime.bestObservation()
-    fun getLatestScreenState(): KaiScreenState = KaiLiveObservationRuntime.currentScreenState(requireStrong = false)
+
+    fun getLatestScreenState(): KaiScreenState =
+        captureSnapshotOrNull(expectedPackage = snapshot.currentPackage)
+            ?.takeIf { KaiVisionInterpreter.isUsableState(it) }
+            ?: KaiLiveObservationRuntime.currentScreenState(requireStrong = false)
 
     fun ensureRuntimeObservationBridge(context: Context) {
         KaiLiveObservationRuntime.ensureBridge(context)
@@ -407,11 +410,9 @@ object KaiAgentController {
             try {
                 withContext(Dispatchers.Main) { onLog("system", "Agent loop starting…") }
 
-                var currentState = KaiVisionInterpreter.toScreenState(
-                    KaiLiveObservationRuntime.awaitFreshObservation(
-                        afterTime = System.currentTimeMillis() - 1500L,
-                        timeoutMs = 2200L
-                    )
+                var currentState = awaitInitialActionLoopState(
+                    afterTime = System.currentTimeMillis() - 1500L,
+                    expectedPackage = ""
                 )
                 markActionLoopObserved(currentState)
 
@@ -477,9 +478,6 @@ object KaiAgentController {
                             continue
                         }
 
-                        val beforeObs = KaiLiveObservationRuntime.bestObservation(expectedPackage = step.expectedPackage)
-                        val beforeState = KaiVisionInterpreter.toScreenState(beforeObs)
-
                         val resolvedExpectedPackage = when {
                             step.expectedPackage.isNotBlank() -> step.expectedPackage
                             step.isOpenAppStep() -> KaiAppIdentityRegistry.primaryPackageForKey(
@@ -488,8 +486,19 @@ object KaiAgentController {
                             else -> ""
                         }
 
+                        val beforeState = readActionLoopState(
+                            afterTime = 0L,
+                            expectedPackage = resolvedExpectedPackage.ifBlank { currentState.packageName },
+                            fallback = currentState,
+                            preferSnapshot = true,
+                            timeoutMs = 900L
+                        )
+
                         val dispatchTime = System.currentTimeMillis()
-                        KaiStepDispatcher.dispatchStepCommand(appContext, step.copy(expectedPackage = resolvedExpectedPackage))
+                        KaiStepDispatcher.dispatchStepCommand(
+                            appContext,
+                            step.copy(expectedPackage = resolvedExpectedPackage)
+                        )
 
                         val result: KaiActionExecutionResult
                         val afterState: KaiScreenState
@@ -498,36 +507,58 @@ object KaiAgentController {
                             withContext(Dispatchers.Main) {
                                 onLog("system", "Awaiting app open: expected_pkg=$resolvedExpectedPackage")
                             }
+
                             val openOutcome = KaiLiveObservationRuntime.awaitPostOpenStabilization(
                                 expectedPackage = resolvedExpectedPackage,
                                 dispatchTime = dispatchTime,
                                 timeoutMs = step.timeoutMs.coerceIn(3200L, 8000L)
                             )
-                            afterState = KaiLiveObservationRuntime.currentScreenState(
+
+                            afterState = readActionLoopState(
+                                afterTime = dispatchTime,
                                 expectedPackage = resolvedExpectedPackage,
-                                requireStrong = false
+                                fallback = currentState,
+                                preferSnapshot = true,
+                                timeoutMs = step.timeoutMs.coerceIn(1800L, 6000L)
                             )
+
                             result = KaiActionExecutionResult(
                                 success = openOutcome == KaiOpenAppOutcome.TARGET_READY ||
-                                    openOutcome == KaiOpenAppOutcome.USABLE_INTERMEDIATE_IN_TARGET_APP,
+                                    openOutcome == KaiOpenAppOutcome.USABLE_INTERMEDIATE_IN_TARGET_APP ||
+                                    packageReadyForStep(afterState, step.copy(expectedPackage = resolvedExpectedPackage)),
                                 message = "open_app_outcome:$openOutcome",
                                 screenState = afterState,
                                 openAppOutcome = openOutcome
                             )
+
                             withContext(Dispatchers.Main) {
                                 onLog("system", "App open world-state: $openOutcome")
                             }
                         } else {
-                            val freshObs = KaiLiveObservationRuntime.awaitFreshObservation(
+                            afterState = readActionLoopState(
                                 afterTime = dispatchTime,
-                                timeoutMs = step.waitMs.coerceIn(1400L, 6500L),
-                                expectedPackage = resolvedExpectedPackage.ifBlank { currentState.packageName }
+                                expectedPackage = resolvedExpectedPackage.ifBlank { currentState.packageName },
+                                fallback = beforeState,
+                                preferSnapshot = true,
+                                timeoutMs = step.waitMs.coerceIn(1400L, 6500L)
                             )
-                            afterState = KaiVisionInterpreter.toScreenState(freshObs)
+
+                            val visuallyUsable = KaiVisionInterpreter.isUsableState(afterState)
+                            val changedAfterDispatch =
+                                afterState.semanticFingerprint() != beforeState.semanticFingerprint() ||
+                                    afterState.packageName != beforeState.packageName ||
+                                    afterState.updatedAt > dispatchTime
+
                             result = KaiActionExecutionResult(
-                                success = freshObs.updatedAt > dispatchTime &&
-                                    KaiVisionInterpreter.isUsableState(afterState),
-                                message = if (freshObs.updatedAt > dispatchTime) "fresh_observation_arrived" else "no_fresh_observation",
+                                success = visuallyUsable && (
+                                    changedAfterDispatch ||
+                                        packageReadyForStep(afterState, step.copy(expectedPackage = resolvedExpectedPackage))
+                                    ),
+                                message = if (visuallyUsable) {
+                                    if (changedAfterDispatch) "live_or_snapshot_state_changed" else "usable_state_reconfirmed"
+                                } else {
+                                    "state_not_usable"
+                                },
                                 screenState = afterState
                             )
                         }
@@ -673,4 +704,80 @@ object KaiAgentController {
 
     fun parseElementsFromJson(elementsJson: String?): List<KaiUiElement> =
         KaiLiveObservationRuntime.parseElementsFromJson(elementsJson)
+
+    private suspend fun awaitInitialActionLoopState(
+        afterTime: Long,
+        expectedPackage: String
+    ): KaiScreenState {
+        val snapshotState = captureSnapshotOrNull(expectedPackage)
+        if (snapshotState != null && KaiVisionInterpreter.isUsableState(snapshotState)) {
+            return snapshotState
+        }
+
+        val liveObs = KaiLiveObservationRuntime.awaitFreshObservation(
+            afterTime = afterTime,
+            timeoutMs = 2200L,
+            expectedPackage = expectedPackage
+        )
+        val liveState = KaiVisionInterpreter.toScreenState(liveObs)
+
+        return captureSnapshotOrNull(expectedPackage.ifBlank { liveState.packageName })
+            ?.takeIf { KaiVisionInterpreter.isUsableState(it) }
+            ?: liveState
+    }
+
+    private suspend fun readActionLoopState(
+        afterTime: Long,
+        expectedPackage: String,
+        fallback: KaiScreenState,
+        preferSnapshot: Boolean,
+        timeoutMs: Long
+    ): KaiScreenState {
+        if (preferSnapshot) {
+            captureSnapshotOrNull(expectedPackage)
+                ?.takeIf { KaiVisionInterpreter.isUsableState(it) }
+                ?.let { return it }
+        }
+
+        val liveObs = runCatching {
+            KaiLiveObservationRuntime.awaitFreshObservation(
+                afterTime = afterTime,
+                timeoutMs = timeoutMs.coerceIn(800L, 8000L),
+                expectedPackage = expectedPackage
+            )
+        }.getOrNull()
+
+        val liveState = liveObs?.let { KaiVisionInterpreter.toScreenState(it) }
+
+        if (preferSnapshot) {
+            captureSnapshotOrNull(expectedPackage.ifBlank { liveState?.packageName.orEmpty() })
+                ?.takeIf { KaiVisionInterpreter.isUsableState(it) }
+                ?.let { return it }
+        }
+
+        return when {
+            liveState != null && KaiVisionInterpreter.isUsableState(liveState) -> liveState
+            liveState != null -> liveState
+            else -> fallback
+        }
+    }
+
+    private fun captureSnapshotOrNull(expectedPackage: String = ""): KaiScreenState? {
+        return runCatching {
+            KaiAccessibilitySnapshotBridge.captureSnapshot(expectedPackage)
+        }.getOrNull()
+    }
+
+    private fun packageReadyForStep(
+        state: KaiScreenState,
+        step: KaiActionStep
+    ): Boolean {
+        val expectedPackage = step.expectedPackage.trim()
+        if (expectedPackage.isBlank()) return false
+
+        val actual = state.packageName.trim()
+        if (actual.isBlank()) return false
+
+        return actual == expectedPackage || actual.startsWith("$expectedPackage.")
+    }
 }
