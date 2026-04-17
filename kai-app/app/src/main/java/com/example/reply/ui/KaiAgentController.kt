@@ -52,7 +52,9 @@ object KaiAgentController {
 
     @Volatile
     var snapshot: KaiAgentSnapshot = KaiAgentSnapshot()
-        private set(value) { field = value }
+        private set(value) {
+            field = value
+        }
 
     private val memory = ArrayDeque<KaiObservation>()
     private val MAX_MEMORY = 18
@@ -66,8 +68,15 @@ object KaiAgentController {
 
     fun getLatestScreenState(): KaiScreenState {
         val obs = getLatestObservation()
-        return if (obs.updatedAt > 0L) KaiVisionInterpreter.toScreenState(obs)
-        else KaiScreenState()
+        return if (obs.updatedAt > 0L) {
+            KaiVisionInterpreter.toScreenState(obs)
+        } else {
+            KaiScreenState(
+                packageName = "",
+                rawDump = "",
+                lines = emptyList()
+            )
+        }
     }
 
     fun ensureRuntimeObservationBridge(context: Context) {
@@ -123,7 +132,9 @@ object KaiAgentController {
 
     fun pruneObservationMemory(maxItems: Int) {
         val cap = maxItems.coerceIn(1, MAX_MEMORY)
-        synchronized(memory) { while (memory.size > cap) memory.removeFirst() }
+        synchronized(memory) {
+            while (memory.size > cap) memory.removeFirst()
+        }
         snapshot = snapshot.copy(memoryCount = synchronized(memory) { memory.size })
     }
 
@@ -181,7 +192,9 @@ object KaiAgentController {
         )
     }
 
-    fun stopContinuousAnalysis() { /* continuous insight loop removed */ }
+    fun stopContinuousAnalysis() {
+        /* continuous insight loop removed */
+    }
 
     fun toggleContinuousAnalysis(
         userGoal: String,
@@ -227,7 +240,10 @@ object KaiAgentController {
             currentState = currentScreenState
         )
 
-        if (stageSnapshot.shouldContinue && directStageStep != null && stageSnapshot.nextSemanticAction != "open_app") {
+        if (stageSnapshot.shouldContinue &&
+            directStageStep != null &&
+            stageSnapshot.nextSemanticAction != "open_app"
+        ) {
             val summary = when (stageSnapshot.nextSemanticAction) {
                 "open_messages" -> "Reach the messages surface inside the current app."
                 "open_target_conversation" -> "Open the target conversation."
@@ -565,7 +581,11 @@ object KaiAgentController {
                                         packageReadyForStep(afterState, step.copy(expectedPackage = resolvedExpectedPackage))
                                     ),
                                 message = if (visuallyUsable) {
-                                    if (changedAfterDispatch) "live_or_snapshot_state_changed" else "usable_state_reconfirmed"
+                                    if (changedAfterDispatch) {
+                                        "live_or_snapshot_state_changed"
+                                    } else {
+                                        "usable_state_reconfirmed"
+                                    }
                                 } else {
                                     "state_not_usable"
                                 },
@@ -719,22 +739,24 @@ object KaiAgentController {
             buildList {
                 for (i in 0 until array.length()) {
                     val obj = array.optJSONObject(i) ?: continue
-                    add(KaiUiElement(
-                        text = obj.optString("text"),
-                        contentDescription = obj.optString("contentDescription"),
-                        hint = obj.optString("hint"),
-                        viewId = obj.optString("viewId"),
-                        className = obj.optString("className"),
-                        clickable = obj.optBoolean("clickable"),
-                        editable = obj.optBoolean("editable"),
-                        scrollable = obj.optBoolean("scrollable"),
-                        selected = obj.optBoolean("selected"),
-                        checked = obj.optBoolean("checked"),
-                        bounds = obj.optString("bounds"),
-                        depth = obj.optInt("depth", 0),
-                        packageName = obj.optString("packageName"),
-                        roleGuess = obj.optString("roleGuess").ifBlank { "unknown" }
-                    ))
+                    add(
+                        KaiUiElement(
+                            text = obj.optString("text"),
+                            contentDescription = obj.optString("contentDescription"),
+                            hint = obj.optString("hint"),
+                            viewId = obj.optString("viewId"),
+                            className = obj.optString("className"),
+                            clickable = obj.optBoolean("clickable"),
+                            editable = obj.optBoolean("editable"),
+                            scrollable = obj.optBoolean("scrollable"),
+                            selected = obj.optBoolean("selected"),
+                            checked = obj.optBoolean("checked"),
+                            bounds = obj.optString("bounds"),
+                            depth = obj.optInt("depth", 0),
+                            packageName = obj.optString("packageName"),
+                            roleGuess = obj.optString("roleGuess").ifBlank { "unknown" }
+                        )
+                    )
                 }
             }
         }.getOrDefault(emptyList())
@@ -744,7 +766,11 @@ object KaiAgentController {
         afterTime: Long,
         expectedPackage: String
     ): KaiScreenState {
-        val obs = awaitFreshObservationLocal(afterTime = afterTime, timeoutMs = 2200L, expectedPackage = expectedPackage)
+        val obs = awaitFreshObservationLocal(
+            afterTime = afterTime,
+            timeoutMs = 2200L,
+            expectedPackage = expectedPackage
+        )
         return KaiVisionInterpreter.toScreenState(obs)
     }
 
@@ -762,6 +788,7 @@ object KaiAgentController {
                 expectedPackage = expectedPackage
             )
         }.getOrNull()
+
         val state = obs?.let { KaiVisionInterpreter.toScreenState(it) }
         return when {
             state != null && KaiVisionInterpreter.isUsableState(state) -> state
@@ -786,10 +813,14 @@ object KaiAgentController {
 
     private fun bestObservationLocal(expectedPackage: String = ""): KaiObservation {
         val items = synchronized(memory) { memory.toList() }
-        val matched = if (expectedPackage.isNotBlank())
-            items.filter { it.packageName == expectedPackage || it.packageName.startsWith("$expectedPackage.") }
-                .maxByOrNull { it.updatedAt }
-        else null
+        val matched = if (expectedPackage.isNotBlank()) {
+            items.filter {
+                it.packageName == expectedPackage || it.packageName.startsWith("$expectedPackage.")
+            }.maxByOrNull { it.updatedAt }
+        } else {
+            null
+        }
+
         return matched ?: items.maxByOrNull { it.updatedAt } ?: KaiObservation("", "", updatedAt = 0L)
     }
 
@@ -797,21 +828,26 @@ object KaiAgentController {
 
     private fun requestImmediateDump(expectedPackage: String = "") {
         val ctx = storedContext ?: return
-        ctx.sendBroadcast(Intent(KaiAccessibilityService.ACTION_KAI_COMMAND).apply {
-            setPackage(ctx.packageName)
-            putExtra(KaiAccessibilityService.EXTRA_CMD, KaiAccessibilityService.CMD_DUMP)
-            if (expectedPackage.isNotBlank())
-                putExtra(KaiAccessibilityService.EXTRA_EXPECTED_PACKAGE, expectedPackage)
-        })
+        ctx.sendBroadcast(
+            Intent(KaiAccessibilityService.ACTION_KAI_COMMAND).apply {
+                setPackage(ctx.packageName)
+                putExtra(KaiAccessibilityService.EXTRA_CMD, KaiAccessibilityService.CMD_DUMP)
+                if (expectedPackage.isNotBlank()) {
+                    putExtra(KaiAccessibilityService.EXTRA_EXPECTED_PACKAGE, expectedPackage)
+                }
+            }
+        )
     }
 
     private fun dispatchStepCommand(context: Context, step: KaiActionStep) {
         val cmd = step.normalizedCommand()
         val intent = Intent(KaiAccessibilityService.ACTION_KAI_COMMAND).apply {
             setPackage(context.packageName)
-            if (step.expectedPackage.isNotBlank())
+            if (step.expectedPackage.isNotBlank()) {
                 putExtra(KaiAccessibilityService.EXTRA_EXPECTED_PACKAGE, step.expectedPackage)
+            }
         }
+
         when (cmd) {
             "open_app" -> {
                 intent.putExtra(KaiAccessibilityService.EXTRA_CMD, KaiAccessibilityService.CMD_OPEN_APP)
@@ -865,6 +901,7 @@ object KaiAgentController {
                 intent.putExtra(KaiAccessibilityService.EXTRA_CMD, KaiAccessibilityService.CMD_DUMP)
             else -> return
         }
+
         context.sendBroadcast(intent)
     }
 
@@ -882,15 +919,19 @@ object KaiAgentController {
 
         if (steps.isEmpty() && onLauncher && appHint.isNotBlank() && !currentMatches) {
             return plan.copy(
-                goalComplete = false, plannerGoalComplete = false,
+                goalComplete = false,
+                plannerGoalComplete = false,
                 summary = "Starting from launcher/home: opening target app first.",
-                steps = listOf(KaiActionStep(
-                    cmd = "open_app", text = appHint,
-                    note = "launcher_requires_open_app_first",
-                    completionBoundary = KaiGoalBoundary.APP_ENTRY,
-                    continuationKind = KaiContinuationKind.STAGE_CONTINUATION,
-                    allowsFinalCommit = false
-                ))
+                steps = listOf(
+                    KaiActionStep(
+                        cmd = "open_app",
+                        text = appHint,
+                        note = "launcher_requires_open_app_first",
+                        completionBoundary = KaiGoalBoundary.APP_ENTRY,
+                        continuationKind = KaiContinuationKind.STAGE_CONTINUATION,
+                        allowsFinalCommit = false
+                    )
+                )
             )
         }
 
@@ -903,15 +944,18 @@ object KaiAgentController {
                 continuationKind = KaiContinuationKind.STAGE_CONTINUATION,
                 allowsFinalCommit = false
             ) ?: KaiActionStep(
-                cmd = "open_app", text = appHint,
+                cmd = "open_app",
+                text = appHint,
                 note = "launcher_requires_open_app_first",
                 completionBoundary = KaiGoalBoundary.APP_ENTRY,
                 continuationKind = KaiContinuationKind.STAGE_CONTINUATION,
                 allowsFinalCommit = false
             )
+
             val rebuilt = mutableListOf(openFirst) + steps.filterNot { it.cmd == "open_app" }
             return plan.copy(
-                goalComplete = false, plannerGoalComplete = false,
+                goalComplete = false,
+                plannerGoalComplete = false,
                 summary = "Starting from launcher/home: open target app before semantic actions.",
                 steps = rebuilt.take(maxSteps)
             )
@@ -929,12 +973,20 @@ object KaiAgentController {
                 add(step)
             }
         }
-        return plan.copy(steps = cleanedSteps.take(maxSteps), goalComplete = false, plannerGoalComplete = false)
+
+        return plan.copy(
+            steps = cleanedSteps.take(maxSteps),
+            goalComplete = false,
+            plannerGoalComplete = false
+        )
     }
 
     private fun isLauncherPackage(packageName: String): Boolean {
         val p = packageName.lowercase(Locale.getDefault())
-        return p.contains("launcher") || p.contains("home") || p.contains("pixel") || p.contains("trebuchet")
+        return p.contains("launcher") ||
+            p.contains("home") ||
+            p.contains("pixel") ||
+            p.contains("trebuchet")
     }
 
     private fun packageReadyForStep(

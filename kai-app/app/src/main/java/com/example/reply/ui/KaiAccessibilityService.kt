@@ -160,7 +160,10 @@ class KaiAccessibilityService : AccessibilityService() {
 
                 CMD_OPEN_APP -> {
                     if (text.isNotBlank() && openInstalledApp(text)) {
-                        scheduleRefresh(expectedPackage.ifBlank { resolveExpectedPackageForApp(text) }, bursts = 3)
+                        scheduleRefresh(
+                            expectedPackage = expectedPackage.ifBlank { resolveExpectedPackageForApp(text) },
+                            bursts = 3
+                        )
                     }
                 }
 
@@ -250,8 +253,7 @@ class KaiAccessibilityService : AccessibilityService() {
             AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED,
             AccessibilityEvent.TYPE_VIEW_CLICKED,
             AccessibilityEvent.TYPE_VIEW_SCROLLED,
-            AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED -> true
-
+            AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED,
             AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED -> true
             else -> false
         }
@@ -288,10 +290,10 @@ class KaiAccessibilityService : AccessibilityService() {
                 val root = getBestRoot(expectedPackage)
                 val pkg = resolvePackage(root?.packageName?.toString().orEmpty(), expectedPackage)
                 val dump = dumpScreenText(root)
-                pushObservationDirect(dump, pkg)
+                sendDumpToApp(dump, pkg)
             } catch (e: Exception) {
                 Log.e(TAG, "requestDump failed", e)
-                sendDumpToApp("(no active window)", "")
+                sendDumpToApp("(no active window)", expectedPackage)
             } finally {
                 expectedPackageHint = ""
                 dumpInProgress = false
@@ -318,29 +320,41 @@ class KaiAccessibilityService : AccessibilityService() {
             if (dump == "(no active window)" || dump == "(empty dump)") return
             if (isOverlayPolluted(dump)) return
 
-            KaiAgentController.onObservationArrived(
-                packageName = pkg,
-                screenPreview = dump,
-                elements = emptyList(),
-                screenKind = "unknown",
-                semanticConfidence = 0.55f
-            )
-            KaiLiveVisionRuntime.onPackageFocusChanged(pkg)
+            pushObservationDirect(dump, pkg)
         } catch (e: Exception) {
             Log.e(TAG, "publishObservation failed", e)
         }
     }
 
     private fun pushObservationDirect(dump: String, pkg: String) {
-        if (dump == "(no active window)" || dump == "(empty dump)" || pkg.isBlank()) return
+        if (pkg.isBlank()) return
         KaiAgentController.onObservationArrived(
             packageName = pkg,
             screenPreview = dump,
             elements = emptyList(),
             screenKind = "unknown",
-            semanticConfidence = 0f
+            semanticConfidence = if (dump == "(no active window)" || dump == "(empty dump)") 0f else 0.55f
         )
         KaiLiveVisionRuntime.onPackageFocusChanged(pkg)
+    }
+
+    private fun sendDumpToApp(dump: String, pkg: String) {
+        val resolvedPkg = resolvePackage(pkg, expectedPackageHint)
+        val safeDump = dump.ifBlank { "(empty dump)" }
+
+        try {
+            sendBroadcast(Intent(ACTION_KAI_DUMP_RESULT).apply {
+                setPackage(packageName)
+                putExtra(EXTRA_DUMP, safeDump)
+                putExtra(EXTRA_PACKAGE, resolvedPkg)
+            })
+        } catch (e: Exception) {
+            Log.w(TAG, "send dump broadcast failed", e)
+        }
+
+        if (resolvedPkg.isNotBlank()) {
+            pushObservationDirect(safeDump, resolvedPkg)
+        }
     }
 
     private fun resetTransitionState() {
@@ -393,9 +407,9 @@ class KaiAccessibilityService : AccessibilityService() {
         if (allRoots.isEmpty()) return rootInActiveWindow
 
         if (expectedPackage.isNotBlank()) {
-            allRoots.firstOrNull { packageMatchesExpected(it.packageName?.toString().orEmpty(), expectedPackage) }?.let {
-                return it
-            }
+            allRoots.firstOrNull {
+                packageMatchesExpected(it.packageName?.toString().orEmpty(), expectedPackage)
+            }?.let { return it }
         }
 
         allRoots.firstOrNull { it.packageName?.toString().orEmpty() == lastKnownPackage }?.let {
@@ -628,7 +642,11 @@ class KaiAccessibilityService : AccessibilityService() {
         val hint = if (Build.VERSION.SDK_INT >= 26) node.hintText?.toString().orEmpty().trim() else ""
         val viewId = node.viewIdResourceName?.substringAfterLast('/').orEmpty()
 
-        if (textMatches(text, query) || textMatches(desc, query) || textMatches(hint, query) || textMatches(viewId, query)) {
+        if (textMatches(text, query) ||
+            textMatches(desc, query) ||
+            textMatches(hint, query) ||
+            textMatches(viewId, query)
+        ) {
             out += node
         }
 
@@ -705,7 +723,9 @@ class KaiAccessibilityService : AccessibilityService() {
             val clicked = try {
                 if (current.isClickable && current.isEnabled) {
                     current.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-                } else false
+                } else {
+                    false
+                }
             } catch (_: Exception) {
                 false
             }
@@ -758,12 +778,12 @@ class KaiAccessibilityService : AccessibilityService() {
             .asSequence()
             .map { app ->
                 val label = pm.getApplicationLabel(app)?.toString().orEmpty()
-                val packageName = app.packageName.orEmpty()
-                val shortPkg = packageName.substringAfterLast('.')
+                val installedPackage = app.packageName.orEmpty()
+                val shortPkg = installedPackage.substringAfterLast('.')
 
                 val nLabel = norm(label)
                 val nPkg = norm(shortPkg)
-                val nFull = norm(packageName)
+                val nFull = norm(installedPackage)
 
                 var score = 0
                 if (nLabel == normalizedResolved) score += 160
