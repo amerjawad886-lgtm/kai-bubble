@@ -16,7 +16,6 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.util.Locale
 
 data class KaiObservation(
     val packageName: String,
@@ -286,7 +285,7 @@ object KaiAgentController {
             }
         }
 
-        val appHint = inferPrimaryAppHint(effectivePrompt)
+        val appHint = KaiActionPlanPostProcessor.inferPrimaryAppHint(effectivePrompt)
         val goalMode = KaiTaskStageEngine.classifyGoalMode(effectivePrompt)
         val stageSnapshot = KaiTaskStageEngine.evaluate(
             userPrompt = effectivePrompt,
@@ -408,7 +407,7 @@ object KaiAgentController {
             requiresApproval = false
         )
 
-        return postProcessPlan(
+        return KaiActionPlanPostProcessor.postProcessPlan(
             plan = plan,
             currentScreenState = currentScreenState,
             appHint = appHint,
@@ -751,94 +750,6 @@ object KaiAgentController {
                 KaiBubbleManager.releaseAllSuppression()
             }
         }
-    }
-
-    private fun inferPrimaryAppHint(prompt: String): String =
-        KaiScreenStateParser.inferAppHint(prompt)
-
-    private fun isLauncherPackage(packageName: String): Boolean {
-        val p = packageName.lowercase(Locale.getDefault())
-        return p.contains("launcher") || p.contains("home") || p.contains("pixel") || p.contains("trebuchet")
-    }
-
-    @Suppress("UNUSED_PARAMETER")
-    private fun postProcessPlan(
-        plan: KaiActionPlan,
-        currentScreenState: KaiScreenState,
-        appHint: String,
-        maxStepsPerChunk: Int,
-        priorProgress: String
-    ): KaiActionPlan {
-        val onLauncher = isLauncherPackage(currentScreenState.packageName)
-        val currentMatches = currentScreenState.likelyMatchesAppHint(appHint) && !onLauncher
-        val maxSteps = maxStepsPerChunk.coerceIn(1, 8)
-        val steps = plan.steps.filter { it.cmd.isNotBlank() }.toMutableList()
-
-        if (steps.isEmpty() && onLauncher && appHint.isNotBlank() && !currentMatches) {
-            return plan.copy(
-                goalComplete = false,
-                plannerGoalComplete = false,
-                summary = "Starting from launcher/home: opening target app first.",
-                steps = listOf(
-                    KaiActionStep(
-                        cmd = "open_app",
-                        text = appHint,
-                        note = "launcher_requires_open_app_first",
-                        completionBoundary = KaiGoalBoundary.APP_ENTRY,
-                        continuationKind = KaiContinuationKind.STAGE_CONTINUATION,
-                        allowsFinalCommit = false
-                    )
-                )
-            )
-        }
-
-        if (onLauncher && appHint.isNotBlank() && !currentMatches) {
-            val existingOpen = steps.firstOrNull { it.cmd == "open_app" }
-            val openFirst = existingOpen?.copy(
-                text = existingOpen.text.ifBlank { appHint },
-                note = existingOpen.note.ifBlank { "launcher_requires_open_app_first" },
-                completionBoundary = KaiGoalBoundary.APP_ENTRY,
-                continuationKind = KaiContinuationKind.STAGE_CONTINUATION,
-                allowsFinalCommit = false
-            ) ?: KaiActionStep(
-                cmd = "open_app",
-                text = appHint,
-                note = "launcher_requires_open_app_first",
-                completionBoundary = KaiGoalBoundary.APP_ENTRY,
-                continuationKind = KaiContinuationKind.STAGE_CONTINUATION,
-                allowsFinalCommit = false
-            )
-
-            val rebuilt = mutableListOf<KaiActionStep>()
-            rebuilt += openFirst
-            rebuilt += steps.filterNot { it.cmd == "open_app" }
-
-            return plan.copy(
-                goalComplete = false,
-                plannerGoalComplete = false,
-                summary = "Starting from launcher/home: open target app before semantic actions.",
-                steps = rebuilt.take(maxSteps)
-            )
-        }
-
-        val cleanedSteps = buildList {
-            var verifyRun = 0
-            steps.forEach { step ->
-                if (step.cmd in setOf("verify_state", "read_screen", "wait_for_text")) {
-                    verifyRun += 1
-                    if (verifyRun > 2) return@forEach
-                } else {
-                    verifyRun = 0
-                }
-                add(step)
-            }
-        }
-
-        return plan.copy(
-            steps = cleanedSteps.take(maxSteps),
-            goalComplete = false,
-            plannerGoalComplete = false
-        )
     }
 
     fun parseElementsFromJson(elementsJson: String?): List<KaiUiElement> =
