@@ -92,7 +92,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.reply.R
 import com.example.reply.agent.KaiAgentController
-import com.example.reply.agent.KaiLiveObservationRuntime
+import com.example.reply.agent.KaiLiveVisionRuntime
 import com.example.reply.data.supabase.KaiChatRepository
 import com.example.reply.data.supabase.KaiMemoryRepository
 import kotlinx.coroutines.Dispatchers
@@ -615,12 +615,11 @@ fun KaiHomeScreen(
 
         stopAgentLoop()
 
-        KaiLiveObservationRuntime.ensureBridge(context.applicationContext)
-        if (!KaiLiveObservationRuntime.isWatching) {
-            KaiLiveObservationRuntime.startWatching(immediateDump = true)
-        } else {
-            KaiLiveObservationRuntime.requestImmediateDump()
-        }
+        KaiLiveVisionRuntime.ensureRunning()
+        context.sendBroadcast(android.content.Intent(KaiAccessibilityService.ACTION_KAI_COMMAND).apply {
+            setPackage(context.packageName)
+            putExtra(KaiAccessibilityService.EXTRA_CMD, KaiAccessibilityService.CMD_DUMP)
+        })
 
         if (KaiAgentController.isRunning()) {
             push(MsgRole.SYSTEM, "Monitoring carried into action loop")

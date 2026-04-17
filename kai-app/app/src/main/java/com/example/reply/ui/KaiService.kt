@@ -9,7 +9,7 @@ import android.os.Build
 import android.os.IBinder
 import android.provider.Settings
 import androidx.core.app.NotificationCompat
-import com.example.reply.agent.KaiLiveObservationRuntime
+import com.example.reply.agent.KaiLiveVisionRuntime
 
 class KaiService : Service() {
 
@@ -17,12 +17,10 @@ class KaiService : Service() {
         super.onCreate()
         startKaiForeground()
 
-        // Keep only the bridge available here. Observation ownership stays in the runtime/coordinator.
-        KaiLiveObservationRuntime.ensureBridge(applicationContext)
+        KaiLiveVisionRuntime.ensureRunning()
 
         if (Settings.canDrawOverlays(this)) {
             KaiBubbleManager.show(this)
-            KaiLiveObservationRuntime.requestImmediateDump()
         }
     }
 
@@ -56,13 +54,12 @@ class KaiService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        KaiLiveObservationRuntime.ensureBridge(applicationContext)
+        KaiLiveVisionRuntime.ensureRunning()
 
         if (Settings.canDrawOverlays(this)) {
             if (!KaiBubbleManager.isShowing()) {
                 KaiBubbleManager.show(this)
             }
-            KaiLiveObservationRuntime.requestImmediateDump()
         }
 
         return START_STICKY
