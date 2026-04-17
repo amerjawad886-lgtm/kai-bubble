@@ -9,7 +9,6 @@ import android.content.Intent
 import android.os.Build
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
-import com.example.reply.agent.KaiLiveObservationRuntime
 import com.example.reply.agent.KaiLiveVisionRuntime
 import com.example.reply.agent.KaiScreenCaptureBridge
 
@@ -56,8 +55,6 @@ class KaiScreenCaptureService : Service() {
 
                 if (ok) {
                     KaiLiveVisionRuntime.refreshFromCapture()
-                    KaiLiveObservationRuntime.ensureBridge(applicationContext)
-                    KaiLiveObservationRuntime.requestImmediateDump()
                 } else {
                     stopSelfSafely()
                 }

@@ -10,8 +10,6 @@ import android.view.ViewGroup
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.material3.windowsizeclass.ExperimentalMaterial3WindowSizeClassApi
-import androidx.compose.material3.windowsizeclass.calculateWindowSizeClass
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -22,7 +20,6 @@ import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
-import com.example.reply.agent.KaiLiveObservationRuntime
 import com.example.reply.agent.KaiLiveVisionRuntime
 import com.example.reply.agent.KaiScreenCaptureBridge
 import com.example.reply.ui.theme.ContrastAwareReplyTheme
@@ -50,7 +47,6 @@ class MainActivity : ComponentActivity() {
 
     private var modeState by mutableStateOf("")
 
-    @OptIn(ExperimentalMaterial3WindowSizeClassApi::class)
     override fun onCreate(savedInstanceState: Bundle?) {
         installSplashScreen()
         super.onCreate(savedInstanceState)
@@ -65,14 +61,12 @@ class MainActivity : ComponentActivity() {
 
         modeState = extractMode(intent)
 
-        // نربط observation runtime فقط، بدون dump lifecycle noise من MainActivity.
-        KaiLiveObservationRuntime.ensureBridge(applicationContext)
+        KaiLiveVisionRuntime.ensureRunning()
 
         applyFullScreenBars()
 
         setContent {
             val view = LocalView.current
-            val windowSize = calculateWindowSizeClass(this)
 
             SideEffect {
                 applyFullScreenBars(view)
@@ -85,10 +79,7 @@ class MainActivity : ComponentActivity() {
             }
 
             ContrastAwareReplyTheme {
-                ReplyApp(
-                    windowSize = windowSize,
-                    startMode = modeState
-                )
+                KaiAppRoot(startMode = modeState)
             }
         }
     }
@@ -98,13 +89,12 @@ class MainActivity : ComponentActivity() {
         setIntent(intent)
         modeState = extractMode(intent)
 
-        KaiLiveObservationRuntime.ensureBridge(applicationContext)
         applyFullScreenBars()
     }
 
     override fun onStart() {
         super.onStart()
-        KaiLiveObservationRuntime.ensureBridge(applicationContext)
+        KaiLiveVisionRuntime.ensureRunning()
     }
 
     override fun onResume() {

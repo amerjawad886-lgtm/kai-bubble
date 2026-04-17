@@ -20,9 +20,10 @@ import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import android.view.accessibility.AccessibilityWindowInfo
+import com.example.reply.agent.KaiAgentController
 import com.example.reply.agent.KaiAppIdentityRegistry
 import com.example.reply.agent.KaiGestureUtils
-import com.example.reply.agent.KaiLiveObservationRuntime
+import com.example.reply.agent.KaiLiveVisionRuntime
 import java.util.Locale
 import kotlin.math.abs
 
@@ -287,7 +288,7 @@ class KaiAccessibilityService : AccessibilityService() {
                 val root = getBestRoot(expectedPackage)
                 val pkg = resolvePackage(root?.packageName?.toString().orEmpty(), expectedPackage)
                 val dump = dumpScreenText(root)
-                sendDumpToApp(dump, pkg)
+                pushObservationDirect(dump, pkg)
             } catch (e: Exception) {
                 Log.e(TAG, "requestDump failed", e)
                 sendDumpToApp("(no active window)", "")
@@ -317,26 +318,29 @@ class KaiAccessibilityService : AccessibilityService() {
             if (dump == "(no active window)" || dump == "(empty dump)") return
             if (isOverlayPolluted(dump)) return
 
-            KaiLiveObservationRuntime.onEventObservation(
-                pkg = pkg,
-                dump = dump,
+            KaiAgentController.onObservationArrived(
+                packageName = pkg,
+                screenPreview = dump,
                 elements = emptyList(),
                 screenKind = "unknown",
-                confidence = 0.55f
+                semanticConfidence = 0.55f
             )
+            KaiLiveVisionRuntime.onPackageFocusChanged(pkg)
         } catch (e: Exception) {
             Log.e(TAG, "publishObservation failed", e)
         }
     }
 
-    private fun sendDumpToApp(dump: String, packageName: String) {
-        sendBroadcast(
-            Intent(ACTION_KAI_DUMP_RESULT).apply {
-                setPackage(this@KaiAccessibilityService.packageName)
-                putExtra(EXTRA_DUMP, dump)
-                putExtra(EXTRA_PACKAGE, packageName)
-            }
+    private fun pushObservationDirect(dump: String, pkg: String) {
+        if (dump == "(no active window)" || dump == "(empty dump)" || pkg.isBlank()) return
+        KaiAgentController.onObservationArrived(
+            packageName = pkg,
+            screenPreview = dump,
+            elements = emptyList(),
+            screenKind = "unknown",
+            semanticConfidence = 0f
         )
+        KaiLiveVisionRuntime.onPackageFocusChanged(pkg)
     }
 
     private fun resetTransitionState() {

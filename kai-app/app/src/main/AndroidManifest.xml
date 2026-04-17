@@ -44,13 +44,6 @@
             </intent-filter>
         </activity>
 
-        <activity
-            android:name=".ui.AssistActivity"
-            android:exported="false"
-            android:theme="@style/Theme.Reply.Splash"
-            android:excludeFromRecents="true"
-            android:finishOnTaskLaunch="true" />
-
         <service
             android:name=".ui.KaiService"
             android:exported="false"
