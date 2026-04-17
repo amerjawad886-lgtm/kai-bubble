@@ -153,6 +153,8 @@ object KaiLiveVisionRuntime {
 
     fun getState(): KaiVisualWorldState = current
 
+    fun isRunning(): Boolean = running && loopJob?.isActive == true
+
     fun isCaptureReady(): Boolean = current.isCaptureLive()
 
     fun hasFreshFrame(maxAgeMs: Long = KaiVisualWorldThresholds.FRESH_FRAME_MAX_AGE_MS): Boolean =
