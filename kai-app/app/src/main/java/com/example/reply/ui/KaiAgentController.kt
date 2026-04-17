@@ -44,13 +44,14 @@ data class KaiAgentSnapshot(
 
 object KaiAgentController {
     private const val TAG = "KaiAgentController"
-    private const val MAX_MEMORY = 18
     private const val MIN_INSIGHT_GAP_MS = 2500L
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-    private val memory = ArrayDeque<KaiObservation>()
 
-    @Volatile private var snapshot = KaiAgentSnapshot()
+    private var snapshot: KaiAgentSnapshot
+        get() = KaiAgentSessionState.snapshot
+        set(value) { KaiAgentSessionState.snapshot = value }
+
     @Volatile private var continuousRunning = false
     @Volatile private var insightBusy = false
     @Volatile private var lastInsightAt = 0L
@@ -82,16 +83,13 @@ object KaiAgentController {
             screenKind = screenKind,
             semanticConfidence = semanticConfidence
         )
-        synchronized(memory) {
-            memory.addLast(obs)
-            while (memory.size > MAX_MEMORY) memory.removeFirst()
-        }
+        KaiAgentSessionState.addObservation(obs)
 
         if (packageName.isNotBlank() || screenPreview.isNotBlank()) {
             snapshot = snapshot.copy(
                 currentPackage = packageName.ifBlank { snapshot.currentPackage },
                 lastScreenPreview = screenPreview.take(1600),
-                memoryCount = synchronized(memory) { memory.size },
+                memoryCount = KaiAgentSessionState.memorySize(),
                 isRunning = isRunning(),
                 statusText = if (isRunning()) {
                     if (snapshot.actionLoopActive) "Action loop active" else "Monitoring"
@@ -113,11 +111,8 @@ object KaiAgentController {
     }
 
     fun pruneObservationMemory(maxItems: Int) {
-        val cap = maxItems.coerceIn(1, MAX_MEMORY)
-        synchronized(memory) {
-            while (memory.size > cap) memory.removeFirst()
-        }
-        snapshot = snapshot.copy(memoryCount = synchronized(memory) { memory.size })
+        KaiAgentSessionState.pruneMemory(maxItems)
+        snapshot = snapshot.copy(memoryCount = KaiAgentSessionState.memorySize())
     }
 
     fun setGoal(goal: String) {
@@ -161,7 +156,7 @@ object KaiAgentController {
     }
 
     fun resetTransientStateForNewRun() {
-        synchronized(memory) { memory.clear() }
+        KaiAgentSessionState.clearMemory()
         insightBusy = false
         lastInsightAt = 0L
         snapshot = snapshot.copy(
@@ -225,10 +220,8 @@ object KaiAgentController {
         val now = System.currentTimeMillis()
         if (now - lastInsightAt < MIN_INSIGHT_GAP_MS) return
 
-        val memoryText = synchronized(memory) {
-            memory.takeLast(5).joinToString("\n\n") { obs ->
-                "Package: ${obs.packageName.ifBlank { "Unknown" }}\nScreen:\n${obs.screenPreview.take(900)}"
-            }
+        val memoryText = KaiAgentSessionState.recentObservations(5).joinToString("\n\n") { obs ->
+            "Package: ${obs.packageName.ifBlank { "Unknown" }}\nScreen:\n${obs.screenPreview.take(900)}"
         }
         if (memoryText.isBlank()) return
 
@@ -279,10 +272,8 @@ object KaiAgentController {
         pruneObservationMemory(10)
         markActionLoopObserved(currentScreenState)
 
-        val memoryText = synchronized(memory) {
-            memory.takeLast(8).joinToString("\n\n") { item ->
-                "Package: ${item.packageName.ifBlank { "Unknown" }}\nScreen:\n${item.screenPreview.take(900)}"
-            }
+        val memoryText = KaiAgentSessionState.recentObservations(8).joinToString("\n\n") { item ->
+            "Package: ${item.packageName.ifBlank { "Unknown" }}\nScreen:\n${item.screenPreview.take(900)}"
         }
 
         val appHint = KaiActionPlanPostProcessor.inferPrimaryAppHint(effectivePrompt)
