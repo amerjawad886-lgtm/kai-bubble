@@ -2,10 +2,8 @@
 package com.example.reply.agent
 
 import android.content.Context
-import android.content.Intent
 import android.util.Log
 import com.example.reply.ai.KaiTask
-import com.example.reply.ui.KaiAccessibilityService
 import com.example.reply.ui.KaiBubbleManager
 import com.example.reply.ui.KaiVoice
 import com.example.reply.ui.OpenAIClient
@@ -18,9 +16,6 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import org.json.JSONArray
-import org.json.JSONObject
-import java.util.Locale
 
 data class KaiObservation(
     val packageName: String,
@@ -49,19 +44,12 @@ data class KaiAgentSnapshot(
 
 object KaiAgentController {
     private const val TAG = "KaiAgentController"
-    private const val MAX_MEMORY = 18
-    private const val MIN_INSIGHT_GAP_MS = 2500L
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-    private val memory = ArrayDeque<KaiObservation>()
 
-    @Volatile private var snapshot = KaiAgentSnapshot()
-    @Volatile private var continuousRunning = false
-    @Volatile private var insightBusy = false
-    @Volatile private var lastInsightAt = 0L
-    @Volatile private var silentInsightCallback: ((String) -> Unit)? = null
-
-    private var continuousJob: Job? = null
+    private var snapshot: KaiAgentSnapshot
+        get() = KaiAgentSessionState.snapshot
+        set(value) { KaiAgentSessionState.snapshot = value }
 
     fun getSnapshot(): KaiAgentSnapshot = snapshot
     fun getLatestObservation(): KaiObservation = KaiLiveObservationRuntime.bestObservation()
@@ -87,16 +75,13 @@ object KaiAgentController {
             screenKind = screenKind,
             semanticConfidence = semanticConfidence
         )
-        synchronized(memory) {
-            memory.addLast(obs)
-            while (memory.size > MAX_MEMORY) memory.removeFirst()
-        }
+        KaiAgentSessionState.addObservation(obs)
 
         if (packageName.isNotBlank() || screenPreview.isNotBlank()) {
             snapshot = snapshot.copy(
                 currentPackage = packageName.ifBlank { snapshot.currentPackage },
                 lastScreenPreview = screenPreview.take(1600),
-                memoryCount = synchronized(memory) { memory.size },
+                memoryCount = KaiAgentSessionState.memorySize(),
                 isRunning = isRunning(),
                 statusText = if (isRunning()) {
                     if (snapshot.actionLoopActive) "Action loop active" else "Monitoring"
@@ -118,11 +103,8 @@ object KaiAgentController {
     }
 
     fun pruneObservationMemory(maxItems: Int) {
-        val cap = maxItems.coerceIn(1, MAX_MEMORY)
-        synchronized(memory) {
-            while (memory.size > cap) memory.removeFirst()
-        }
-        snapshot = snapshot.copy(memoryCount = synchronized(memory) { memory.size })
+        KaiAgentSessionState.pruneMemory(maxItems)
+        snapshot = snapshot.copy(memoryCount = KaiAgentSessionState.memorySize())
     }
 
     fun setGoal(goal: String) {
@@ -133,7 +115,7 @@ object KaiAgentController {
         snapshot = snapshot.copy(customPrompt = prompt.trim())
     }
 
-    fun isRunning(): Boolean = continuousRunning || snapshot.actionLoopActive
+    fun isRunning(): Boolean = KaiContinuousInsightLoop.isRunning() || snapshot.actionLoopActive
 
     fun startActionLoopSession(prompt: String) {
         snapshot = snapshot.copy(
@@ -145,16 +127,15 @@ object KaiAgentController {
     }
 
     fun finishActionLoopSession(message: String = "") {
+        val loopRunning = KaiContinuousInsightLoop.isRunning()
         snapshot = snapshot.copy(
             actionLoopActive = false,
             actionLoopPrompt = "",
-            statusText = if (continuousRunning) "Monitoring" else "Idle",
-            isRunning = continuousRunning,
+            statusText = if (loopRunning) "Monitoring" else "Idle",
+            isRunning = loopRunning,
             lastSuggestion = if (message.isNotBlank()) message else snapshot.lastSuggestion
         )
-        if (continuousRunning) {
-            KaiLiveObservationRuntime.startWatching(immediateDump = true)
-        }
+        KaiContinuousInsightLoop.resumeObservationIfRunning()
     }
 
     fun markActionLoopObserved(state: KaiScreenState) {
@@ -166,16 +147,16 @@ object KaiAgentController {
     }
 
     fun resetTransientStateForNewRun() {
-        synchronized(memory) { memory.clear() }
-        insightBusy = false
-        lastInsightAt = 0L
+        KaiAgentSessionState.clearMemory()
+        KaiContinuousInsightLoop.resetInsightTimers()
+        val loopRunning = KaiContinuousInsightLoop.isRunning()
         snapshot = snapshot.copy(
             currentPackage = "",
             lastScreenPreview = "",
             lastSuggestion = "",
             memoryCount = 0,
-            isRunning = continuousRunning,
-            statusText = if (continuousRunning) "Monitoring" else "Idle",
+            isRunning = loopRunning,
+            statusText = if (loopRunning) "Monitoring" else "Idle",
             actionLoopActive = false,
             actionLoopPrompt = "",
             lastActionLoopFingerprint = "",
@@ -185,15 +166,7 @@ object KaiAgentController {
     }
 
     fun stopContinuousAnalysis() {
-        continuousRunning = false
-        continuousJob?.cancel()
-        continuousJob = null
-        insightBusy = false
-        KaiLiveObservationRuntime.stopWatching()
-        snapshot = snapshot.copy(
-            isRunning = snapshot.actionLoopActive,
-            statusText = if (snapshot.actionLoopActive) "Action loop active" else "Idle"
-        )
+        KaiContinuousInsightLoop.stop()
     }
 
     fun toggleContinuousAnalysis(
@@ -202,72 +175,15 @@ object KaiAgentController {
         onRequestDump: () -> Unit = {},
         onInsight: (String) -> Unit
     ): Boolean {
-        if (continuousRunning) {
-            stopContinuousAnalysis()
+        if (KaiContinuousInsightLoop.isRunning()) {
+            KaiContinuousInsightLoop.stop()
             return false
         }
 
         setGoal(userGoal)
         setCustomPrompt(customPrompt)
-        continuousRunning = true
-        silentInsightCallback = onInsight
-        snapshot = snapshot.copy(isRunning = true, statusText = "Monitoring")
-
-        KaiLiveObservationRuntime.startWatching(immediateDump = true)
-        runCatching { onRequestDump() }
-
-        continuousJob = scope.launch {
-            while (isActive && continuousRunning && !snapshot.actionLoopActive) {
-                maybeGenerateContinuousInsight()
-                delay(900L)
-            }
-        }
+        KaiContinuousInsightLoop.start(onInsight = onInsight, onRequestDump = onRequestDump)
         return true
-    }
-
-    private fun maybeGenerateContinuousInsight() {
-        if (!continuousRunning || insightBusy) return
-        val now = System.currentTimeMillis()
-        if (now - lastInsightAt < MIN_INSIGHT_GAP_MS) return
-
-        val memoryText = synchronized(memory) {
-            memory.takeLast(5).joinToString("\n\n") { obs ->
-                "Package: ${obs.packageName.ifBlank { "Unknown" }}\nScreen:\n${obs.screenPreview.take(900)}"
-            }
-        }
-        if (memoryText.isBlank()) return
-
-        insightBusy = true
-        lastInsightAt = now
-
-        scope.launch {
-            try {
-                val reply = OpenAIClient.ask(
-                    userText = """
-                        You are Kai Agent inside Kai OS.
-                        Goal:
-                        ${snapshot.currentGoal.ifBlank { "Observe and suggest the next practical step." }}
-
-                        Recent observations:
-                        $memoryText
-
-                        Reply briefly in the user's language:
-                        1) What is happening now
-                        2) Safest next action
-                    """.trimIndent(),
-                    task = KaiTask.BRAIN
-                )
-                snapshot = snapshot.copy(
-                    lastSuggestion = reply,
-                    statusText = if (continuousRunning) "Monitoring" else "Idle"
-                )
-                withContext(Dispatchers.Main) { silentInsightCallback?.invoke(reply) }
-            } catch (e: Exception) {
-                Log.e(TAG, "Continuous insight failed: ${e.message}", e)
-            } finally {
-                insightBusy = false
-            }
-        }
     }
 
     suspend fun buildActionPlan(
@@ -284,13 +200,11 @@ object KaiAgentController {
         pruneObservationMemory(10)
         markActionLoopObserved(currentScreenState)
 
-        val memoryText = synchronized(memory) {
-            memory.takeLast(8).joinToString("\n\n") { item ->
-                "Package: ${item.packageName.ifBlank { "Unknown" }}\nScreen:\n${item.screenPreview.take(900)}"
-            }
+        val memoryText = KaiAgentSessionState.recentObservations(8).joinToString("\n\n") { item ->
+            "Package: ${item.packageName.ifBlank { "Unknown" }}\nScreen:\n${item.screenPreview.take(900)}"
         }
 
-        val appHint = inferPrimaryAppHint(effectivePrompt)
+        val appHint = KaiActionPlanPostProcessor.inferPrimaryAppHint(effectivePrompt)
         val goalMode = KaiTaskStageEngine.classifyGoalMode(effectivePrompt)
         val stageSnapshot = KaiTaskStageEngine.evaluate(
             userPrompt = effectivePrompt,
@@ -398,7 +312,7 @@ object KaiAgentController {
         """.trimIndent()
 
         val raw = OpenAIClient.ask(plannerPrompt, task = KaiTask.ACTION_PLANNING)
-        val parsedPlan = parseActionPlan(raw)
+        val parsedPlan = KaiActionPlanParser.parseActionPlan(raw)
         val plan = parsedPlan.copy(
             steps = parsedPlan.steps.take(effectiveMaxSteps),
             goalComplete = false,
@@ -412,7 +326,7 @@ object KaiAgentController {
             requiresApproval = false
         )
 
-        return postProcessPlan(
+        return KaiActionPlanPostProcessor.postProcessPlan(
             plan = plan,
             currentScreenState = currentScreenState,
             appHint = appHint,
@@ -575,7 +489,7 @@ object KaiAgentController {
                         }
 
                         val dispatchTime = System.currentTimeMillis()
-                        dispatchStepCommand(appContext, step.copy(expectedPackage = resolvedExpectedPackage))
+                        KaiStepDispatcher.dispatchStepCommand(appContext, step.copy(expectedPackage = resolvedExpectedPackage))
 
                         val result: KaiActionExecutionResult
                         val afterState: KaiScreenState
@@ -753,270 +667,6 @@ object KaiAgentController {
                 activeLoopJob = null
                 KaiLiveObservationRuntime.softCleanupAfterRun()
                 KaiBubbleManager.releaseAllSuppression()
-            }
-        }
-    }
-
-private fun dispatchStepCommand(context: Context, step: KaiActionStep) {
-        val cmd = step.normalizedCommand()
-        val intent = Intent(KaiAccessibilityService.ACTION_KAI_COMMAND).apply {
-            setPackage(context.packageName)
-            if (step.expectedPackage.isNotBlank()) {
-                putExtra(KaiAccessibilityService.EXTRA_EXPECTED_PACKAGE, step.expectedPackage)
-            }
-            putExtra(KaiAccessibilityService.EXTRA_TIMEOUT_MS, step.timeoutMs)
-        }
-
-        when (cmd) {
-            "open_app" -> {
-                intent.putExtra(KaiAccessibilityService.EXTRA_CMD, KaiAccessibilityService.CMD_OPEN_APP)
-                intent.putExtra(KaiAccessibilityService.EXTRA_TEXT, step.text)
-            }
-            "click_text", "click_best_match", "open_best_list_item" -> {
-                intent.putExtra(KaiAccessibilityService.EXTRA_CMD, KaiAccessibilityService.CMD_CLICK_TEXT)
-                intent.putExtra(KaiAccessibilityService.EXTRA_TEXT, step.semanticPayload())
-            }
-            "long_press_text" -> {
-                intent.putExtra(KaiAccessibilityService.EXTRA_CMD, KaiAccessibilityService.CMD_LONG_PRESS_TEXT)
-                intent.putExtra(KaiAccessibilityService.EXTRA_TEXT, step.semanticPayload())
-                intent.putExtra(KaiAccessibilityService.EXTRA_HOLD_MS, step.holdMs)
-            }
-            "input_text", "focus_best_input", "input_into_best_field" -> {
-                intent.putExtra(KaiAccessibilityService.EXTRA_CMD, KaiAccessibilityService.CMD_INPUT_TEXT)
-                intent.putExtra(KaiAccessibilityService.EXTRA_TEXT, step.text)
-            }
-            "press_primary_action" -> {
-                intent.putExtra(KaiAccessibilityService.EXTRA_CMD, KaiAccessibilityService.CMD_CLICK_TEXT)
-                intent.putExtra(KaiAccessibilityService.EXTRA_TEXT, step.text.ifBlank { "submit" })
-            }
-            "scroll" -> {
-                intent.putExtra(KaiAccessibilityService.EXTRA_CMD, KaiAccessibilityService.CMD_SCROLL)
-                intent.putExtra(KaiAccessibilityService.EXTRA_DIR, step.dir.ifBlank { "down" })
-                intent.putExtra(KaiAccessibilityService.EXTRA_TIMES, step.times.coerceIn(1, 10))
-            }
-            "tap_xy" -> {
-                intent.putExtra(KaiAccessibilityService.EXTRA_CMD, KaiAccessibilityService.CMD_TAP_XY)
-                step.x?.let { intent.putExtra(KaiAccessibilityService.EXTRA_X, it) }
-                step.y?.let { intent.putExtra(KaiAccessibilityService.EXTRA_Y, it) }
-            }
-            "long_press_xy" -> {
-                intent.putExtra(KaiAccessibilityService.EXTRA_CMD, KaiAccessibilityService.CMD_LONG_PRESS_XY)
-                step.x?.let { intent.putExtra(KaiAccessibilityService.EXTRA_X, it) }
-                step.y?.let { intent.putExtra(KaiAccessibilityService.EXTRA_Y, it) }
-                intent.putExtra(KaiAccessibilityService.EXTRA_HOLD_MS, step.holdMs)
-            }
-            "swipe_xy" -> {
-                intent.putExtra(KaiAccessibilityService.EXTRA_CMD, KaiAccessibilityService.CMD_SWIPE_XY)
-                step.x?.let { intent.putExtra(KaiAccessibilityService.EXTRA_X, it) }
-                step.y?.let { intent.putExtra(KaiAccessibilityService.EXTRA_Y, it) }
-                step.endX?.let { intent.putExtra(KaiAccessibilityService.EXTRA_END_X, it) }
-                step.endY?.let { intent.putExtra(KaiAccessibilityService.EXTRA_END_Y, it) }
-                intent.putExtra(KaiAccessibilityService.EXTRA_HOLD_MS, step.holdMs)
-            }
-            "back" -> {
-                intent.putExtra(KaiAccessibilityService.EXTRA_CMD, KaiAccessibilityService.CMD_BACK)
-            }
-            "home" -> {
-                intent.putExtra(KaiAccessibilityService.EXTRA_CMD, KaiAccessibilityService.CMD_HOME)
-            }
-            "recents" -> {
-                intent.putExtra(KaiAccessibilityService.EXTRA_CMD, KaiAccessibilityService.CMD_RECENTS)
-            }
-            "verify_state", "read_screen", "wait_for_text" -> {
-                intent.putExtra(KaiAccessibilityService.EXTRA_CMD, KaiAccessibilityService.CMD_DUMP)
-            }
-            else -> return
-        }
-
-        context.sendBroadcast(intent)
-    }
-
-    private fun inferPrimaryAppHint(prompt: String): String =
-        KaiScreenStateParser.inferAppHint(prompt)
-
-    private fun isLauncherPackage(packageName: String): Boolean {
-        val p = packageName.lowercase(Locale.getDefault())
-        return p.contains("launcher") || p.contains("home") || p.contains("pixel") || p.contains("trebuchet")
-    }
-
-    @Suppress("UNUSED_PARAMETER")
-    private fun postProcessPlan(
-        plan: KaiActionPlan,
-        currentScreenState: KaiScreenState,
-        appHint: String,
-        maxStepsPerChunk: Int,
-        priorProgress: String
-    ): KaiActionPlan {
-        val onLauncher = isLauncherPackage(currentScreenState.packageName)
-        val currentMatches = currentScreenState.likelyMatchesAppHint(appHint) && !onLauncher
-        val maxSteps = maxStepsPerChunk.coerceIn(1, 8)
-        val steps = plan.steps.filter { it.cmd.isNotBlank() }.toMutableList()
-
-        if (steps.isEmpty() && onLauncher && appHint.isNotBlank() && !currentMatches) {
-            return plan.copy(
-                goalComplete = false,
-                plannerGoalComplete = false,
-                summary = "Starting from launcher/home: opening target app first.",
-                steps = listOf(
-                    KaiActionStep(
-                        cmd = "open_app",
-                        text = appHint,
-                        note = "launcher_requires_open_app_first",
-                        completionBoundary = KaiGoalBoundary.APP_ENTRY,
-                        continuationKind = KaiContinuationKind.STAGE_CONTINUATION,
-                        allowsFinalCommit = false
-                    )
-                )
-            )
-        }
-
-        if (onLauncher && appHint.isNotBlank() && !currentMatches) {
-            val existingOpen = steps.firstOrNull { it.cmd == "open_app" }
-            val openFirst = existingOpen?.copy(
-                text = existingOpen.text.ifBlank { appHint },
-                note = existingOpen.note.ifBlank { "launcher_requires_open_app_first" },
-                completionBoundary = KaiGoalBoundary.APP_ENTRY,
-                continuationKind = KaiContinuationKind.STAGE_CONTINUATION,
-                allowsFinalCommit = false
-            ) ?: KaiActionStep(
-                cmd = "open_app",
-                text = appHint,
-                note = "launcher_requires_open_app_first",
-                completionBoundary = KaiGoalBoundary.APP_ENTRY,
-                continuationKind = KaiContinuationKind.STAGE_CONTINUATION,
-                allowsFinalCommit = false
-            )
-
-            val rebuilt = mutableListOf<KaiActionStep>()
-            rebuilt += openFirst
-            rebuilt += steps.filterNot { it.cmd == "open_app" }
-
-            return plan.copy(
-                goalComplete = false,
-                plannerGoalComplete = false,
-                summary = "Starting from launcher/home: open target app before semantic actions.",
-                steps = rebuilt.take(maxSteps)
-            )
-        }
-
-        val cleanedSteps = buildList {
-            var verifyRun = 0
-            steps.forEach { step ->
-                if (step.cmd in setOf("verify_state", "read_screen", "wait_for_text")) {
-                    verifyRun += 1
-                    if (verifyRun > 2) return@forEach
-                } else {
-                    verifyRun = 0
-                }
-                add(step)
-            }
-        }
-
-        return plan.copy(
-            steps = cleanedSteps.take(maxSteps),
-            goalComplete = false,
-            plannerGoalComplete = false
-        )
-    }
-
-    private fun parseActionPlan(raw: String): KaiActionPlan {
-        val clean = raw.trim()
-            .removePrefix("```json")
-            .removePrefix("```")
-            .removeSuffix("```")
-            .trim()
-
-        val jsonText = when {
-            clean.startsWith("{") && clean.endsWith("}") -> clean
-            clean.contains("{") && clean.contains("}") ->
-                clean.substring(clean.indexOf('{'), clean.lastIndexOf('}') + 1)
-            else -> throw IllegalArgumentException("Planner did not return valid JSON.")
-        }
-
-        val obj = JSONObject(jsonText)
-        val summary = obj.optString("summary").ifBlank { "Action plan generated." }
-        val goalComplete = obj.optBoolean("goalComplete", false)
-        val stepsJson = obj.optJSONArray("steps") ?: JSONArray()
-
-        val allowedCommands = setOf(
-            "open_app", "click_text", "long_press_text", "input_text",
-            "click_best_match", "focus_best_input", "input_into_best_field",
-            "press_primary_action", "open_best_list_item", "verify_state",
-            "scroll", "read_screen", "wait_for_text", "tap_xy", "long_press_xy",
-            "swipe_xy", "back", "home", "recents", "wait"
-        )
-
-        val steps = buildList {
-            for (i in 0 until stepsJson.length()) {
-                val item = stepsJson.optJSONObject(i) ?: continue
-                val cmd = item.optString("cmd").trim().lowercase(Locale.ROOT)
-                if (cmd.isBlank() || cmd !in allowedCommands) continue
-                add(
-                    KaiActionStep(
-                        cmd = cmd,
-                        text = item.optString("text").trim(),
-                        dir = item.optString("dir").trim(),
-                        times = item.optInt("times", 1).coerceIn(1, 10),
-                        waitMs = item.optLong("waitMs", 500L).coerceIn(80L, 12000L),
-                        x = item.optFloatOrNull("x"),
-                        y = item.optFloatOrNull("y"),
-                        endX = item.optFloatOrNull("endX"),
-                        endY = item.optFloatOrNull("endY"),
-                        holdMs = item.optLong("holdMs", 450L).coerceIn(80L, 8000L),
-                        timeoutMs = item.optLong("timeoutMs", 4000L).coerceIn(500L, 18000L),
-                        optional = item.optBoolean("optional", false),
-                        note = item.optString("note").trim(),
-                        selectorText = item.optString("selectorText").trim(),
-                        selectorHint = item.optString("selectorHint").trim(),
-                        selectorId = item.optString("selectorId").trim(),
-                        selectorRole = item.optString("selectorRole").trim(),
-                        expectedPackage = item.optString("expectedPackage").trim(),
-                        expectedTexts = item.optStringList("expectedTexts"),
-                        expectedScreenKind = item.optString("expectedScreenKind").trim(),
-                        strategy = item.optString("strategy").trim(),
-                        confidence = item.optDouble("confidence", 0.0).toFloat().coerceIn(0f, 1f),
-                        completionBoundary = when (KaiScreenStateParser.normalize(item.optString("completionBoundary"))) {
-                            "app_entry" -> KaiGoalBoundary.APP_ENTRY
-                            "surface_ready" -> KaiGoalBoundary.SURFACE_READY
-                            "entity_opened" -> KaiGoalBoundary.ENTITY_OPENED
-                            "input_ready" -> KaiGoalBoundary.INPUT_READY
-                            "content_committed" -> KaiGoalBoundary.CONTENT_COMMITTED
-                            "final_goal" -> KaiGoalBoundary.FINAL_GOAL
-                            else -> KaiGoalBoundary.UNKNOWN
-                        },
-                        continuationKind = when (KaiScreenStateParser.normalize(item.optString("continuationKind"))) {
-                            "stage_continuation" -> KaiContinuationKind.STAGE_CONTINUATION
-                            "recovery_continuation" -> KaiContinuationKind.RECOVERY_CONTINUATION
-                            "verification" -> KaiContinuationKind.VERIFICATION
-                            else -> KaiContinuationKind.NONE
-                        },
-                        allowsFinalCommit = item.optBoolean("allowsFinalCommit", false)
-                    )
-                )
-            }
-        }
-
-        return KaiActionPlan(
-            summary = summary,
-            steps = steps,
-            goalComplete = goalComplete,
-            plannerGoalComplete = goalComplete
-        )
-    }
-
-    private fun JSONObject.optFloatOrNull(name: String): Float? {
-        if (!has(name) || isNull(name)) return null
-        val value = optDouble(name, Double.NaN)
-        return if (value.isNaN()) null else value.toFloat()
-    }
-
-    private fun JSONObject.optStringList(name: String): List<String> {
-        if (!has(name) || isNull(name)) return emptyList()
-        val arr = optJSONArray(name) ?: return emptyList()
-        return buildList {
-            for (i in 0 until arr.length()) {
-                val item = arr.optString(i).trim()
-                if (item.isNotBlank()) add(item)
             }
         }
     }
