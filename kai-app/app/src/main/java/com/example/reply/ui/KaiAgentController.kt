@@ -44,20 +44,12 @@ data class KaiAgentSnapshot(
 
 object KaiAgentController {
     private const val TAG = "KaiAgentController"
-    private const val MIN_INSIGHT_GAP_MS = 2500L
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
     private var snapshot: KaiAgentSnapshot
         get() = KaiAgentSessionState.snapshot
         set(value) { KaiAgentSessionState.snapshot = value }
-
-    @Volatile private var continuousRunning = false
-    @Volatile private var insightBusy = false
-    @Volatile private var lastInsightAt = 0L
-    @Volatile private var silentInsightCallback: ((String) -> Unit)? = null
-
-    private var continuousJob: Job? = null
 
     fun getSnapshot(): KaiAgentSnapshot = snapshot
     fun getLatestObservation(): KaiObservation = KaiLiveObservationRuntime.bestObservation()
@@ -123,7 +115,7 @@ object KaiAgentController {
         snapshot = snapshot.copy(customPrompt = prompt.trim())
     }
 
-    fun isRunning(): Boolean = continuousRunning || snapshot.actionLoopActive
+    fun isRunning(): Boolean = KaiContinuousInsightLoop.isRunning() || snapshot.actionLoopActive
 
     fun startActionLoopSession(prompt: String) {
         snapshot = snapshot.copy(
@@ -135,16 +127,15 @@ object KaiAgentController {
     }
 
     fun finishActionLoopSession(message: String = "") {
+        val loopRunning = KaiContinuousInsightLoop.isRunning()
         snapshot = snapshot.copy(
             actionLoopActive = false,
             actionLoopPrompt = "",
-            statusText = if (continuousRunning) "Monitoring" else "Idle",
-            isRunning = continuousRunning,
+            statusText = if (loopRunning) "Monitoring" else "Idle",
+            isRunning = loopRunning,
             lastSuggestion = if (message.isNotBlank()) message else snapshot.lastSuggestion
         )
-        if (continuousRunning) {
-            KaiLiveObservationRuntime.startWatching(immediateDump = true)
-        }
+        KaiContinuousInsightLoop.resumeObservationIfRunning()
     }
 
     fun markActionLoopObserved(state: KaiScreenState) {
@@ -157,15 +148,15 @@ object KaiAgentController {
 
     fun resetTransientStateForNewRun() {
         KaiAgentSessionState.clearMemory()
-        insightBusy = false
-        lastInsightAt = 0L
+        KaiContinuousInsightLoop.resetInsightTimers()
+        val loopRunning = KaiContinuousInsightLoop.isRunning()
         snapshot = snapshot.copy(
             currentPackage = "",
             lastScreenPreview = "",
             lastSuggestion = "",
             memoryCount = 0,
-            isRunning = continuousRunning,
-            statusText = if (continuousRunning) "Monitoring" else "Idle",
+            isRunning = loopRunning,
+            statusText = if (loopRunning) "Monitoring" else "Idle",
             actionLoopActive = false,
             actionLoopPrompt = "",
             lastActionLoopFingerprint = "",
@@ -175,15 +166,7 @@ object KaiAgentController {
     }
 
     fun stopContinuousAnalysis() {
-        continuousRunning = false
-        continuousJob?.cancel()
-        continuousJob = null
-        insightBusy = false
-        KaiLiveObservationRuntime.stopWatching()
-        snapshot = snapshot.copy(
-            isRunning = snapshot.actionLoopActive,
-            statusText = if (snapshot.actionLoopActive) "Action loop active" else "Idle"
-        )
+        KaiContinuousInsightLoop.stop()
     }
 
     fun toggleContinuousAnalysis(
@@ -192,70 +175,15 @@ object KaiAgentController {
         onRequestDump: () -> Unit = {},
         onInsight: (String) -> Unit
     ): Boolean {
-        if (continuousRunning) {
-            stopContinuousAnalysis()
+        if (KaiContinuousInsightLoop.isRunning()) {
+            KaiContinuousInsightLoop.stop()
             return false
         }
 
         setGoal(userGoal)
         setCustomPrompt(customPrompt)
-        continuousRunning = true
-        silentInsightCallback = onInsight
-        snapshot = snapshot.copy(isRunning = true, statusText = "Monitoring")
-
-        KaiLiveObservationRuntime.startWatching(immediateDump = true)
-        runCatching { onRequestDump() }
-
-        continuousJob = scope.launch {
-            while (isActive && continuousRunning && !snapshot.actionLoopActive) {
-                maybeGenerateContinuousInsight()
-                delay(900L)
-            }
-        }
+        KaiContinuousInsightLoop.start(onInsight = onInsight, onRequestDump = onRequestDump)
         return true
-    }
-
-    private fun maybeGenerateContinuousInsight() {
-        if (!continuousRunning || insightBusy) return
-        val now = System.currentTimeMillis()
-        if (now - lastInsightAt < MIN_INSIGHT_GAP_MS) return
-
-        val memoryText = KaiAgentSessionState.recentObservations(5).joinToString("\n\n") { obs ->
-            "Package: ${obs.packageName.ifBlank { "Unknown" }}\nScreen:\n${obs.screenPreview.take(900)}"
-        }
-        if (memoryText.isBlank()) return
-
-        insightBusy = true
-        lastInsightAt = now
-
-        scope.launch {
-            try {
-                val reply = OpenAIClient.ask(
-                    userText = """
-                        You are Kai Agent inside Kai OS.
-                        Goal:
-                        ${snapshot.currentGoal.ifBlank { "Observe and suggest the next practical step." }}
-
-                        Recent observations:
-                        $memoryText
-
-                        Reply briefly in the user's language:
-                        1) What is happening now
-                        2) Safest next action
-                    """.trimIndent(),
-                    task = KaiTask.BRAIN
-                )
-                snapshot = snapshot.copy(
-                    lastSuggestion = reply,
-                    statusText = if (continuousRunning) "Monitoring" else "Idle"
-                )
-                withContext(Dispatchers.Main) { silentInsightCallback?.invoke(reply) }
-            } catch (e: Exception) {
-                Log.e(TAG, "Continuous insight failed: ${e.message}", e)
-            } finally {
-                insightBusy = false
-            }
-        }
     }
 
     suspend fun buildActionPlan(
