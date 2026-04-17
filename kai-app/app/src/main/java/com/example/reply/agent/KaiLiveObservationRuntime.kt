@@ -103,21 +103,13 @@ object KaiLiveObservationRuntime {
                         i.getStringExtra(KaiAccessibilityService.EXTRA_DUMP).orEmpty()
                     val pkg =
                         i.getStringExtra(KaiAccessibilityService.EXTRA_PACKAGE).orEmpty()
-                    val elements =
-                        parseElementsFromJson(
-                            i.getStringExtra(KaiAccessibilityService.EXTRA_ELEMENTS_JSON)
-                        )
-                    val screenKind =
-                        i.getStringExtra(KaiAccessibilityService.EXTRA_SCREEN_KIND).orEmpty()
-                    val confidence =
-                        i.getFloatExtra(KaiAccessibilityService.EXTRA_SEMANTIC_CONFIDENCE, 0f)
 
                     onDumpArrived(
                         pkg = pkg,
                         dump = dump,
-                        elements = elements,
-                        screenKind = screenKind,
-                        confidence = confidence
+                        elements = emptyList(),
+                        screenKind = "unknown",
+                        confidence = 0f
                     )
                 }
             }
