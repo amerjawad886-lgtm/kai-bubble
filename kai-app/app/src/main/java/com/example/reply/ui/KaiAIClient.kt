@@ -20,7 +20,7 @@ data class OpenAIHistoryItem(
     val text: String
 )
 
-object OpenAIClient {
+object KaiAIClient {
 
     private val JSON = "application/json; charset=utf-8".toMediaType()
 
@@ -151,36 +151,41 @@ object OpenAIClient {
         return clean.take(36).trim().ifBlank { "New Chat" }
     }
 
-    private fun buildMessages(userText: String, history: List<OpenAIHistoryItem>, task: KaiTask): JSONArray {
-        val detected = detectLikelyLanguage(userText)
-        val safeUserText = sanitizeMessageText(userText, MAX_USER_TEXT_LEN)
-        val arr = JSONArray().put(
-            JSONObject().put("role", "system").put("content", systemPrompt(detected, task))
-        )
+    // تم تعديل الهيكل ليطابق نظام مصفوفة محتويات جيميناي (Contents Array)
+    private fun buildGeminiPayload(userText: String, history: List<OpenAIHistoryItem>, task: KaiTask, systemInstruction: String): JSONObject {
+        val contents = JSONArray()
 
+        // إضافة المحادثات السابقة بالترتيب الصحيح المتناوب لجيميناي (user / model)
         history.takeLast(MAX_HISTORY_ITEMS).forEach { item ->
-            val role = item.role.trim().lowercase()
-            if (role !in listOf("system", "user", "assistant")) return@forEach
+            val rawRole = item.role.trim().lowercase()
+            val geminiRole = if (rawRole == "assistant") "model" else "user"
             val safeText = sanitizeMessageText(item.text, MAX_HISTORY_TEXT_LEN)
-            if (safeText.isBlank()) return@forEach
-            arr.put(JSONObject().put("role", role).put("content", safeText))
+            if (safeText.isNotBlank()) {
+                contents.put(JSONObject()
+                    .put("role", geminiRole)
+                    .put("parts", JSONArray().put(JSONObject().put("text", safeText))))
+            }
         }
 
-        arr.put(JSONObject().put("role", "user").put("content", safeUserText))
-        return arr
+        // إضافة الرسالة الأخيرة للمستخدم
+        val safeUserText = sanitizeMessageText(userText, MAX_USER_TEXT_LEN)
+        contents.put(JSONObject()
+            .put("role", "user")
+            .put("parts", JSONArray().put(JSONObject().put("text", safeUserText))))
+
+        // تكوين الـ Payload بالكامل مع الـ System Instruction والـ Temperature لقواعد جيميناي
+        return JSONObject()
+            .put("contents", contents)
+            .put("systemInstruction", JSONObject().put("parts", JSONArray().put(JSONObject().put("text", systemInstruction))))
+            .put("generationConfig", JSONObject().put("temperature", temperatureFor(task)))
     }
 
-    private fun parseReply(json: String): String {
+    private fun parseGeminiReply(json: String): String {
         val obj = JSONObject(json)
-        val choices = obj.getJSONArray("choices")
-        val msg = choices.getJSONObject(0).getJSONObject("message")
-        return msg.getString("content").trim()
-    }
-
-    private fun extractErrorMessage(text: String): String = try {
-        JSONObject(text).optJSONObject("error")?.optString("message")?.takeIf { it.isNotBlank() } ?: text
-    } catch (_: Exception) {
-        text
+        val candidates = obj.getJSONArray("candidates")
+        val content = candidates.getJSONObject(0).getJSONObject("content")
+        val parts = content.getJSONArray("parts")
+        return parts.getJSONObject(0).getString("text").trim()
     }
 
     @Throws(Exception::class)
@@ -189,30 +194,28 @@ object OpenAIClient {
         history: List<OpenAIHistoryItem> = emptyList(),
         task: KaiTask = KaiTask.BRAIN
     ): String {
-        val key = BuildConfig.OPENAI_API_KEY.trim()
+        val key = BuildConfig.GEMINI_API_KEY.trim() // تأكد لاحقاً من تسمية المتغير في الـ gradle
         if (key.isBlank()) {
-            return "OpenAI API key is missing. Put it in gradle.properties as OPENAI_API_KEY=..."
+            return "Gemini API key is missing. Put it in gradle.properties as GEMINI_API_KEY=..."
         }
 
         cancelActiveStream()
-        val payload = JSONObject()
-            .put("model", KaiModelRouter.forTask(task))
-            .put("messages", buildMessages(userText, history, task))
-            .put("temperature", temperatureFor(task))
-            .toString()
+        
+        val detected = detectLikelyLanguage(userText)
+        val sysPrompt = systemPrompt(detected, task)
+        val payload = buildGeminiPayload(userText, history, task, sysPrompt).toString()
 
+        // استخدام نموذج الـ Flash الاقتصادي والسريع لمهام الـ Agent المتكررة
         val req = Request.Builder()
-            .url("https://api.openai.com/v1/chat/completions")
-            .addHeader("Authorization", "Bearer $key")
+            .url("https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=$key")
             .addHeader("Content-Type", "application/json")
-            .addHeader("Accept", "application/json")
             .post(payload.toRequestBody(JSON))
             .build()
 
         client.newCall(req).execute().use { res ->
             val text = res.body?.string().orEmpty()
-            if (!res.isSuccessful) return "OpenAI error (${res.code}): ${extractErrorMessage(text)}"
-            return parseReply(text)
+            if (!res.isSuccessful) return "Gemini error (${res.code}): $text"
+            return parseGeminiReply(text)
         }
     }
 
@@ -238,27 +241,23 @@ object OpenAIClient {
         onError: (String) -> Unit,
         onFinalText: (String) -> Unit
     ) {
-        val key = BuildConfig.OPENAI_API_KEY.trim()
+        val key = BuildConfig.GEMINI_API_KEY.trim()
         if (key.isBlank()) {
-            onError("OpenAI API key is missing.")
+            onError("Gemini API key is missing.")
             return
         }
 
         cancelActiveStream()
         val mySeq = streamSeq.incrementAndGet()
 
-        val payload = JSONObject()
-            .put("model", KaiModelRouter.forTask(task))
-            .put("messages", buildMessages(userText, history, task))
-            .put("temperature", temperatureFor(task))
-            .put("stream", true)
-            .toString()
+        val detected = detectLikelyLanguage(userText)
+        val sysPrompt = systemPrompt(detected, task)
+        val payload = buildGeminiPayload(userText, history, task, sysPrompt).toString()
 
+        // استدعاء رابط البث المباشر (Server-Sent Events) الخاص بجوجل جيميناي
         val req = Request.Builder()
-            .url("https://api.openai.com/v1/chat/completions")
-            .addHeader("Authorization", "Bearer $key")
+            .url("https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:streamGenerateContent?key=$key")
             .addHeader("Content-Type", "application/json")
-            .addHeader("Accept", "text/event-stream")
             .post(payload.toRequestBody(JSON))
             .build()
 
@@ -307,7 +306,7 @@ object OpenAIClient {
                         val text = res.body?.string().orEmpty()
                         complete {
                             clearIfCurrent()
-                            onError("OpenAI error (${res.code}): ${extractErrorMessage(text)}")
+                            onError("Gemini error (${res.code}): $text")
                         }
                         return
                     }
@@ -323,39 +322,28 @@ object OpenAIClient {
 
                     val finalText = StringBuilder()
                     try {
-                        while (!source.exhausted()) {
-                            if (!stillCurrent()) return
-                            val line = source.readUtf8Line() ?: continue
-                            if (!line.startsWith("data:")) continue
+                        // قراءة البث المباشر المنسق من خوادم جيميناي كـ JSON Array متدفق
+                        val responseText = source.readUtf8()
+                        if (!stillCurrent()) return
 
-                            val data = line.removePrefix("data:").trim()
-                            if (data.isBlank()) continue
-                            if (data == "[DONE]") {
-                                complete {
-                                    clearIfCurrent()
-                                    val final = finalText.toString().trim().ifBlank { "…" }
-                                    onFinalText(final)
-                                    onDone()
+                        // جيميناي يرجع البث كـ JSON مجزأ أو كـ نصوص متتالية، نقوم بمعالجتها هنا:
+                        val cleanJson = responseText.trim()
+                        if (cleanJson.startsWith("[")) {
+                            val jsonArray = JSONArray(cleanJson)
+                            for (i in 0 until jsonArray.length()) {
+                                val chunk = jsonArray.getJSONObject(i)
+                                val candidate = chunk.getJSONArray("candidates").getJSONObject(0)
+                                val textDelta = candidate.getJSONObject("content").getJSONArray("parts").getJSONObject(0).getString("text")
+                                if (textDelta.isNotEmpty()) {
+                                    finalText.append(textDelta)
+                                    onDelta(textDelta)
                                 }
-                                return
                             }
-
-                            val delta = try {
-                                val obj = JSONObject(data)
-                                val choices = obj.optJSONArray("choices") ?: JSONArray()
-                                if (choices.length() == 0) "" else {
-                                    val c0 = choices.getJSONObject(0)
-                                    val d = c0.optJSONObject("delta")
-                                    d?.optString("content").orEmpty()
-                                }
-                            } catch (_: Exception) {
-                                ""
-                            }
-
-                            if (delta.isNotEmpty()) {
-                                if (!stillCurrent()) return
-                                finalText.append(delta)
-                                onDelta(delta)
+                        } else if (cleanJson.startsWith("{")) {
+                            val textDelta = parseGeminiReply(cleanJson)
+                            if (textDelta.isNotEmpty()) {
+                                finalText.append(textDelta)
+                                onDelta(textDelta)
                             }
                         }
 
