@@ -204,7 +204,7 @@ fun PresenceScreen(
 
                 state = PresenceState.THINKING
 
-                OpenAIClient.askStream(
+                KaiAIClient.askStream(
                     userText = heard,
                     history = emptyList(),
                     onDelta = {},

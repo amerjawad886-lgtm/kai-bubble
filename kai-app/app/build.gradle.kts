@@ -24,13 +24,14 @@ android {
             abiFilters += listOf("arm64-v8a")
         }
 
-        val openAiKey =
-            (project.findProperty("OPENAI_API_KEY") as String?)
+        // 🔥 تم مسح كل أثر لـ OpenAI وتوجيه المحرك لسحب مفتاح Gemini من النظام!
+        val geminiKey =
+            (project.findProperty("GEMINI_API_KEY") as String?)
                 ?.trim()
                 .orEmpty()
-                .ifBlank { System.getenv("OPENAI_API_KEY")?.trim().orEmpty() }
+                .ifBlank { System.getenv("GEMINI_API_KEY")?.trim().orEmpty() }
 
-        buildConfigField("String", "OPENAI_API_KEY", "\"$openAiKey\"")
+        buildConfigField("String", "GEMINI_API_KEY", "\"$geminiKey\"")
 
         val supabaseUrl =
             (project.findProperty("SUPABASE_URL") as String?)

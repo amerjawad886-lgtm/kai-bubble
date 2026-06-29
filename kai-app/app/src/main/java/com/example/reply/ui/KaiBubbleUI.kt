@@ -394,7 +394,7 @@ fun KaiBubbleUI(
 
     fun askKaiFromBubble(text: String) {
         statusText = "Thinking"
-        OpenAIClient.askStream(
+        KaiAIClient.askStream(
             userText = text,
             history = emptyList(),
             onDelta = {},

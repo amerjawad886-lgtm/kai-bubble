@@ -2,7 +2,7 @@ package com.example.reply.agent
 
 import android.util.Log
 import com.example.reply.ai.KaiTask
-import com.example.reply.ui.OpenAIClient
+import com.example.reply.ui.KaiAIClient
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -104,7 +104,7 @@ object KaiContinuousInsightLoop {
 
         scope.launch {
             try {
-                val reply = OpenAIClient.ask(
+                val reply = KaiAIClient.ask(
                     userText = """
                         You are Kai Agent inside Kai OS.
                         Goal:

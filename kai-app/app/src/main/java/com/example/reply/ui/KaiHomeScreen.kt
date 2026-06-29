@@ -241,7 +241,7 @@ fun KaiHomeScreen(
 
         var titleForRemote = currentSessionTitle
         if (role == MsgRole.USER && currentSessionTitle == "New Chat") {
-            titleForRemote = OpenAIClient.titleFromText(clean)
+            titleForRemote = KaiAIClient.titleFromText(clean)
             currentSessionTitle = titleForRemote
         }
 
@@ -497,7 +497,7 @@ fun KaiHomeScreen(
         speechSessionId += 1
         muteSpeakUntilMs = System.currentTimeMillis() + 420L
         KaiVoice.stop()
-        OpenAIClient.cancelActiveStream()
+        KaiAIClient.cancelActiveStream()
     }
 
     fun performSoftReset(notify: Boolean = true) {
@@ -568,7 +568,7 @@ fun KaiHomeScreen(
         streamingText = ""
         push(MsgRole.USER, clean)
 
-        OpenAIClient.askStream(
+        KaiAIClient.askStream(
             userText = clean,
             history = recentHistory(),
             onDelta = { delta ->

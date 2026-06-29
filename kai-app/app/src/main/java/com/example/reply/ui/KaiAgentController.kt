@@ -5,7 +5,7 @@ import android.util.Log
 import com.example.reply.ai.KaiTask
 import com.example.reply.ui.KaiBubbleManager
 import com.example.reply.ui.KaiVoice
-import com.example.reply.ui.OpenAIClient
+import com.example.reply.ui.KaiAIClient
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -313,7 +313,7 @@ object KaiAgentController {
             }
         """.trimIndent()
 
-        val raw = OpenAIClient.ask(plannerPrompt, task = KaiTask.ACTION_PLANNING)
+        val raw = KaiAIClient.ask(plannerPrompt, task = KaiTask.ACTION_PLANNING)
         val parsedPlan = KaiActionPlanParser.parseActionPlan(raw)
         val plan = parsedPlan.copy(
             steps = parsedPlan.steps.take(effectiveMaxSteps),
@@ -391,7 +391,7 @@ object KaiAgentController {
         val appContext = context.applicationContext
 
         runCatching { KaiVoice.resetTransientStateForNewRun() }
-        runCatching { OpenAIClient.resetTransientStateForNewRun() }
+        runCatching { KaiAIClient.resetTransientStateForNewRun() }
         resetTransientStateForNewRun()
         ensureRuntimeObservationBridge(appContext)
         KaiBubbleManager.releaseAllSuppression()

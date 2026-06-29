@@ -190,8 +190,8 @@ object KaiAIClient {
         history: List<OpenAIHistoryItem> = emptyList(),
         task: KaiTask = KaiTask.BRAIN
     ): String {
-        // 🔥 حل سحري ذكي: يفحص البيئة السحابية للـ Secrets أولاً، وإذا لم يجدها يعود للـ BuildConfig
-        val key = (System.getenv("GEMINI_API_KEY") ?: BuildConfig.GEMINI_API_KEY).trim()
+        // 🔥 حل سحري ذكي: يفحص البيئة السحابية للـ Secrets أولاً، وإذا لم يجدها يعود للـ BuildConfig المحدثة
+        val key = (System.getenv("GEMINI_API_KEY")?.takeIf { it.isNotBlank() } ?: BuildConfig.GEMINI_API_KEY).trim()
         if (key.isBlank()) {
             return "Gemini API key is missing. Secure it in GitHub Secrets or gradle.properties as GEMINI_API_KEY."
         }
@@ -238,8 +238,7 @@ object KaiAIClient {
         onError: (String) -> Unit,
         onFinalText: (String) -> Unit
     ) {
-        // 🔥 تم حمايتها هنا أيضاً لتتوافق مع الحقن السحابي
-        val key = (System.getenv("GEMINI_API_KEY") ?: BuildConfig.GEMINI_API_KEY).trim()
+        val key = (System.getenv("GEMINI_API_KEY")?.takeIf { it.isNotBlank() } ?: BuildConfig.GEMINI_API_KEY).trim()
         if (key.isBlank()) {
             onError("Gemini API key is missing.")
             return
