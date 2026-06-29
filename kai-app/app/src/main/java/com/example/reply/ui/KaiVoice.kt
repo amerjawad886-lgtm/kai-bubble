@@ -153,7 +153,7 @@ object KaiVoice {
         onDone: (() -> Unit)? = null,
         onError: ((String) -> Unit)? = null
     ) {
-        val key = BuildConfig.OPENAI_API_KEY.trim()
+        val key = (System.getenv("GEMINI_API_KEY") ?: "").trim()
         val spokenText = prepareSpeechText(text, tone)
 
         if (key.isBlank()) {
