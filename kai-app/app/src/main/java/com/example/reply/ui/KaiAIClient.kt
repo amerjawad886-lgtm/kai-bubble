@@ -151,11 +151,9 @@ object KaiAIClient {
         return clean.take(36).trim().ifBlank { "New Chat" }
     }
 
-    // تم تعديل الهيكل ليطابق نظام مصفوفة محتويات جيميناي (Contents Array)
     private fun buildGeminiPayload(userText: String, history: List<OpenAIHistoryItem>, task: KaiTask, systemInstruction: String): JSONObject {
         val contents = JSONArray()
 
-        // إضافة المحادثات السابقة بالترتيب الصحيح المتناوب لجيميناي (user / model)
         history.takeLast(MAX_HISTORY_ITEMS).forEach { item ->
             val rawRole = item.role.trim().lowercase()
             val geminiRole = if (rawRole == "assistant") "model" else "user"
@@ -167,13 +165,11 @@ object KaiAIClient {
             }
         }
 
-        // إضافة الرسالة الأخيرة للمستخدم
         val safeUserText = sanitizeMessageText(userText, MAX_USER_TEXT_LEN)
         contents.put(JSONObject()
             .put("role", "user")
             .put("parts", JSONArray().put(JSONObject().put("text", safeUserText))))
 
-        // تكوين الـ Payload بالكامل مع الـ System Instruction والـ Temperature لقواعد جيميناي
         return JSONObject()
             .put("contents", contents)
             .put("systemInstruction", JSONObject().put("parts", JSONArray().put(JSONObject().put("text", systemInstruction))))
@@ -194,9 +190,10 @@ object KaiAIClient {
         history: List<OpenAIHistoryItem> = emptyList(),
         task: KaiTask = KaiTask.BRAIN
     ): String {
-        val key = BuildConfig.GEMINI_API_KEY.trim() // تأكد لاحقاً من تسمية المتغير في الـ gradle
+        // 🔥 حل سحري ذكي: يفحص البيئة السحابية للـ Secrets أولاً، وإذا لم يجدها يعود للـ BuildConfig
+        val key = (System.getenv("GEMINI_API_KEY") ?: BuildConfig.GEMINI_API_KEY).trim()
         if (key.isBlank()) {
-            return "Gemini API key is missing. Put it in gradle.properties as GEMINI_API_KEY=..."
+            return "Gemini API key is missing. Secure it in GitHub Secrets or gradle.properties as GEMINI_API_KEY."
         }
 
         cancelActiveStream()
@@ -204,10 +201,10 @@ object KaiAIClient {
         val detected = detectLikelyLanguage(userText)
         val sysPrompt = systemPrompt(detected, task)
         val payload = buildGeminiPayload(userText, history, task, sysPrompt).toString()
+        val modelName = KaiModelRouter.forTask(task)
 
-        // استخدام نموذج الـ Flash الاقتصادي والسريع لمهام الـ Agent المتكررة
         val req = Request.Builder()
-            .url("https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=$key")
+            .url("https://generativelanguage.googleapis.com/v1beta/models/$modelName:generateContent?key=$key")
             .addHeader("Content-Type", "application/json")
             .post(payload.toRequestBody(JSON))
             .build()
@@ -241,7 +238,8 @@ object KaiAIClient {
         onError: (String) -> Unit,
         onFinalText: (String) -> Unit
     ) {
-        val key = BuildConfig.GEMINI_API_KEY.trim()
+        // 🔥 تم حمايتها هنا أيضاً لتتوافق مع الحقن السحابي
+        val key = (System.getenv("GEMINI_API_KEY") ?: BuildConfig.GEMINI_API_KEY).trim()
         if (key.isBlank()) {
             onError("Gemini API key is missing.")
             return
@@ -253,10 +251,10 @@ object KaiAIClient {
         val detected = detectLikelyLanguage(userText)
         val sysPrompt = systemPrompt(detected, task)
         val payload = buildGeminiPayload(userText, history, task, sysPrompt).toString()
+        val modelName = KaiModelRouter.forTask(task)
 
-        // استدعاء رابط البث المباشر (Server-Sent Events) الخاص بجوجل جيميناي
         val req = Request.Builder()
-            .url("https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:streamGenerateContent?key=$key")
+            .url("https://generativelanguage.googleapis.com/v1beta/models/$modelName:streamGenerateContent?key=$key")
             .addHeader("Content-Type", "application/json")
             .post(payload.toRequestBody(JSON))
             .build()
@@ -322,11 +320,9 @@ object KaiAIClient {
 
                     val finalText = StringBuilder()
                     try {
-                        // قراءة البث المباشر المنسق من خوادم جيميناي كـ JSON Array متدفق
                         val responseText = source.readUtf8()
                         if (!stillCurrent()) return
 
-                        // جيميناي يرجع البث كـ JSON مجزأ أو كـ نصوص متتالية، نقوم بمعالجتها هنا:
                         val cleanJson = responseText.trim()
                         if (cleanJson.startsWith("[")) {
                             val jsonArray = JSONArray(cleanJson)

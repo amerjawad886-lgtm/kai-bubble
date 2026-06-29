@@ -9,15 +9,15 @@ enum class KaiTask {
 }
 
 object KaiModelRouter {
-    private const val MODEL_BRAIN = "gpt-4o"
-    private const val MODEL_FAST = "gpt-4o-mini"
-    private const val MODEL_TTS = "gpt-4o-audio-preview"
+    // 🚀 تم التحويل بالكامل لعائلة جيميناي المتطورة لـ Kai OS
+    private const val MODEL_DEEP_REASONING = "gemini-1.5-pro"
+    private const val MODEL_FLASH_SPEED = "gemini-1.5-flash"
 
     fun forTask(task: KaiTask): String = when (task) {
-        KaiTask.BRAIN -> MODEL_BRAIN
-        KaiTask.ACTION_PLANNING -> MODEL_BRAIN
-        KaiTask.FAST_COMMAND -> MODEL_FAST
-        KaiTask.TTS -> MODEL_TTS
-        KaiTask.VISION_STATUS -> MODEL_FAST
+        KaiTask.BRAIN -> MODEL_DEEP_REASONING     // التفكير والتحليل العميق
+        KaiTask.ACTION_PLANNING -> MODEL_DEEP_REASONING // التخطيط للمهام البرمجية
+        KaiTask.FAST_COMMAND -> MODEL_FLASH_SPEED   // الأوامر السريعة اللحظية
+        KaiTask.TTS -> MODEL_FLASH_SPEED            // النصوص الصوتية
+        KaiTask.VISION_STATUS -> MODEL_FLASH_SPEED  // تشخيص حالة الشاشة
     }
 }
