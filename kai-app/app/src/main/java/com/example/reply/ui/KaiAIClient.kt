@@ -29,7 +29,9 @@ object KaiAIClient {
     private const val MAX_HISTORY_TEXT_LEN = 1200
     private const val MAX_USER_TEXT_LEN = 5000
 
-    private val client: OkHttpClient = OkHttpClient.Builder()
+    // Clean Gemini-only client. This client is intentionally isolated from Supabase, legacy OpenAI,
+    // and any external shared interceptors or global auth wiring.
+    private val geminiClient: OkHttpClient = OkHttpClient.Builder()
         .connectTimeout(10, TimeUnit.SECONDS)
         .readTimeout(60, TimeUnit.SECONDS)
         .writeTimeout(20, TimeUnit.SECONDS)
@@ -181,12 +183,11 @@ object KaiAIClient {
         return parts.getJSONObject(0).getString("text").trim()
     }
 
-    private fun buildGeminiUrl(modelName: String, endpointPath: String, key: String): HttpUrl {
+    private fun buildGeminiUrl(modelName: String, endpointPath: String): HttpUrl {
         return HttpUrl.Builder()
             .scheme("https")
             .host("generativelanguage.googleapis.com")
             .addPathSegments("v1beta/models/$modelName:$endpointPath")
-            .addQueryParameter("key", key)
             .build()
     }
 
@@ -210,14 +211,16 @@ object KaiAIClient {
         val modelName = KaiModelRouter.forTask(task)
 
         val req = Request.Builder()
-            .url(buildGeminiUrl(modelName, "generateContent", key))
+            .url(buildGeminiUrl(modelName, "generateContent"))
             .addHeader("Content-Type", "application/json")
             .addHeader("x-goog-api-key", key)
             .post(payload.toRequestBody(JSON))
             .build()
 
+        val finalReq = req.newBuilder().removeHeader("Authorization").build()
+
         try {
-            client.newCall(req).execute().use { res ->
+            geminiClient.newCall(finalReq).execute().use { res ->
                 val text = res.body?.string().orEmpty()
                 if (!res.isSuccessful) return "Gemini error (${res.code}): $text"
                 return parseGeminiReply(text)
@@ -265,13 +268,14 @@ object KaiAIClient {
         val modelName = KaiModelRouter.forTask(task)
 
         val req = Request.Builder()
-            .url(buildGeminiUrl(modelName, "streamGenerateContent", key))
+            .url(buildGeminiUrl(modelName, "streamGenerateContent"))
             .addHeader("Content-Type", "application/json")
             .addHeader("x-goog-api-key", key)
             .post(payload.toRequestBody(JSON))
             .build()
 
-        val call = client.newCall(req)
+        val finalReq = req.newBuilder().removeHeader("Authorization").build()
+        val call = geminiClient.newCall(finalReq)
         activeStreamCall = call
         activeStreamToken = mySeq
 
