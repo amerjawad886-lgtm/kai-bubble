@@ -8,6 +8,8 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    env:
+      GRADLE_BUILD_CACHE_ENABLED: false
 
     steps:
       - name: Checkout
@@ -25,11 +27,14 @@ jobs:
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
 
+      - name: Clean Gradle cache
+        run: rm -rf ~/.gradle/caches ~/.gradle/daemon
+
       - name: Build Debug APK
         working-directory: kai-app
         run: |
           chmod +x ./gradlew
-          ./gradlew assembleDebug
+          ./gradlew --no-build-cache assembleDebug
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
