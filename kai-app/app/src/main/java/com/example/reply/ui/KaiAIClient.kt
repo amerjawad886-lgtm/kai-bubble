@@ -15,7 +15,7 @@ import java.io.IOException
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 
-data class OpenAIHistoryItem(
+data class GeminiHistoryItem(
     val role: String,
     val text: String
 )
@@ -151,7 +151,7 @@ object KaiAIClient {
         return clean.take(36).trim().ifBlank { "New Chat" }
     }
 
-    private fun buildGeminiPayload(userText: String, history: List<OpenAIHistoryItem>, task: KaiTask, systemInstruction: String): JSONObject {
+    private fun buildGeminiPayload(userText: String, history: List<GeminiHistoryItem>, task: KaiTask, systemInstruction: String): JSONObject {
         val contents = JSONArray()
 
         history.takeLast(MAX_HISTORY_ITEMS).forEach { item ->
@@ -187,7 +187,7 @@ object KaiAIClient {
     @Throws(Exception::class)
     fun ask(
         userText: String,
-        history: List<OpenAIHistoryItem> = emptyList(),
+        history: List<GeminiHistoryItem> = emptyList(),
         task: KaiTask = KaiTask.BRAIN
     ): String {
         // 🔥 حل سحري ذكي: يفحص البيئة السحابية للـ Secrets أولاً، وإذا لم يجدها يعود للـ BuildConfig المحدثة
@@ -231,7 +231,7 @@ object KaiAIClient {
 
     fun askStream(
         userText: String,
-        history: List<OpenAIHistoryItem> = emptyList(),
+        history: List<GeminiHistoryItem> = emptyList(),
         task: KaiTask = KaiTask.BRAIN,
         onDelta: (String) -> Unit,
         onDone: () -> Unit,

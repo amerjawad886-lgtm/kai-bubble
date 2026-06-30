@@ -153,71 +153,25 @@ object KaiVoice {
         onDone: (() -> Unit)? = null,
         onError: ((String) -> Unit)? = null
     ) {
-        val key = (System.getenv("GEMINI_API_KEY") ?: "").trim()
+        // 🔥 TTS Service: Currently not configured after Gemini migration.
+        // To enable TTS, configure a dedicated TTS service (e.g., Google Cloud Text-to-Speech,
+        // Azure Cognitive Services, or restore OpenAI with separate OPENAI_API_KEY).
         val spokenText = prepareSpeechText(text, tone)
 
-        if (key.isBlank()) {
-            onError?.invoke("missing api key")
-            onDone?.invoke()
-            return
-        }
         if (spokenText.isBlank()) {
             onError?.invoke("empty speech input")
             onDone?.invoke()
             return
         }
 
-        val startPlayback = {
-            stop()
-            val mySeq = seq.incrementAndGet()
-
-            val payload = JSONObject()
-                .put("model", KaiModelRouter.forTask(KaiTask.TTS))
-                .put("voice", chooseVoice(tone))
-                .put("format", "mp3")
-                .put("input", spokenText)
-                .toString()
-
-            val request = Request.Builder()
-                .url("https://api.openai.com/v1/audio/speech")
-                .addHeader("Authorization", "Bearer $key")
-                .addHeader("Content-Type", "application/json")
-                .post(payload.toRequestBody(JSON))
-                .build()
-
-            val call = client.newCall(request)
-            activeCall = call
-
-            var sessionFinalized = false
-
-            fun stillCurrent(): Boolean = seq.get() == mySeq
-
-            fun finalizeSession(
-                error: String? = null,
-                invokeDone: Boolean = true
-            ) {
-                if (!stillCurrent() || sessionFinalized) return
-                sessionFinalized = true
-                clearPlaybackState(releasePlayer = true)
-                if (error != null) onError?.invoke(error)
-                if (invokeDone) onDone?.invoke()
-            }
-
-            call.enqueue(object : Callback {
-                override fun onFailure(call: Call, e: IOException) {
-                    if (!stillCurrent()) return
-                    main.post { finalizeSession(e.message ?: "network failure") }
-                }
-
-                override fun onResponse(call: Call, response: Response) {
-                    if (!stillCurrent()) {
-                        response.close()
-                        return
-                    }
-
-                    response.use { res ->
-                        if (!res.isSuccessful) {
-                            main.post { finalizeSession("http ${res.code}") }
+        // Graceful fallback: TTS is currently unavailable
+        // The app continues to function without audio output
+        main.post {
+            clearPlaybackState(releasePlayer = false)
+            onError?.invoke("TTS service not configured (Gemini migration in progress)")
+            onDone?.invoke()
+        }
+    }
                             return
                         }
 

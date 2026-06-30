@@ -223,9 +223,9 @@ fun KaiHomeScreen(
 
     fun remoteSessionId(): String = "session_$currentSessionId"
 
-    fun recentHistory(): List<OpenAIHistoryItem> =
+    fun recentHistory(): List<GeminiHistoryItem> =
         messages.takeLast(12).map {
-            OpenAIHistoryItem(
+            GeminiHistoryItem(
                 role = when (it.role) {
                     MsgRole.USER -> "user"
                     MsgRole.KAI -> "assistant"
@@ -559,7 +559,7 @@ fun KaiHomeScreen(
         }
     }
 
-    fun askOpenAIStream(text: String, speakAfter: Boolean) {
+    fun askGeminiStream(text: String, speakAfter: Boolean) {
         val clean = text.trim()
         if (clean.isBlank()) return
 
@@ -758,7 +758,7 @@ fun KaiHomeScreen(
                     sendKaiCmd(KaiAccessibilityService.CMD_CLICK_TEXT, text = cmd.target)
                     restartVoiceLoop(720L)
                 } else {
-                    askOpenAIStream(raw, speakAfter = true)
+                    askGeminiStream(raw, speakAfter = true)
                 }
             }
 
@@ -768,7 +768,7 @@ fun KaiHomeScreen(
                     sendKaiCmd(KaiAccessibilityService.CMD_TYPE, text = cmd.text)
                     restartVoiceLoop(720L)
                 } else {
-                    askOpenAIStream(raw, speakAfter = true)
+                    askGeminiStream(raw, speakAfter = true)
                 }
             }
 
@@ -789,7 +789,7 @@ fun KaiHomeScreen(
 
             is KaiParsedCommand.Ask -> {
                 if (cmd.text.isBlank()) restartVoiceLoop(520L)
-                else askOpenAIStream(cmd.text, speakAfter = true)
+                else askGeminiStream(cmd.text, speakAfter = true)
             }
         }
     }
@@ -1269,7 +1269,7 @@ fun KaiHomeScreen(
                             val q = chatInput.trim()
                             if (q.isNotBlank()) {
                                 chatInput = ""
-                                askOpenAIStream(q, speakAfter = false)
+                                askGeminiStream(q, speakAfter = false)
                             }
                         }
                     )
