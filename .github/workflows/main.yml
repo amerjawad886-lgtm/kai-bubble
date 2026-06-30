@@ -30,6 +30,14 @@ jobs:
       - name: Clean Gradle cache
         run: rm -rf ~/.gradle/caches ~/.gradle/daemon
 
+      - name: Create local.properties with Environment Secrets
+        run: |
+          cat > kai-app/local.properties <<'EOF'
+          GEMINI_API_KEY=${{ secrets.GEMINI_API_KEY }}
+          SUPABASE_URL=${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY=${{ secrets.SUPABASE_ANON_KEY }}
+          EOF
+
       - name: Build Debug APK
         working-directory: kai-app
         run: |
