@@ -1,3 +1,4 @@
+import org.gradle.api.artifacts.DependencyResolveDetails
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 import java.io.File
 
@@ -115,14 +116,14 @@ android {
         }
     }
 
-    lintOptions {
+    lint {
         checkReleaseBuilds = false
         abortOnError = false
     }
 
     configurations.all {
         resolutionStrategy {
-            eachDependency { details ->
+            eachDependency { details: DependencyResolveDetails ->
                 if (details.requested.group == "androidx.camera" || details.requested.group == "androidx.compose") {
                     // Keep versions, but we are effectively ignoring the metadata check failure
                 }
