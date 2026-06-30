@@ -29,32 +29,38 @@ android {
         }
 
         val geminiKey =
-            project.findProperty("GEMINI_API_KEY")
+            System.getenv("GEMINI_API_KEY")
                 ?.toString()
                 ?.trim()
                 .takeUnless { it.isNullOrBlank() }
-                ?: System.getenv("GEMINI_API_KEY")
+                ?: project.findProperty("GEMINI_API_KEY")
+                    ?.toString()
                     ?.trim()
+                    .takeUnless { it.isNullOrBlank() }
                     .orEmpty()
 
         buildConfigField("String", "GEMINI_API_KEY", "\"$geminiKey\"")
 
         val supabaseUrl =
-            project.findProperty("SUPABASE_URL")
+            System.getenv("SUPABASE_URL")
                 ?.toString()
                 ?.trim()
                 .takeUnless { it.isNullOrBlank() }
-                ?: System.getenv("SUPABASE_URL")
+                ?: project.findProperty("SUPABASE_URL")
+                    ?.toString()
                     ?.trim()
+                    .takeUnless { it.isNullOrBlank() }
                     .orEmpty()
 
         val supabaseAnonKey =
-            project.findProperty("SUPABASE_ANON_KEY")
+            System.getenv("SUPABASE_ANON_KEY")
                 ?.toString()
                 ?.trim()
                 .takeUnless { it.isNullOrBlank() }
-                ?: System.getenv("SUPABASE_ANON_KEY")
+                ?: project.findProperty("SUPABASE_ANON_KEY")
+                    ?.toString()
                     ?.trim()
+                    .takeUnless { it.isNullOrBlank() }
                     .orEmpty()
 
         buildConfigField("String", "SUPABASE_URL", "\"$supabaseUrl\"")
