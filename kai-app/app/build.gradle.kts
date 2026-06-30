@@ -8,13 +8,13 @@ plugins {
 }
 
 android {
-    compileSdk = 34
+    compileSdk = 36
     namespace = "com.example.reply"
 
     defaultConfig {
         applicationId = "com.example.reply"
         minSdk = libs.versions.minSdk.get().toInt()
-        targetSdk = 34
+        targetSdk = 36
         versionCode = 1
         versionName = "1.0"
         vectorDrawables.useSupportLibrary = true
