@@ -5,6 +5,7 @@ import com.example.reply.ai.KaiModelRouter
 import com.example.reply.ai.KaiTask
 import okhttp3.Call
 import okhttp3.ConnectionPool
+import okhttp3.HttpUrl
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -180,6 +181,15 @@ object KaiAIClient {
         return parts.getJSONObject(0).getString("text").trim()
     }
 
+    private fun buildGeminiUrl(modelName: String, endpointPath: String, key: String): HttpUrl {
+        return HttpUrl.Builder()
+            .scheme("https")
+            .host("generativelanguage.googleapis.com")
+            .addPathSegments("v1beta/models/$modelName:$endpointPath")
+            .addQueryParameter("key", key)
+            .build()
+    }
+
     @Throws(Exception::class)
     fun ask(
         userText: String,
@@ -200,8 +210,9 @@ object KaiAIClient {
         val modelName = KaiModelRouter.forTask(task)
 
         val req = Request.Builder()
-            .url("https://generativelanguage.googleapis.com/v1beta/models/$modelName:generateContent?key=$key")
+            .url(buildGeminiUrl(modelName, "generateContent", key))
             .addHeader("Content-Type", "application/json")
+            .addHeader("x-goog-api-key", key)
             .post(payload.toRequestBody(JSON))
             .build()
 
@@ -254,8 +265,9 @@ object KaiAIClient {
         val modelName = KaiModelRouter.forTask(task)
 
         val req = Request.Builder()
-            .url("https://generativelanguage.googleapis.com/v1beta/models/$modelName:streamGenerateContent?key=$key")
+            .url(buildGeminiUrl(modelName, "streamGenerateContent", key))
             .addHeader("Content-Type", "application/json")
+            .addHeader("x-goog-api-key", key)
             .post(payload.toRequestBody(JSON))
             .build()
 
