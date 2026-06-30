@@ -8,7 +8,7 @@ plugins {
 }
 
 android {
-    compileSdk = libs.versions.compileSdk.get().toInt()
+    compileSdk = 34
     namespace = "com.example.reply"
 
     defaultConfig {
