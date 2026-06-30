@@ -28,26 +28,34 @@ android {
             abiFilters += listOf("arm64-v8a")
         }
 
-        // 🔥 تم مسح كل أثر لـ OpenAI وتوجيه المحرك لسحب مفتاح Gemini من النظام!
         val geminiKey =
-            (project.findProperty("GEMINI_API_KEY") as String?)
+            project.findProperty("GEMINI_API_KEY")
+                ?.toString()
                 ?.trim()
-                .orEmpty()
-                .ifBlank { System.getenv("GEMINI_API_KEY")?.trim().orEmpty() }
+                .takeUnless { it.isNullOrBlank() }
+                ?: System.getenv("GEMINI_API_KEY")
+                    ?.trim()
+                    .orEmpty()
 
         buildConfigField("String", "GEMINI_API_KEY", "\"$geminiKey\"")
 
         val supabaseUrl =
-            (project.findProperty("SUPABASE_URL") as String?)
+            project.findProperty("SUPABASE_URL")
+                ?.toString()
                 ?.trim()
-                .orEmpty()
-                .ifBlank { System.getenv("SUPABASE_URL")?.trim().orEmpty() }
+                .takeUnless { it.isNullOrBlank() }
+                ?: System.getenv("SUPABASE_URL")
+                    ?.trim()
+                    .orEmpty()
 
         val supabaseAnonKey =
-            (project.findProperty("SUPABASE_ANON_KEY") as String?)
+            project.findProperty("SUPABASE_ANON_KEY")
+                ?.toString()
                 ?.trim()
-                .orEmpty()
-                .ifBlank { System.getenv("SUPABASE_ANON_KEY")?.trim().orEmpty() }
+                .takeUnless { it.isNullOrBlank() }
+                ?: System.getenv("SUPABASE_ANON_KEY")
+                    ?.trim()
+                    .orEmpty()
 
         buildConfigField("String", "SUPABASE_URL", "\"$supabaseUrl\"")
         buildConfigField("String", "SUPABASE_ANON_KEY", "\"$supabaseAnonKey\"")
