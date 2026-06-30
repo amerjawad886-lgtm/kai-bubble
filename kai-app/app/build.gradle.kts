@@ -1,4 +1,3 @@
-import org.gradle.api.Action
 import org.gradle.api.Task
 import org.gradle.api.artifacts.DependencyResolveDetails
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
@@ -124,11 +123,12 @@ android {
     }
 
     configurations.all {
-        resolutionStrategy.eachDependency(Action<DependencyResolveDetails> { details ->
-            if (details.requested.group == "androidx.camera" || details.requested.group == "androidx.compose") {
+        resolutionStrategy.eachDependency { details ->
+            val group = details.requested.group
+            if (group == "androidx.camera" || group == "androidx.compose") {
                 // Keep versions, but we are effectively ignoring the metadata check failure
             }
-        })
+        }
     }
 }
 
@@ -186,8 +186,8 @@ dependencies {
     debugImplementation(libs.androidx.compose.ui.test.manifest)
 }
 
-tasks.configureEach(Action<Task> { task ->
+tasks.configureEach { task ->
     if (task.name == "checkDebugAarMetadata") {
         task.enabled = false
     }
-})
+}
