@@ -1,5 +1,3 @@
-import org.gradle.api.Task
-import org.gradle.api.artifacts.DependencyResolveDetails
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 import java.io.File
 
@@ -121,15 +119,6 @@ android {
         checkReleaseBuilds = false
         abortOnError = false
     }
-
-    configurations.all {
-        resolutionStrategy.eachDependency { details ->
-            val group = details.requested.group
-            if (group == "androidx.camera" || group == "androidx.compose") {
-                // Keep versions, but we are effectively ignoring the metadata check failure
-            }
-        }
-    }
 }
 
 dependencies {
@@ -184,10 +173,4 @@ dependencies {
     androidTestImplementation(libs.androidx.compose.ui.test.junit4)
 
     debugImplementation(libs.androidx.compose.ui.test.manifest)
-}
-
-tasks.configureEach { task ->
-    if (task.name == "checkDebugAarMetadata") {
-        task.enabled = false
-    }
 }
