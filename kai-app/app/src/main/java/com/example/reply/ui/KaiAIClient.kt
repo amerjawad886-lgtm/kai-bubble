@@ -155,19 +155,15 @@ object KaiAIClient {
         val contents = JSONArray()
 
         history.takeLast(MAX_HISTORY_ITEMS).forEach { item ->
-            val rawRole = item.role.trim().lowercase()
-            val geminiRole = if (rawRole == "assistant") "model" else "user"
             val safeText = sanitizeMessageText(item.text, MAX_HISTORY_TEXT_LEN)
             if (safeText.isNotBlank()) {
                 contents.put(JSONObject()
-                    .put("role", geminiRole)
                     .put("parts", JSONArray().put(JSONObject().put("text", safeText))))
             }
         }
 
         val safeUserText = sanitizeMessageText(userText, MAX_USER_TEXT_LEN)
         contents.put(JSONObject()
-            .put("role", "user")
             .put("parts", JSONArray().put(JSONObject().put("text", safeUserText))))
 
         return JSONObject()
@@ -209,10 +205,15 @@ object KaiAIClient {
             .post(payload.toRequestBody(JSON))
             .build()
 
-        client.newCall(req).execute().use { res ->
-            val text = res.body?.string().orEmpty()
-            if (!res.isSuccessful) return "Gemini error (${res.code}): $text"
-            return parseGeminiReply(text)
+        try {
+            client.newCall(req).execute().use { res ->
+                val text = res.body?.string().orEmpty()
+                if (!res.isSuccessful) return "Gemini error (${res.code}): $text"
+                return parseGeminiReply(text)
+            }
+        } catch (e: Exception) {
+            val causeText = e.cause?.toString().orEmpty().let { if (it.isNotBlank()) " - $it" else "" }
+            return "Error: ${e.message ?: "Unknown"}$causeText"
         }
     }
 
@@ -285,9 +286,10 @@ object KaiAIClient {
                     }
                     return
                 }
+                val causeText = e.cause?.toString().orEmpty().let { if (it.isNotBlank()) " - $it" else "" }
                 complete {
                     clearIfCurrent()
-                    onError("Connection failed: ${e.message ?: "Unknown"}")
+                    onError("Error: ${e.message ?: "Unknown"}$causeText")
                 }
             }
 

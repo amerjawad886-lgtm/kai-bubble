@@ -592,7 +592,7 @@ fun KaiHomeScreen(
                     if (myId != requestId) return@launch
                     isThinking = false
                     streamingText = ""
-                    push(MsgRole.SYSTEM, "Connection error")
+                    push(MsgRole.SYSTEM, it)
                     restartVoiceLoop(520L)
                 }
             }
