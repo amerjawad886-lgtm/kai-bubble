@@ -1,5 +1,6 @@
 package com.example.reply.ui
 
+import android.util.Log
 import com.example.reply.BuildConfig
 import com.example.reply.ai.KaiModelRouter
 import com.example.reply.ai.KaiTask
@@ -38,6 +39,36 @@ object KaiAIClient {
         .callTimeout(70, TimeUnit.SECONDS)
         .retryOnConnectionFailure(true)
         .connectionPool(ConnectionPool(8, 5, TimeUnit.MINUTES))
+        .addInterceptor { chain ->
+            val original = chain.request()
+            val cleanKey = BuildConfig.GEMINI_API_KEY
+                .replace(Regex("(?i)^Bearer\\s+"), "")
+                .trim()
+
+            val request = original.newBuilder()
+                .removeHeader("Authorization")
+                .removeHeader("authorization")
+                .header("x-goog-api-key", cleanKey)
+                .build()
+
+            Log.d("GEMINI_DEBUG", "Outgoing Gemini Headers: ${request.headers}")
+            chain.proceed(request)
+        }
+        .addNetworkInterceptor { chain ->
+            val original = chain.request()
+            val cleanKey = BuildConfig.GEMINI_API_KEY
+                .replace(Regex("(?i)^Bearer\\s+"), "")
+                .trim()
+
+            val request = original.newBuilder()
+                .removeHeader("Authorization")
+                .removeHeader("authorization")
+                .header("x-goog-api-key", cleanKey)
+                .build()
+
+            Log.d("GEMINI_DEBUG", "Outgoing Gemini Network Headers: ${request.headers}")
+            chain.proceed(request)
+        }
         .build()
 
     private val streamSeq = AtomicInteger(0)
