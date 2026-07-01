@@ -180,6 +180,7 @@ dependencies {
     implementation(libs.okhttp3)
     implementation("org.json:json:20240303")
 
+    testImplementation(libs.junit)
     androidTestImplementation(libs.junit)
     androidTestImplementation(libs.androidx.test.core)
     androidTestImplementation(libs.androidx.test.runner)

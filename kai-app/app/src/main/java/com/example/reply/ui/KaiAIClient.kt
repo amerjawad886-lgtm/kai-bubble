@@ -180,7 +180,7 @@ object KaiAIClient {
 
         return JSONObject()
             .put("contents", contents)
-            .put("systemInstruction", JSONObject()
+            .put("system_instruction", JSONObject()
                 .put("parts", JSONArray().put(JSONObject().put("text", systemInstruction)))
             )
             .put("generationConfig", JSONObject().put("temperature", temperatureFor(task)))
@@ -235,6 +235,7 @@ object KaiAIClient {
         val finalReq = req.newBuilder().headers(okhttp3.Headers.headersOf("Content-Type", "application/json", "x-goog-api-key", key)).build()
 
         try {
+            Log.d("KAI_DEBUG", "FINAL_PAYLOAD: " + payload.toString())
             geminiClient.newCall(finalReq).execute().use { res ->
                 val text = res.body?.string().orEmpty()
                 if (!res.isSuccessful) return "Gemini error (${res.code}): $text"
