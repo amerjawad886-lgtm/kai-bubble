@@ -181,7 +181,6 @@ object KaiAIClient {
         return JSONObject()
             .put("contents", contents)
             .put("systemInstruction", JSONObject()
-                .put("role", "system")
                 .put("parts", JSONArray().put(JSONObject().put("text", systemInstruction)))
             )
             .put("generationConfig", JSONObject().put("temperature", temperatureFor(task)))
