@@ -183,7 +183,7 @@ object KaiAIClient {
             .put("system_instruction", JSONObject()
                 .put("parts", JSONArray().put(JSONObject().put("text", systemInstruction)))
             )
-            .put("generationConfig", JSONObject().put("temperature", temperatureFor(task)))
+            .put("generation_config", JSONObject().put("temperature", temperatureFor(task)))
     }
 
     private fun parseGeminiReply(json: String): String {
