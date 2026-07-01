@@ -40,24 +40,10 @@ object KaiAIClient {
         .retryOnConnectionFailure(true)
         .connectionPool(ConnectionPool(8, 5, TimeUnit.MINUTES))
         .addInterceptor { chain ->
-            val original = chain.request()
-            val request = original.newBuilder()
-                .removeHeader("Authorization")
-                .removeHeader("authorization")
+            val cleanRequest = chain.request().newBuilder()
+                .headers(okhttp3.Headers.headersOf("Content-Type", "application/json"))
                 .build()
-
-            Log.d("GEMINI_DEBUG", "Outgoing Gemini Headers: ${request.headers}")
-            chain.proceed(request)
-        }
-        .addNetworkInterceptor { chain ->
-            val original = chain.request()
-            val request = original.newBuilder()
-                .removeHeader("Authorization")
-                .removeHeader("authorization")
-                .build()
-
-            Log.d("GEMINI_DEBUG", "Outgoing Gemini Network Headers: ${request.headers}")
-            chain.proceed(request)
+            chain.proceed(cleanRequest)
         }
         .build()
 
@@ -243,7 +229,7 @@ object KaiAIClient {
             .post(payload.toRequestBody(JSON))
             .build()
 
-        val finalReq = req.newBuilder().removeHeader("Authorization").build()
+        val finalReq = req.newBuilder().headers(okhttp3.Headers.headersOf("Content-Type", "application/json")).build()
 
         try {
             geminiClient.newCall(finalReq).execute().use { res ->
@@ -301,7 +287,7 @@ object KaiAIClient {
             .post(payload.toRequestBody(JSON))
             .build()
 
-        val finalReq = req.newBuilder().removeHeader("Authorization").build()
+        val finalReq = req.newBuilder().headers(okhttp3.Headers.headersOf("Content-Type", "application/json")).build()
         val call = geminiClient.newCall(finalReq)
         activeStreamCall = call
         activeStreamToken = mySeq
