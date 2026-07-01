@@ -198,7 +198,6 @@ object KaiAIClient {
             .scheme("https")
             .host("generativelanguage.googleapis.com")
             .addPathSegments("v1/models/$modelName:$endpointPath")
-            .addQueryParameter("key", apiKey)
             .build()
     }
 
@@ -229,7 +228,7 @@ object KaiAIClient {
             .post(payload.toRequestBody(JSON))
             .build()
 
-        val finalReq = req.newBuilder().headers(okhttp3.Headers.headersOf("Content-Type", "application/json")).build()
+        val finalReq = req.newBuilder().headers(okhttp3.Headers.headersOf("Content-Type", "application/json", "x-goog-api-key", key)).build()
 
         try {
             geminiClient.newCall(finalReq).execute().use { res ->
@@ -287,7 +286,7 @@ object KaiAIClient {
             .post(payload.toRequestBody(JSON))
             .build()
 
-        val finalReq = req.newBuilder().headers(okhttp3.Headers.headersOf("Content-Type", "application/json")).build()
+        val finalReq = req.newBuilder().headers(okhttp3.Headers.headersOf("Content-Type", "application/json", "x-goog-api-key", key)).build()
         val call = geminiClient.newCall(finalReq)
         activeStreamCall = call
         activeStreamToken = mySeq
