@@ -41,14 +41,9 @@ object KaiAIClient {
         .connectionPool(ConnectionPool(8, 5, TimeUnit.MINUTES))
         .addInterceptor { chain ->
             val original = chain.request()
-            val cleanKey = BuildConfig.GEMINI_API_KEY
-                .replace(Regex("(?i)^Bearer\\s+"), "")
-                .trim()
-
             val request = original.newBuilder()
                 .removeHeader("Authorization")
                 .removeHeader("authorization")
-                .header("x-goog-api-key", cleanKey)
                 .build()
 
             Log.d("GEMINI_DEBUG", "Outgoing Gemini Headers: ${request.headers}")
@@ -56,14 +51,9 @@ object KaiAIClient {
         }
         .addNetworkInterceptor { chain ->
             val original = chain.request()
-            val cleanKey = BuildConfig.GEMINI_API_KEY
-                .replace(Regex("(?i)^Bearer\\s+"), "")
-                .trim()
-
             val request = original.newBuilder()
                 .removeHeader("Authorization")
                 .removeHeader("authorization")
-                .header("x-goog-api-key", cleanKey)
                 .build()
 
             Log.d("GEMINI_DEBUG", "Outgoing Gemini Network Headers: ${request.headers}")
@@ -214,11 +204,15 @@ object KaiAIClient {
         return parts.getJSONObject(0).getString("text").trim()
     }
 
-    private fun buildGeminiUrl(modelName: String, endpointPath: String): HttpUrl {
+    private fun normalizeGeminiApiKey(rawKey: String): String =
+        rawKey.replace(Regex("(?i)^Bearer\\s+"), "").trim()
+
+    private fun buildGeminiUrl(modelName: String, endpointPath: String, apiKey: String): HttpUrl {
         return HttpUrl.Builder()
             .scheme("https")
             .host("generativelanguage.googleapis.com")
             .addPathSegments("v1/models/$modelName:$endpointPath")
+            .addQueryParameter("key", apiKey)
             .build()
     }
 
@@ -229,7 +223,9 @@ object KaiAIClient {
         task: KaiTask = KaiTask.BRAIN
     ): String {
         // 🔥 حل سحري ذكي: يفحص البيئة السحابية للـ Secrets أولاً، وإذا لم يجدها يعود للـ BuildConfig المحدثة
-        val key = (System.getenv("GEMINI_API_KEY")?.takeIf { it.isNotBlank() } ?: BuildConfig.GEMINI_API_KEY).trim()
+        val key = normalizeGeminiApiKey(
+            System.getenv("GEMINI_API_KEY")?.takeIf { it.isNotBlank() } ?: BuildConfig.GEMINI_API_KEY
+        )
         if (key.isBlank()) {
             return "Gemini API key is missing. Secure it in GitHub Secrets or gradle.properties as GEMINI_API_KEY."
         }
@@ -242,9 +238,8 @@ object KaiAIClient {
         val modelName = KaiModelRouter.forTask(task)
 
         val req = Request.Builder()
-            .url(buildGeminiUrl(modelName, "generateContent"))
+            .url(buildGeminiUrl(modelName, "generateContent", key))
             .addHeader("Content-Type", "application/json")
-            .addHeader("x-goog-api-key", key)
             .post(payload.toRequestBody(JSON))
             .build()
 
@@ -284,7 +279,9 @@ object KaiAIClient {
         onError: (String) -> Unit,
         onFinalText: (String) -> Unit
     ) {
-        val key = (System.getenv("GEMINI_API_KEY")?.takeIf { it.isNotBlank() } ?: BuildConfig.GEMINI_API_KEY).trim()
+        val key = normalizeGeminiApiKey(
+            System.getenv("GEMINI_API_KEY")?.takeIf { it.isNotBlank() } ?: BuildConfig.GEMINI_API_KEY
+        )
         if (key.isBlank()) {
             onError("Gemini API key is missing.")
             return
@@ -299,9 +296,8 @@ object KaiAIClient {
         val modelName = KaiModelRouter.forTask(task)
 
         val req = Request.Builder()
-            .url(buildGeminiUrl(modelName, "streamGenerateContent"))
+            .url(buildGeminiUrl(modelName, "streamGenerateContent", key))
             .addHeader("Content-Type", "application/json")
-            .addHeader("x-goog-api-key", key)
             .post(payload.toRequestBody(JSON))
             .build()
 
