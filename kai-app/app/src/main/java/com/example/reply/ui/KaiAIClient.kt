@@ -218,7 +218,7 @@ object KaiAIClient {
         return HttpUrl.Builder()
             .scheme("https")
             .host("generativelanguage.googleapis.com")
-            .addPathSegments("v1beta/models/$modelName:$endpointPath")
+            .addPathSegments("v1/models/$modelName:$endpointPath")
             .build()
     }
 
