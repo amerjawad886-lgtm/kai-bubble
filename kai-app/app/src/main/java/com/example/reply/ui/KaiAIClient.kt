@@ -39,12 +39,6 @@ object KaiAIClient {
         .callTimeout(70, TimeUnit.SECONDS)
         .retryOnConnectionFailure(true)
         .connectionPool(ConnectionPool(8, 5, TimeUnit.MINUTES))
-        .addInterceptor { chain ->
-            val cleanRequest = chain.request().newBuilder()
-                .headers(okhttp3.Headers.headersOf("Content-Type", "application/json"))
-                .build()
-            chain.proceed(cleanRequest)
-        }
         .build()
 
     private val streamSeq = AtomicInteger(0)
