@@ -164,11 +164,20 @@ object KaiAIClient {
     private fun buildGeminiPayload(userText: String, history: List<GeminiHistoryItem>, task: KaiTask, systemInstruction: String): JSONObject {
         val contents = JSONArray()
 
+        if (systemInstruction.isNotBlank()) {
+            contents.put(JSONObject()
+                .put("role", "user")
+                .put("parts", JSONArray().put(JSONObject().put("text", "System Context/Instructions:\n$systemInstruction"))))
+            contents.put(JSONObject()
+                .put("role", "model")
+                .put("parts", JSONArray().put(JSONObject().put("text", "Understood. I will act according to these environment rules, identity guidelines, and language hints."))))
+        }
+
         history.takeLast(MAX_HISTORY_ITEMS).forEach { item ->
             val safeText = sanitizeMessageText(item.text, MAX_HISTORY_TEXT_LEN)
             if (safeText.isNotBlank()) {
                 contents.put(JSONObject()
-                    .put("role", "user")
+                    .put("role", item.role)
                     .put("parts", JSONArray().put(JSONObject().put("text", safeText))))
             }
         }
@@ -180,9 +189,6 @@ object KaiAIClient {
 
         return JSONObject()
             .put("contents", contents)
-            .put("system_instruction", JSONObject()
-                .put("parts", JSONArray().put(JSONObject().put("text", systemInstruction)))
-            )
             .put("generation_config", JSONObject().put("temperature", temperatureFor(task)))
     }
 
