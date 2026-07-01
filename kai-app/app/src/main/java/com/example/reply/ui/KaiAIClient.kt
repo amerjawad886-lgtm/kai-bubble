@@ -208,6 +208,7 @@ object KaiAIClient {
             .scheme("https")
             .host("generativelanguage.googleapis.com")
             .addPathSegments("v1/models/$modelName:$endpointPath")
+            .addQueryParameter("key", apiKey)
             .build()
     }
 
@@ -232,13 +233,12 @@ object KaiAIClient {
         val payload = buildGeminiPayload(userText, history, task, sysPrompt).toString()
         val modelName = KaiModelRouter.forTask(task)
 
-        val req = Request.Builder()
+        val finalReq = Request.Builder()
             .url(buildGeminiUrl(modelName, "generateContent", key))
             .addHeader("Content-Type", "application/json")
+            .addHeader("x-goog-api-key", key)
             .post(payload.toRequestBody(JSON))
             .build()
-
-        val finalReq = req.newBuilder().headers(okhttp3.Headers.headersOf("Content-Type", "application/json", "x-goog-api-key", key)).build()
 
         try {
             Log.d("KAI_DEBUG", "FINAL_PAYLOAD: " + payload.toString())
@@ -291,13 +291,12 @@ object KaiAIClient {
         val payload = buildGeminiPayload(userText, history, task, sysPrompt).toString()
         val modelName = KaiModelRouter.forTask(task)
 
-        val req = Request.Builder()
+        val finalReq = Request.Builder()
             .url(buildGeminiUrl(modelName, "streamGenerateContent", key))
             .addHeader("Content-Type", "application/json")
+            .addHeader("x-goog-api-key", key)
             .post(payload.toRequestBody(JSON))
             .build()
-
-        val finalReq = req.newBuilder().headers(okhttp3.Headers.headersOf("Content-Type", "application/json", "x-goog-api-key", key)).build()
         val call = geminiClient.newCall(finalReq)
         activeStreamCall = call
         activeStreamToken = mySeq
