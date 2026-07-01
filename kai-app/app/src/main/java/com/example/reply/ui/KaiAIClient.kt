@@ -30,7 +30,8 @@ object KaiAIClient {
     private const val MAX_HISTORY_TEXT_LEN = 1200
     private const val MAX_USER_TEXT_LEN = 5000
 
-    // Clean Gemini-only client. This client is intentionally isolated from Supabase, legacy OpenAI,
+    // Clean Gemini-only client.
+    // This client is intentionally isolated from Supabase, legacy OpenAI,
     // and any external shared interceptors or global auth wiring.
     private val geminiClient: OkHttpClient = OkHttpClient.Builder()
         .connectTimeout(10, TimeUnit.SECONDS)
@@ -113,18 +114,15 @@ object KaiAIClient {
 
         return """
             You are Kai, the companion presence inside Kai OS.
-
             Identity:
             - Calm, focused, warm, direct, quietly futuristic.
             - Never sound like customer support.
             - Never over-explain unless the user clearly asks.
             - Sound like one consistent companion, not a generic assistant.
-
             Environment:
             - You operate inside an Android AI assistant project called Kai OS.
             - The user may ask to open apps, click UI items, type into fields, scroll, read the screen, or build an action plan.
             - Treat app control requests as practical device intentions, not abstract conversation.
-
             Language:
             - Reply in the same language as the user's latest message.
             - Best current hint: $languageHint.
@@ -136,14 +134,12 @@ object KaiAIClient {
             App names:
             - Keep app names exactly as commonly written.
             - Never translate common app names into Arabic unless the user already did.
-
             Style:
             - Keep answers concise, natural, and voice-friendly.
             - Do not repeat greetings.
             - Do not keep repeating “How can I help you today?”
             - If a command is ambiguous, ask only one short clarifying question.
             - Prefer decisive, practical phrasing.
-
             Task behavior:
             $taskHint
         """.trimIndent()
@@ -230,7 +226,6 @@ object KaiAIClient {
         val finalReq = Request.Builder()
             .url(buildGeminiUrl(modelName, "generateContent", key))
             .addHeader("Content-Type", "application/json")
-            .addHeader("x-goog-api-key", key)
             .post(payload.toRequestBody(JSON))
             .build()
 
@@ -288,7 +283,6 @@ object KaiAIClient {
         val finalReq = Request.Builder()
             .url(buildGeminiUrl(modelName, "streamGenerateContent", key))
             .addHeader("Content-Type", "application/json")
-            .addHeader("x-goog-api-key", key)
             .post(payload.toRequestBody(JSON))
             .build()
         val call = geminiClient.newCall(finalReq)
